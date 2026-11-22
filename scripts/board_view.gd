@@ -266,23 +266,10 @@ func _draw_aim_guide() -> void:
 	var max_len := 340.0 * ShopData.aim_length_factor(striker_id)
 	if aim_assist:
 		max_len = 900.0
-	# First hit: coin or wall.
-	var hit_pos := from + dir * max_len
-	var hit_coin = null
-	var best_t := max_len
-	for p in pieces:
-		if not p["active"] or p["kind"] == "striker":
-			continue
-		var t := CarromPhysics.ray_circle(from, dir, p["pos"], p["r"] + CarromPhysics.STRIKER_R)
-		if t >= 0.0 and t < best_t:
-			best_t = t
-			hit_coin = p
-	# Wall hit.
-	var wall_t := _ray_wall(from, dir)
-	if wall_t >= 0.0 and wall_t < best_t:
-		best_t = wall_t
-		hit_coin = null
-	hit_pos = from + dir * best_t
+	var pred := predict_hit(from, dir, pieces, max_len)
+	var hit_pos: Vector2 = pred["hit_pos"]
+	var hit_coin = pred["hit_coin"]
+	var wall_t: float = pred["wall_t"]
 	# Dotted white guide line (Carrom Pool look: small dots, not dashes).
 	_draw_dotted(from, hit_pos, Color(1, 1, 1, 0.9))
 	# Bold solid orange arrow with arrowhead right at the striker.
@@ -300,14 +287,26 @@ func _draw_aim_guide() -> void:
 		var bounce_dir := dir - 2.0 * dir.dot(n) * n
 		var bounce_end := hit_pos + bounce_dir * 260.0
 		_draw_dashed(hit_pos, bounce_end, Color(1, 0.9, 0.4, 0.7), 2.5)
-	# Deflection preview (Full mode, or assist).
+	# Hit prediction (Full mode, or assist): the dotted striker path
+	# already ends at the impact point. Two more lines, both live as
+	# the aim angle changes:
+	# (2) the struck coin's outgoing direction — gold dashed, from the
+	# contact point along the line joining the striker centre to the
+	# coin centre at impact;
+	# (3) the striker's deflection — white dashed, along the tangent
+	# (perpendicular to that centre line). Head-on => no deflection:
+	# the striker stops dead and the coin takes it all.
 	if hit_coin != null and (aim_mode == "full" or aim_assist):
 		var coin_pos: Vector2 = hit_coin["pos"]
-		var defl := (coin_pos - from).normalized()
+		var coin_dir: Vector2 = pred["coin_dir"]
+		var contact := hit_pos + coin_dir * CarromPhysics.STRIKER_R
 		var defl_len := 130.0 if not aim_assist else 300.0
-		_draw_dashed(coin_pos, coin_pos + defl * defl_len, Color(1.0, 0.85, 0.3, 0.9), 2.5)
-		draw_circle(coin_pos, CarromPhysics.COIN_R + 4.0, Color(1, 1, 1, 0.0))
+		_draw_dashed(contact, contact + coin_dir * defl_len, Color(1.0, 0.85, 0.3, 0.9), 2.5)
 		draw_arc(coin_pos, CarromPhysics.COIN_R + 4.0, 0, TAU, 24, Color(1.0, 0.85, 0.3, 0.9), 2.0)
+		var sdir: Vector2 = pred["striker_dir"]
+		if sdir.length() > 0.05:
+			var tlen := 90.0 if not aim_assist else 200.0
+			_draw_dashed(hit_pos, hit_pos + sdir.normalized() * tlen, Color(1, 1, 1, 0.65), 2.5)
 	# Power hint: striker ring fills with power.
 	var power_col := Color(0.3, 0.9, 0.4).lerp(Color(0.95, 0.2, 0.15), aim_power)
 	draw_arc(from, CarromPhysics.STRIKER_R + 8.0, -PI / 2.0, -PI / 2.0 + TAU * aim_power, 32, power_col, 4.0)
@@ -334,7 +333,43 @@ func _draw_dotted(from: Vector2, to: Vector2, color: Color) -> void:
 		draw_circle(from + dir * d, 3.0, color)
 		d += 16.0
 
-func _ray_wall(from: Vector2, dir: Vector2) -> float:
+## Pure hit prediction for the aim guide (also used by the aim test):
+## given the striker centre and aim direction, find the first thing the
+## striker would hit (coin or wall) within max_len.
+## Returns {hit_pos, hit_coin, wall_t, coin_dir, striker_dir}:
+##   hit_pos     — striker centre at first contact (or from + dir*max_len)
+##   hit_coin    — the first coin hit, or null (wall / nothing)
+##   wall_t      — distance to the wall along dir, or -1
+##   coin_dir    — struck coin's outgoing direction: the line joining the
+##                 striker centre to the coin centre at impact
+##   striker_dir — striker's deflected direction (tangent to that line),
+##                 or ZERO when head-on (striker stops dead) / no coin hit.
+static func predict_hit(from: Vector2, dir: Vector2, pieces: Array, max_len: float) -> Dictionary:
+	dir = dir.normalized()
+	var best_t := max_len
+	var hit_coin = null
+	for p in pieces:
+		if not p["active"] or p["kind"] == "striker":
+			continue
+		var t := CarromPhysics.ray_circle(from, dir, p["pos"], p["r"] + CarromPhysics.STRIKER_R)
+		if t >= 0.0 and t < best_t:
+			best_t = t
+			hit_coin = p
+	var wall_t := _ray_wall(from, dir)
+	if wall_t >= 0.0 and wall_t < best_t:
+		best_t = wall_t
+		hit_coin = null
+	var hit_pos := from + dir * best_t
+	var coin_dir := Vector2.ZERO
+	var striker_dir := Vector2.ZERO
+	if hit_coin != null:
+		var coin_pos: Vector2 = hit_coin["pos"]
+		coin_dir = (coin_pos - hit_pos).normalized()
+		# Tangent component of the incoming direction.
+		striker_dir = dir - coin_dir * dir.dot(coin_dir)
+	return {"hit_pos": hit_pos, "hit_coin": hit_coin, "wall_t": wall_t, "coin_dir": coin_dir, "striker_dir": striker_dir}
+
+static func _ray_wall(from: Vector2, dir: Vector2) -> float:
 	var c := CarromPhysics.BOARD_CENTER
 	var half := CarromPhysics.SURFACE_HALF
 	var best := -1.0
@@ -356,7 +391,7 @@ func _ray_wall(from: Vector2, dir: Vector2) -> float:
 			best = t
 	return best
 
-func _wall_normal(pos: Vector2) -> Vector2:
+static func _wall_normal(pos: Vector2) -> Vector2:
 	var c := CarromPhysics.BOARD_CENTER
 	var half := CarromPhysics.SURFACE_HALF
 	var dx := minf(absf(pos.x - (c.x - half)), absf(pos.x - (c.x + half)))
