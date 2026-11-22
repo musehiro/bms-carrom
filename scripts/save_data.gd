@@ -32,6 +32,7 @@ var matches_played: int = 0
 var matches_won: int = 0
 var solo_wins: int = 0
 var online_wins: int = 0
+var tour_wins: int = 0 # v8: World Tour (advanced bot) wins — staked, like online
 var queens_covered: int = 0
 var owned_boards: Array = ["classic"]
 var owned_strikers: Array = ["classic"]
@@ -76,6 +77,7 @@ func load_save() -> void:
 	matches_won = int(_cfg.get_value("player", "matches_won", 0))
 	solo_wins = int(_cfg.get_value("player", "solo_wins", 0))
 	online_wins = int(_cfg.get_value("player", "online_wins", 0))
+	tour_wins = int(_cfg.get_value("player", "tour_wins", 0))
 	queens_covered = int(_cfg.get_value("player", "queens_covered", 0))
 	owned_boards = _cfg.get_value("shop", "owned_boards", ["classic"])
 	owned_strikers = _cfg.get_value("shop", "owned_strikers", ["classic"])
@@ -106,6 +108,7 @@ func save() -> void:
 	_cfg.set_value("player", "matches_won", matches_won)
 	_cfg.set_value("player", "solo_wins", solo_wins)
 	_cfg.set_value("player", "online_wins", online_wins)
+	_cfg.set_value("player", "tour_wins", tour_wins)
 	_cfg.set_value("player", "queens_covered", queens_covered)
 	_cfg.set_value("shop", "owned_boards", owned_boards)
 	_cfg.set_value("shop", "owned_strikers", owned_strikers)

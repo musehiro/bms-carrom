@@ -6,6 +6,7 @@ extends Control
 
 var _home: HomeScreen = null
 var _mode: ModeChoiceScreen = null
+var _tour: TourRosterScreen = null
 var _nearby: NearbyScreen = null
 var _match: MatchScreen = null
 var _auth: AuthScreen = null
@@ -112,6 +113,7 @@ func _clear() -> void:
 		c.queue_free()
 	_home = null
 	_mode = null
+	_tour = null
 	_nearby = null
 	_match = null
 	_auth = null
@@ -269,6 +271,7 @@ func _open_mode_choice() -> void:
 	_mode = ModeChoiceScreen.new()
 	add_child(_mode)
 	_mode.solo_chosen.connect(_show_solo_difficulty)
+	_mode.tour_chosen.connect(_show_tour_roster)
 	_mode.online_chosen.connect(_show_online_stake)
 	_mode.nearby_chosen.connect(_open_nearby)
 	_mode.go_back.connect(_show_home)
@@ -290,6 +293,33 @@ func _show_solo_difficulty() -> void:
 			pop["dim"].queue_free()
 			_start_solo(diff))
 	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
+
+## World Tour (v8): pick an advanced computer opponent from the
+## roster, choose your stake (the bot mirrors it — pot = 2x stake),
+## and play a staked match against the AI. The roster and the match
+## both say BOT — never a fake human (design doc 3.2).
+func _show_tour_roster() -> void:
+	_clear()
+	_tour = TourRosterScreen.new()
+	add_child(_tour)
+	_tour.bot_chosen.connect(func(bot: Dictionary) -> void:
+		_show_stake_picker(func(stake: int) -> void: _start_tour_match(bot, stake),
+			"World Tour — vs %s (BOT • Computer opponent, %s). Your stake is mirrored by the bot — winner takes the pot (both stakes)." % [String(bot.get("name", "?")), String(bot.get("country", "?"))],
+			"WORLD TOUR — CHOOSE YOUR STAKE"))
+	_tour.go_back.connect(_open_mode_choice)
+
+func _start_tour_match(bot: Dictionary, stake: int) -> void:
+	if not Stakes.valid_stake(stake, Save.coins):
+		_toast("Not enough coins for that stake — watch an ad to earn more.")
+		return
+	_clear()
+	_match = MatchScreen.new()
+	add_child(_match)
+	var opp_stake := WorldTour.mirror_stake(stake)
+	_match.setup("tour", int(bot.get("skill", 3)), 0, "%s (BOT)" % String(bot.get("name", "?")), int(bot.get("level", 1)), null, -1, stake, opp_stake, false)
+	_match.exit_to_home.connect(_show_home)
+	# Rematch goes back to the roster — pick a bot and a fresh stake.
+	_match.rematch_requested.connect(_show_tour_roster)
 
 ## Stake picker (v5): before an online match the player chooses ANY
 ## stake up to their balance — no fixed tables any more. Then (v6) they
@@ -318,9 +348,10 @@ func _show_online_players(stake: int) -> void:
 
 ## The same picker with a caller-chosen continuation + intro note, so
 ## the LAN flows (host/join) can reuse it with their own wording.
-func _show_stake_picker(on_confirm: Callable, note: String = "") -> void:
+## `title` overrides the picker's title (World Tour uses its own).
+func _show_stake_picker(on_confirm: Callable, note: String = "", title: String = "") -> void:
 	var parent: Control = _home if _home else self
-	var pop := UiKit.stake_picker(Save.coins, on_confirm, note)
+	var pop := UiKit.stake_picker(Save.coins, on_confirm, note, title) if title != "" else UiKit.stake_picker(Save.coins, on_confirm, note)
 	parent.add_child(pop["dim"])
 
 # ------------------------------------------------------- nearby (v6, LAN)
@@ -673,11 +704,19 @@ func _on_rewarded_earned(reason: String, simulated: bool) -> void:
 		# match screen counts the ad toward the 2 needed to double.
 		if _match:
 			_match.on_double_ad_watched()
+	elif reason == "solo_win":
+		# v8: a solo win's one ad — the ladder payment above already
+		# applied. Tell the win screen so its EARN button shows EARNED.
+		if _match:
+			_match.on_solo_win_ad_watched()
+		_toast("+%d coins from the ad!%s" % [ladder, sim] if ladder > 0 else "Daily ad limit reached — no more ad coins today.%s" % sim)
 	if _home:
 		_home.refresh()
 		Accounts.sync_to_cloud()
 
 func _on_rewarded_failed(reason: String) -> void:
+	if reason == "solo_win" and _match:
+		_match.on_solo_win_ad_failed()
 	_toast("Ad didn't load — no reward. Try again later.")
 
 # --------------------------------------------------------------------- toast
@@ -801,6 +840,24 @@ func _run_shot_mode() -> void:
 			_show_home()
 			_demo_invite_box_4p()
 			_capture_after(1.2)
+		"tour":
+			# v8: the World Tour roster — bot cards with BOT tags.
+			_show_tour_roster()
+			_capture_after(1.0)
+		"tourmatch":
+			# v8: a World Tour match in progress (Arjun, stake 100).
+			Save.coins = 1000
+			_start_tour_match(WorldTour.BOTS[0], 100)
+			_demo_shot_and_capture()
+		"tourwin":
+			# v8: a World Tour win (stake 100 + 100) — pot + DOUBLE offer.
+			Save.coins = 1000
+			_start_tour_match(WorldTour.BOTS[0], 100)
+			_demo_tour_win_and_capture()
+		"solowin":
+			# v8: a solo win — premium win screen with the WATCH AD offer.
+			_start_solo(1)
+			_demo_solo_win_and_capture()
 		_:
 			_show_home()
 			_capture_after(1.5)
@@ -821,6 +878,44 @@ func _demo_win_and_capture() -> void:
 		_match.mode = "online"
 		_match.your_stake = 100
 		_match.opp_stake = 100
+		_match.rules_state["over"] = true
+		_match.rules_state["winner"] = 0
+		_match._show_result()
+		await get_tree().create_timer(0.8).timeout
+	_capture()
+
+func _demo_solo_win_and_capture() -> void:
+	# Wait for the match to be live, then force a solo win so the
+	# premium win screen (practice win + WATCH AD offer) shows.
+	var waited := 0.0
+	while waited < 9.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+		if _match == null:
+			_capture()
+			return
+		if _match.phase == "place":
+			break
+	if _match and _match.phase == "place":
+		_match.rules_state["over"] = true
+		_match.rules_state["winner"] = 0
+		_match._show_result()
+		await get_tree().create_timer(0.8).timeout
+	_capture()
+
+func _demo_tour_win_and_capture() -> void:
+	# The tour match is already running (mode "tour", stakes 100 + 100
+	# locked at start) — force the win so the pot + DOUBLE offer show.
+	var waited := 0.0
+	while waited < 9.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+		if _match == null:
+			_capture()
+			return
+		if _match.phase == "place":
+			break
+	if _match and _match.phase == "place":
 		_match.rules_state["over"] = true
 		_match.rules_state["winner"] = 0
 		_match._show_result()

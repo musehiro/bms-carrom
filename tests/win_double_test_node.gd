@@ -76,6 +76,17 @@ func _find_button(root: Node, prefix: String) -> Button:
 			return found
 	return null
 
+## Like _find_label, but matches a label CONTAINING the text (the loss
+## screen joins several lines into one label).
+func _find_label_containing(root: Node, text: String) -> Label:
+	for n in root.get_children():
+		if n is Label and (n as Label).text.contains(text):
+			return n
+		var found := _find_label_containing(n, text)
+		if found:
+			return found
+	return null
+
 ## Force an online win on a fresh solo match (stakes your/opp).
 func _force_online_win(your_stake: int, opp_stake: int) -> void:
 	_main._start_solo(1)
@@ -103,6 +114,15 @@ func _run() -> void:
 	if _main._home == null:
 		_finish()
 		return
+	# Reset the ad ladder for this run so the ladder math is
+	# deterministic no matter how many times the suite ran today.
+	var ad_count0 := Save.ad_count_today
+	var ad_coins0 := Save.ad_coins_today
+	var ad_date0 := Save.ad_date
+	Save.ad_count_today = 0
+	Save.ad_coins_today = 0
+	Save.ad_date = Save.today_str()
+	Save.save()
 	var coins0 := Save.coins
 	# --- Win 1: pot 200 held, then 2 double ads -> 400 + ladder ---
 	await _force_online_win(100, 100)
@@ -159,10 +179,105 @@ func _run() -> void:
 		home_btn.pressed.emit()
 		await _frames(2)
 	_check("win3: exit credits the base pot (never lost)", Save.coins == coins2 + 100, "coins=%d expected=%d" % [Save.coins, coins2 + 100])
+	# --- Win 4 (v8 tour): a real World Tour match — stake locked at
+	# start, pot held on the win, DOUBLE to 400 with 2 ads + ladder.
+	var coins3 := Save.coins
+	var tour0 := Save.tour_wins
+	Save.interstitial_counter = 0
+	_main._start_tour_match(WorldTour.BOTS[0], 100)
+	await _wait_for_match()
+	var m4 = _main._match
+	_check("tour: match exists", m4 != null)
+	if m4 == null:
+		_finish()
+		return
+	_check("tour: stake locked at match start", Save.coins == coins3 - 100, "coins=%d expected=%d" % [Save.coins, coins3 - 100])
+	_check("tour: mode is tour, opponent is a BOT", m4.mode == "tour" and String(m4.opponent_name).contains("(BOT)"), m4.opponent_name)
+	m4.rules_state["over"] = true
+	m4.rules_state["winner"] = 0
+	m4._show_result()
+	await _frames(3)
+	_check("tour: pot held (200)", m4._pot_pending == 200 and not m4._pot_credited and Save.coins == coins3 - 100)
+	_check("tour: COLLECT shows ◉ 200", _find_label(_main, "◉ 200") != null)
+	_check("tour: DOUBLE shows ◉ 400", _find_label(_main, "DOUBLE TO ◉ 400") != null)
+	_check("tour: win screen names the bot", _find_label(_main, "World Tour — you beat Arjun Mehta (BOT)") != null)
+	_check("tour: tour_wins incremented", Save.tour_wins == tour0 + 1)
+	var ladder3 := Save.ad_next_reward()
+	_ad_earned = 0
+	Ads.show_rewarded("double_win")
+	await _wait_for_ads(1)
+	_check("tour: first double ad earned", _ad_earned == 1 and m4._double_ads == 1)
+	_check("tour: pot still held after 1 ad", not m4._pot_credited and m4._pot_pending == 200)
+	var ladder4 := Save.ad_next_reward()
+	Ads.show_rewarded("double_win")
+	await _wait_for_ads(1)
+	var expected4 := coins3 - 100 + ladder3 + ladder4 + 400
+	_check("tour: doubled pot + ladder credited", Save.coins == expected4, "coins=%d expected=%d" % [Save.coins, expected4])
+	_check("tour: collect disabled after double", m4._collect_button != null and m4._collect_button.disabled)
+	# --- Loss (v8 tour): losing costs the stake; the loss screen names the bot.
+	var coins4 := Save.coins
+	var tour_wins_before := Save.tour_wins
+	Save.interstitial_counter = 0
+	_main._start_tour_match(WorldTour.BOTS[0], 100)
+	await _wait_for_match()
+	var m5 = _main._match
+	_check("tour loss: match exists", m5 != null)
+	if m5 == null:
+		_finish()
+		return
+	_check("tour loss: stake locked at match start", Save.coins == coins4 - 100)
+	m5.rules_state["over"] = true
+	m5.rules_state["winner"] = 1
+	m5._show_result()
+	await _frames(3)
+	_check("tour loss: stake stays lost (no refund)", Save.coins == coins4 - 100, "coins=%d expected=%d" % [Save.coins, coins4 - 100])
+	_check("tour loss: loss screen names the bot", _find_label_containing(_main, "World Tour loss — Arjun Mehta (BOT) wins your stake ◉ 100") != null)
+	_check("tour loss: tour_wins unchanged", Save.tour_wins == tour_wins_before)
+	# --- Solo win (v8): zero coins without an ad; WATCH 1 AD earns the ladder.
+	var coins5 := Save.coins
+	var solo0 := Save.solo_wins
+	Save.interstitial_counter = 0
+	_main._start_solo(1)
+	await _wait_for_match()
+	var m6 = _main._match
+	_check("solo: match exists", m6 != null)
+	if m6 == null:
+		_finish()
+		return
+	m6.rules_state["over"] = true
+	m6.rules_state["winner"] = 0
+	m6._show_result()
+	await _frames(3)
+	_check("solo: win pays zero coins without an ad", Save.coins == coins5, "coins=%d expected=%d" % [Save.coins, coins5])
+	_check("solo: solo_wins incremented", Save.solo_wins == solo0 + 1)
+	_check("solo: practice win note shown", _find_label(_main, "Practice win — no coins earned.") != null)
+	var ladder5 := Save.ad_next_reward()
+	_check("solo: WATCH 1 AD offer shown", _find_label(_main, "WATCH 1 AD") != null)
+	_check("solo: EARN shows the ladder amount", _find_label(_main, "EARN ◉ %d" % ladder5) != null)
+	_check("solo: earn button exists", m6._solo_earn_button != null)
+	_ad_earned = 0
+	if m6._solo_earn_button != null:
+		m6._solo_earn_button.pressed.emit()
+	await _wait_for_ads(1)
+	_check("solo: ad earned the ladder amount", Save.coins == coins5 + ladder5, "coins=%d expected=%d" % [Save.coins, coins5 + ladder5])
+	_check("solo: earn button disabled after the ad", m6._solo_earn_button != null and m6._solo_earn_button.disabled)
 	# Restore the sandbox save so later runs start clean.
 	Save.coins = coins0
+	Save.ad_count_today = ad_count0
+	Save.ad_coins_today = ad_coins0
+	Save.ad_date = ad_date0
 	Save.save()
 	_finish()
+
+## Wait until the current match exists and is in the "place" phase
+## (up to 4 s — the AI may shoot first, the forced result still works).
+func _wait_for_match() -> void:
+	var waited := 0.0
+	while waited < 4.0:
+		await get_tree().create_timer(0.25).timeout
+		waited += 0.25
+		if _main._match != null and _main._match.phase == "place":
+			return
 
 func _wait_for_ads(count: int) -> void:
 	var target := _ad_earned + count

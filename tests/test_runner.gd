@@ -30,6 +30,14 @@ func _initialize() -> void:
 	_test_ai_break_shot()
 	_test_ai_midgame_shot()
 	_test_ai_easy_misses_sometimes()
+	_test_world_tour_roster()
+	_test_world_tour_stakes()
+	_test_ai_advanced_errors()
+	_test_ai_advanced_accuracy()
+	_test_ai_queen_cover()
+	_test_ai_defensive_no_queen_chase()
+	_test_ai_bank_shot()
+	_test_ai_striker_safety()
 	_test_shop_stats_capped()
 	_test_ray_circle()
 	_test_full_break_simulation()
@@ -268,6 +276,328 @@ func _test_ai_easy_misses_sometimes() -> void:
 	for d in dirs:
 		spread = maxf(spread, absf(float(d) - float(dirs[0])))
 	_check("ai: easy has aim spread (error applied)", spread > 0.02, str(spread))
+
+# ------------------------------------------------------- v8: World Tour
+## Helpers: first piece a ray would hit, and whether a shot is a bank.
+func _ray_first_piece(pieces: Array, from: Vector2, dir: Vector2) -> Dictionary:
+	# First active piece the ray from `from` along `dir` would hit
+	# (same clearance as CarromPhysics.path_clear), or {}.
+	var best_t := -1.0
+	var best: Dictionary = {}
+	for p in pieces:
+		if not bool(p["active"]) or String(p["kind"]) == "striker":
+			continue
+		var t := CarromPhysics.ray_circle(from, dir, p["pos"], float(p["r"]) + CarromPhysics.COIN_R + 1.0)
+		if t >= 0.0 and (best_t < 0.0 or t < best_t):
+			best_t = t
+			best = p
+	return best
+
+func _ray_target_kind(pieces: Array, from: Vector2, dir: Vector2) -> String:
+	var p := _ray_first_piece(pieces, from, dir)
+	return String(p.get("kind", "")) if not p.is_empty() else ""
+
+func _shot_hits_wall_first(from: Vector2, dir: Vector2, target: Vector2) -> bool:
+	# True when the ray from `from` along `dir` reaches a cushion line
+	# before it would reach `target` — i.e. the shot is a bank, not a
+	# direct hit. Cushion lines are offset by the striker radius, where
+	# its centre actually turns (same lines as CarromAI.bank_shot_for).
+	var c := CarromPhysics.BOARD_CENTER
+	var half := CarromPhysics.SURFACE_HALF
+	var r := CarromPhysics.STRIKER_R
+	var wall_t := -1.0
+	var walls := [
+		{"v": true, "line": c.x - half + r},
+		{"v": true, "line": c.x + half - r},
+		{"v": false, "line": c.y - half + r},
+		{"v": false, "line": c.y + half - r},
+	]
+	for wall in walls:
+		var t := -1.0
+		var hit := Vector2.ZERO
+		if bool(wall["v"]):
+			if absf(dir.x) < 0.001:
+				continue
+			t = (float(wall["line"]) - from.x) / dir.x
+			hit = from + dir * t
+			if hit.y < c.y - half + r or hit.y > c.y + half - r:
+				continue
+		else:
+			if absf(dir.y) < 0.001:
+				continue
+			t = (float(wall["line"]) - from.y) / dir.y
+			hit = from + dir * t
+			if hit.x < c.x - half + r or hit.x > c.x + half - r:
+				continue
+		if t > 0.0 and (wall_t < 0.0 or t < wall_t):
+			wall_t = t
+	if wall_t < 0.0:
+		return false
+	var to_target := target - from
+	var proj := to_target.dot(dir)
+	if proj <= 0.0:
+		return true # target is behind the shot: the wall comes first
+	var perp := (to_target - dir * proj).length()
+	if perp < 30.0:
+		return wall_t < proj
+	return true # the ray never reaches the target: the wall comes first
+
+func _tour_pieces(spec: Array) -> Array:
+	# spec: [[kind, pos], ...] — plus the striker on the bottom baseline.
+	var out: Array = []
+	for s in spec:
+		out.append(CarromPhysics.make_piece(String(s[0]), s[1]))
+	out.append(CarromPhysics.make_piece("striker", Vector2(CarromPhysics.BOARD_CENTER.x, CarromPhysics.baseline_y(0))))
+	return out
+
+func _bank_fence_pieces() -> Array:
+	# One own coin whose direct paths from every baseline position are
+	# blocked by a fence of white coins — the only way to hit it is a
+	# one-cushion bank. Target (300,550); fence at y=405, x=190..505.
+	# The fence sits far above the bank legs (the left-wall bank runs
+	# from (71,430) down to the target), so the bank stays open.
+	var spec: Array = [["black", Vector2(300, 550)]]
+	for x in [190, 235, 280, 325, 370, 415, 460, 505]:
+		spec.append(["white", Vector2(x, 405)])
+	return _tour_pieces(spec)
+
+func _collect_label_texts(node: Node, out: Array) -> void:
+	for n in node.get_children():
+		if n is Label:
+			out.append((n as Label).text)
+		_collect_label_texts(n, out)
+
+func _test_world_tour_roster() -> void:
+	_check("tour: 5 bots on the roster", WorldTour.BOTS.size() == 5, str(WorldTour.BOTS.size()))
+	var ids := {}
+	var names := {}
+	var all_ok := true
+	var prev_level := 0
+	for b in WorldTour.BOTS:
+		var bid := String(b.get("id", ""))
+		var nm := String(b.get("name", ""))
+		if bid == "" or nm == "" or ids.has(bid) or names.has(nm):
+			all_ok = false
+		ids[bid] = true
+		names[nm] = true
+		if String(b.get("country", "")) == "" or String(b.get("blurb", "")) == "":
+			all_ok = false
+		if int(b.get("skill", 0)) < 3 or int(b.get("skill", 0)) > 5:
+			all_ok = false
+		if int(b.get("level", 0)) <= prev_level:
+			all_ok = false
+		prev_level = int(b.get("level", 0))
+		if not (b.get("color") is Color):
+			all_ok = false
+	_check("tour: unique ids + names, country + blurb set, skill 3-5, levels rising, avatar colour set", all_ok)
+	_check("tour: skill names", WorldTour.skill_name(3) == "ADVANCED" and WorldTour.skill_name(4) == "EXPERT" and WorldTour.skill_name(5) == "MASTER")
+	_check("tour: bot_by_id finds Arjun (India)", String(WorldTour.bot_by_id("arjun").get("name", "")) == "Arjun Mehta" and String(WorldTour.bot_by_id("arjun").get("country", "")) == "India")
+	_check("tour: bot_by_id finds Emma the Master (Lv 26)", int(WorldTour.bot_by_id("emma").get("skill", 0)) == 5 and int(WorldTour.bot_by_id("emma").get("level", 0)) == 26)
+	_check("tour: bot_by_id unknown returns empty", WorldTour.bot_by_id("nobody").is_empty())
+	_check("tour: every bot above Hard (skill > 2)",
+		int(WorldTour.bot_by_id("arjun").get("skill", 0)) > 2 and int(WorldTour.bot_by_id("kasun").get("skill", 0)) > 2 and int(WorldTour.bot_by_id("sarah").get("skill", 0)) > 2 and int(WorldTour.bot_by_id("david").get("skill", 0)) > 2 and int(WorldTour.bot_by_id("emma").get("skill", 0)) > 2)
+	# Honest labelling (hard rule, design doc 3.2): the roster screen
+	# itself must say BOT / COMPUTER and never claim a real player.
+	# Note: in -s mode the tree never iterates, so _ready would not fire
+	# after add_child before quit() — build the screen by calling
+	# _ready() directly (the same code the live screen runs).
+	var scr := TourRosterScreen.new()
+	scr._ready()
+	var texts: Array = []
+	_collect_label_texts(scr, texts)
+	var joined := " ".join(texts)
+	_check("tour: roster says COMPUTER opponents", joined.contains("COMPUTER"))
+	_check("tour: roster tags opponents BOT", joined.contains("BOT"))
+	_check("tour: roster never claims a real player",
+		not joined.contains("searching for a real") and not joined.contains("real person") and not joined.contains("human opponent") and not joined.contains("real human") and not joined.contains("find a real player"))
+	scr.free()
+
+func _test_world_tour_stakes() -> void:
+	_check("tour stakes: bot mirrors the stake", WorldTour.mirror_stake(100) == 100 and WorldTour.mirror_stake(250) == 250)
+	_check("tour stakes: zero mirrors zero", WorldTour.mirror_stake(0) == 0)
+	_check("tour stakes: negative mirrors to zero", WorldTour.mirror_stake(-50) == 0)
+	_check("tour stakes: pot is 2x the stake", Stakes.pot(100, WorldTour.mirror_stake(100)) == 200)
+	_check("tour stakes: win takes the whole pot", Stakes.payout(100, WorldTour.mirror_stake(100), "win") == 200)
+	_check("tour stakes: loss takes nothing", Stakes.payout(100, WorldTour.mirror_stake(100), "loss") == 0)
+	_check("tour stakes: draw refunds own stake", Stakes.payout(100, WorldTour.mirror_stake(100), "draw") == 100)
+	var all_double := true
+	for s in [0, 50, 100, 250, 1000]:
+		if Stakes.pot(s, WorldTour.mirror_stake(s)) != 2 * s:
+			all_double = false
+		if Stakes.payout(s, WorldTour.mirror_stake(s), "win") != 2 * s:
+			all_double = false
+		if Stakes.payout(s, WorldTour.mirror_stake(s), "draw") != s:
+			all_double = false
+	_check("tour stakes: pot is always 2x stake (win 2x, draw refunds)", all_double)
+	_check("tour stakes: same picker validation as online", Stakes.valid_stake(100, 1000) and not Stakes.valid_stake(1001, 1000))
+
+func _test_ai_advanced_errors() -> void:
+	_check("ai adv: 6 difficulties defined", CarromAI.ERRORS.size() == 6, str(CarromAI.ERRORS.size()))
+	var hard: Dictionary = CarromAI.ERRORS[2]
+	var ok := true
+	for d in [3, 4, 5]:
+		var cfg: Dictionary = CarromAI.ERRORS[d]
+		if float(cfg["aim_deg"]) >= float(hard["aim_deg"]):
+			ok = false
+		if float(cfg["power"]) >= float(hard["power"]):
+			ok = false
+		if float(cfg["miss_chance"]) != 0.0:
+			ok = false
+		if float(cfg["queen_chase"]) != 1.0:
+			ok = false
+	_check("ai adv: Advanced/Expert/Master aim straighter than Hard, never miss outright, always chase the queen", ok)
+	_check("ai adv: accuracy tightens with skill (Master < Expert < Advanced < Hard)",
+		float(CarromAI.ERRORS[5]["aim_deg"]) < float(CarromAI.ERRORS[4]["aim_deg"]) and float(CarromAI.ERRORS[4]["aim_deg"]) < float(CarromAI.ERRORS[3]["aim_deg"]) and float(CarromAI.ERRORS[3]["aim_deg"]) < float(CarromAI.ERRORS[2]["aim_deg"]))
+	_check("ai adv: power error tightens with skill",
+		float(CarromAI.ERRORS[5]["power"]) < float(CarromAI.ERRORS[4]["power"]) and float(CarromAI.ERRORS[4]["power"]) < float(CarromAI.ERRORS[3]["power"]))
+	_check("ai adv: tour skills are exactly 3/4/5", int(WorldTour.BOTS[0]["skill"]) == 3 and int(WorldTour.BOTS[2]["skill"]) == 4 and int(WorldTour.BOTS[4]["skill"]) == 5)
+
+func _mean_abs_dev(angles: Array) -> float:
+	var mean := 0.0
+	for a in angles:
+		mean += float(a)
+	mean /= float(angles.size())
+	var dev := 0.0
+	for a in angles:
+		dev += absf(float(a) - mean)
+	return dev / float(angles.size())
+
+func _test_ai_advanced_accuracy() -> void:
+	# Same mid-game position for both: the ideal shot is identical every
+	# time (queen chase is deterministic at 1.0 for Hard+), so the spread
+	# of the returned directions measures the aim error alone.
+	var pieces := CarromPhysics.setup_pieces()
+	pieces[1]["pos"] = Vector2(300, 450)
+	pieces[2]["pos"] = Vector2(420, 500)
+	var state := CarromRules.fresh_state(1)
+	(state["pocketed"] as Array)[1] = 2
+	var n := 40
+	var angles5: Array = []
+	var angles2: Array = []
+	for i in range(n):
+		angles5.append((CarromAI.choose_shot(pieces, "black", 5, state, false)["dir"] as Vector2).angle())
+		angles2.append((CarromAI.choose_shot(pieces, "black", 2, state, false)["dir"] as Vector2).angle())
+	var mad5 := _mean_abs_dev(angles5)
+	var mad2 := _mean_abs_dev(angles2)
+	_check("ai adv: Master aim is far tighter than Hard", mad5 < mad2 / 3.0, "mad5=%f mad2=%f" % [mad5, mad2])
+	_check("ai adv: Master mean aim error under 0.005 rad", mad5 < 0.005, str(mad5))
+	_check("ai adv: Hard still has real spread (comparison is meaningful)", mad2 > 0.001, str(mad2))
+
+func _test_ai_queen_cover() -> void:
+	# Queen pending for the AI (she must be covered on THIS shot or she
+	# returns): the AI must still play a normal own-coin shot — the
+	# cover attempt — not chase the queen and not nudge away.
+	var pieces: Array = []
+	pieces.append(CarromPhysics.make_piece("black", Vector2(300, 500)))
+	pieces.append(CarromPhysics.make_piece("black", Vector2(450, 450)))
+	var queen := CarromPhysics.make_piece("queen", Vector2(360, 590))
+	queen["active"] = false # pocketed, pending cover
+	pieces.append(queen)
+	pieces.append(CarromPhysics.make_piece("striker", Vector2(CarromPhysics.BOARD_CENTER.x, CarromPhysics.baseline_y(0))))
+	var state := CarromRules.fresh_state(1)
+	(state["pocketed"] as Array)[1] = 1
+	state["queen"] = "pending"
+	state["queen_owner"] = 1
+	var shot: Dictionary = CarromAI.choose_shot(pieces, "black", 3, state, false)
+	_check("ai cover: valid shot with queen pending", (shot["dir"] as Vector2).length() > 0.9 and float(shot["power"]) >= 0.15 and float(shot["power"]) <= 1.0)
+	var from := Vector2(float(shot["striker_x"]), CarromPhysics.baseline_y(1))
+	_check("ai cover: shot aims at an own coin (the cover attempt)", _ray_target_kind(pieces, from, shot["dir"]) == "black", _ray_target_kind(pieces, from, shot["dir"]))
+	# Same board with the queen NOT pending: the cover bonus is uniform
+	# across own-coin shots, so the chosen striker position must not move.
+	var state2 := CarromRules.fresh_state(1)
+	(state2["pocketed"] as Array)[1] = 1
+	state2["queen"] = "board"
+	var shot2: Dictionary = CarromAI.choose_shot(pieces, "black", 3, state2, false)
+	_check("ai cover: same striker position with/without pending queen", absf(float(shot2["striker_x"]) - float(shot["striker_x"])) < 0.5, "pending=%s board=%s" % [str(shot["striker_x"]), str(shot2["striker_x"])])
+	# Cover urgency via the bank: same fence, queen pending — the AI
+	# must still find the bank to cover her, not give up with a nudge.
+	var fence := _bank_fence_pieces()
+	var state3 := CarromRules.fresh_state(1)
+	(state3["pocketed"] as Array)[1] = 1
+	state3["queen"] = "pending"
+	state3["queen_owner"] = 1
+	var shot3: Dictionary = CarromAI.choose_shot(fence, "black", 3, state3, false)
+	var from3 := Vector2(float(shot3["striker_x"]), CarromPhysics.baseline_y(1))
+	_check("ai cover: bank found to cover the queen", _shot_hits_wall_first(from3, shot3["dir"], Vector2(300, 550)))
+
+func _test_ai_defensive_no_queen_chase() -> void:
+	# Queen is the best target on this board (short, near-straight shot
+	# to the bottom-left pocket); an own coin is second-best.
+	var pieces := _tour_pieces([
+		["queen", Vector2(200, 500)],
+		["black", Vector2(500, 500)],
+	])
+	# Not ahead: the AI chases the queen (she is worth 3 points).
+	var even := CarromRules.fresh_state(1)
+	(even["pocketed"] as Array)[0] = 1
+	(even["pocketed"] as Array)[1] = 1
+	var shot_even: Dictionary = CarromAI.choose_shot(pieces, "black", 3, even, false)
+	var from_even := Vector2(float(shot_even["striker_x"]), CarromPhysics.baseline_y(1))
+	_check("ai defence: not ahead — AI chases the queen", _ray_target_kind(pieces, from_even, shot_even["dir"]) == "queen", _ray_target_kind(pieces, from_even, shot_even["dir"]))
+	# Ahead by exactly 1: still not defending — queen chase stays on.
+	var ahead1 := CarromRules.fresh_state(1)
+	(ahead1["pocketed"] as Array)[0] = 1
+	(ahead1["pocketed"] as Array)[1] = 2
+	var shot_a1: Dictionary = CarromAI.choose_shot(pieces, "black", 3, ahead1, false)
+	var from_a1 := Vector2(float(shot_a1["striker_x"]), CarromPhysics.baseline_y(1))
+	_check("ai defence: ahead by 1 — still chases the queen", _ray_target_kind(pieces, from_a1, shot_a1["dir"]) == "queen", _ray_target_kind(pieces, from_a1, shot_a1["dir"]))
+	# Ahead by 2: defending — the queen is off the table as a target.
+	var ahead2 := CarromRules.fresh_state(1)
+	(ahead2["pocketed"] as Array)[0] = 1
+	(ahead2["pocketed"] as Array)[1] = 3
+	var shot_a2: Dictionary = CarromAI.choose_shot(pieces, "black", 3, ahead2, false)
+	var from_a2 := Vector2(float(shot_a2["striker_x"]), CarromPhysics.baseline_y(1))
+	_check("ai defence: ahead by 2 — AI protects the lead, aims at an own coin", _ray_target_kind(pieces, from_a2, shot_a2["dir"]) == "black", _ray_target_kind(pieces, from_a2, shot_a2["dir"]))
+	_check("ai defence: defending changes the chosen shot", absf((shot_a2["dir"] as Vector2).angle_to(shot_even["dir"] as Vector2)) > 0.1)
+
+func _test_ai_bank_shot() -> void:
+	var pockets := CarromPhysics.pocket_centers()
+	# Direct unit check: a centre target banks off a cushion.
+	var pieces := _tour_pieces([["black", Vector2(360, 590)]])
+	var from := Vector2(360, CarromPhysics.baseline_y(1))
+	var target: Dictionary = pieces[0]
+	var bank: Dictionary = CarromAI.bank_shot_for(pieces, from, target, pockets)
+	_check("ai bank: bank exists for a centre target", not bank.is_empty())
+	_check("ai bank: valid dir + power + score", (bank["dir"] as Vector2).length() > 0.9 and float(bank["power"]) >= 0.3 and float(bank["power"]) <= 0.95 and float(bank["score"]) > 0.0)
+	_check("ai bank: the shot bounces off a cushion first", _shot_hits_wall_first(from, bank["dir"], Vector2(360, 590)))
+	# Negative: every coin->pocket line blocked (blockers sit ON the
+	# diagonals, 30 px off the vertical legs), so no bank exists.
+	var blocked := _tour_pieces([
+		["black", Vector2(360, 590)],
+		["white", Vector2(330, 560)], ["white", Vector2(390, 560)],
+		["white", Vector2(330, 620)], ["white", Vector2(390, 620)],
+	])
+	_check("ai bank: no bank when every pocket line is blocked", CarromAI.bank_shot_for(blocked, from, blocked[0], pockets).is_empty())
+	# Integration: direct paths fenced off — choose_shot falls back to a bank.
+	var fence := _bank_fence_pieces()
+	var state := CarromRules.fresh_state(1)
+	var shot: Dictionary = CarromAI.choose_shot(fence, "black", 3, state, false)
+	var sfrom := Vector2(float(shot["striker_x"]), CarromPhysics.baseline_y(1))
+	_check("ai bank: valid shot when only a bank exists", (shot["dir"] as Vector2).length() > 0.9 and float(shot["power"]) >= 0.15 and float(shot["power"]) <= 1.0)
+	_check("ai bank: choose_shot picks the bank (cushion first)", _shot_hits_wall_first(sfrom, shot["dir"], Vector2(300, 550)))
+
+func _test_ai_striker_safety() -> void:
+	var pockets := CarromPhysics.pocket_centers()
+	# Unit: the striker's estimated rest spot (220 px past the hit coin)
+	# near a pocket scores 150; far from every pocket scores 0.
+	_check("ai safety: rest spot 47 px from a pocket is risky (150)", CarromAI._striker_end_risk(Vector2(200, 430), Vector2(-0.707, -0.707), pockets) == 150.0)
+	_check("ai safety: rest spot far from pockets is safe (0)", CarromAI._striker_end_risk(Vector2(360, 590), Vector2(0, -1), pockets) == 0.0)
+	_check("ai safety: 69 px from a pocket is risky", CarromAI._striker_end_risk(Vector2(78, 459), Vector2(0, -1), pockets) == 150.0)
+	_check("ai safety: 71 px from a pocket is safe", CarromAI._striker_end_risk(Vector2(78, 457), Vector2(0, -1), pockets) == 0.0)
+	# Behaviour: two coins — one whose best shot leaves the striker near
+	# a pocket (risky) and one safe. Without the penalty the risky shot
+	# scores higher, so the AI must pick the safe coin.
+	var pieces := _tour_pieces([
+		["black", Vector2(600, 700)],
+		["black", Vector2(150, 750)],
+	])
+	var state := CarromRules.fresh_state(1)
+	var shot: Dictionary = CarromAI.choose_shot(pieces, "black", 3, state, false)
+	var from := Vector2(float(shot["striker_x"]), CarromPhysics.baseline_y(1))
+	var hit := _ray_first_piece(pieces, from, shot["dir"])
+	_check("ai safety: AI picks the safe coin, not the risky one",
+		not hit.is_empty() and (hit["pos"] as Vector2).distance_to(Vector2(150, 750)) < 40.0,
+		"hit=%s" % str(hit.get("pos", Vector2.ZERO)) if not hit.is_empty() else "hit=none")
 
 # ------------------------------------------------------------------ shop/aim
 

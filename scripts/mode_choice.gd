@@ -18,6 +18,7 @@ extends Control
 ## NEARBY -> same-Wi-Fi play (v6): one phone HOSTS, the other JOINS.
 
 signal solo_chosen
+signal tour_chosen
 signal online_chosen
 signal nearby_chosen
 signal go_back
@@ -40,7 +41,7 @@ func _ready() -> void:
 	add_child(root)
 	var title := UiKit.title_label("CHOOSE A MODE", 48)
 	root.add_child(title)
-	var sub := UiKit.muted_label("Solo is offline vs the computer.\nOnline is a real player, anywhere in the world.", 20)
+	var sub := UiKit.muted_label("Solo is free practice vs the computer.\nWorld Tour is advanced computer champions — with stakes.\nOnline is a real player, anywhere in the world.", 20)
 	root.add_child(sub)
 	var divider := ColorRect.new()
 	divider.color = Color(0.83, 0.69, 0.22, 0.55)
@@ -51,6 +52,12 @@ func _ready() -> void:
 	solo.custom_minimum_size = Vector2(0, 96)
 	solo.pressed.connect(func() -> void: solo_chosen.emit())
 	root.add_child(solo)
+	# v8 World Tour: advanced computer opponents with stakes. The button
+	# and the roster both say BOT — never a fake human (design doc 3.2).
+	var tour := UiKit.gold_button("WORLD TOUR — vs computer champions", 30)
+	tour.custom_minimum_size = Vector2(0, 96)
+	tour.pressed.connect(func() -> void: tour_chosen.emit())
+	root.add_child(tour)
 	var online := UiKit.dark_button("ONLINE — vs real players", 30)
 	online.custom_minimum_size = Vector2(0, 96)
 	online.pressed.connect(func() -> void: online_chosen.emit())
@@ -59,7 +66,7 @@ func _ready() -> void:
 	nearby.custom_minimum_size = Vector2(0, 96)
 	nearby.pressed.connect(func() -> void: nearby_chosen.emit())
 	root.add_child(nearby)
-	var hint := UiKit.muted_label("Online matches pair you within ±2 levels.\nNearby matches two phones on the same Wi-Fi — one HOSTS, one JOINS.\nNo opponent in 12 s? Play vs the computer instead.", 18)
+	var hint := UiKit.muted_label("World Tour bots are computers (BOT) — hard to beat, stakes like a real match.\nOnline matches pair you within ±2 levels.\nNearby matches two phones on the same Wi-Fi — one HOSTS, one JOINS.\nNo opponent in 12 s? Play vs the computer instead.", 18)
 	root.add_child(hint)
 	var spacer := Control.new()
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL

@@ -20,8 +20,8 @@ class Dots:
 			draw_circle(Vector2(x, 11), 7.5, c)
 			draw_arc(Vector2(x, 11), 7.5, 0, TAU, 16, Color(0, 0, 0, 0.4), 1.5)
 
-var mode := "solo" # solo | online
-var difficulty := 1 # 0 Easy, 1 Medium, 2 Hard
+var mode := "solo" # solo | online | tour (v8 World Tour: staked bot match)
+var difficulty := 1 # 0 Easy, 1 Medium, 2 Hard, 3 Advanced, 4 Expert, 5 Master
 var table := 0 # online matchmaking band (from Stakes.band_for_stake): 0 <250, 1 <1000, 2 >=1000
 var your_stake := 0 # online: own stake, locked (deducted) at match start
 var opp_stake := 0 # online 2p: opponent's stake, from the server's matched message
@@ -48,6 +48,9 @@ var _double_label: Label = null
 var _collect_button: Button = null
 var _collect_amount_label: Label = null
 var _result_pop: Dictionary = {}
+# v8 solo win ad-earn: WATCH AD button on the solo win screen.
+var _solo_earn_button: Button = null
+var _solo_earn_label: Label = null
 
 var pieces: Array = []
 var rules_state: Dictionary = {}
@@ -105,6 +108,11 @@ func setup(p_mode: String, p_difficulty: int, p_table: int, p_opp_name: String, 
 	your_stake = p_your_stake
 	opp_stake = p_opp_stake
 	practice = p_practice
+	_lock_entry_stake()
+	# Refresh the HUD now that the opponent name/level are known —
+	# _ready() built the panels with the default "Computer" before
+	# setup() ran (v8 fix: the tour panel showed "Computer Lv 1").
+	_update_hud()
 
 ## 4-player doubles setup (v6): p_players is seat-ordered
 ## [{name, level, stake, seat}]; p_your_seat is the local player's seat;
@@ -124,6 +132,31 @@ func setup_4p(p_players: Array, p_your_seat: int, p_breaker_seat: int, p_net: Ne
 	# Opponent panel header shows the partner (seat+2) — set in _update_hud.
 	opponent_name = String(p_players[(p_your_seat + 2) % 4].get("name", "Partner")) + " (partner)"
 	opponent_level = int(p_players[(p_your_seat + 2) % 4].get("level", 1))
+	_lock_entry_stake()
+	_update_hud()
+
+## Lock (deduct) the entry stake now that mode + stakes are known.
+## Called from setup()/setup_4p() — NOT from _ready(): _ready runs at
+## add_child, which main.gd calls BEFORE setup(), so in _ready the mode
+## is still "" and the stake 0 and the deduction never fired. That made
+## every staked match free — the winner collected the full pot without
+## ever paying in (v8 fix, caught by the tour test).
+func _lock_entry_stake() -> void:
+	if _is_staked_mode() and not entry_paid:
+		entry_paid = true
+		if your_stake > 0:
+			Save.spend_coins(your_stake)
+
+## v8: a match against a local computer opponent (solo practice or a
+## World Tour bot). Both run the AI locally; only the stakes differ.
+func _is_local_ai_mode() -> bool:
+	return mode == "solo" or mode == "tour"
+
+## v8: a match with coins at stake — online (real player) or World Tour
+## (advanced bot mirroring the stake). Both lock the stake at match
+## start, hold the pot on a win, and offer COLLECT / DOUBLE.
+func _is_staked_mode() -> bool:
+	return mode == "online" or mode == "tour"
 
 func _ready() -> void:
 	randomize()
@@ -149,13 +182,6 @@ func _ready() -> void:
 		_show_message("%s breaks — their team plays WHITE" % bname, 2.5)
 	else:
 		_show_message("Breaker plays WHITE" if breaker == 0 else "Opponent breaks — plays WHITE", 2.5)
-	if mode == "online" and entry_paid == false:
-		entry_paid = true
-		# The stake is LOCKED (deducted) when the match starts — never
-		# during the search, so cancelling costs nothing. The winner takes
-		# the whole pot at the end (see _show_result); a draw refunds it.
-		if your_stake > 0:
-			Save.spend_coins(your_stake)
 	if net:
 		net.shot_received.connect(_on_remote_shot)
 		net.state_received.connect(_on_remote_state)
@@ -508,14 +534,14 @@ func _process(delta: float) -> void:
 		if _msg_timer <= 0.0:
 			_msg_label.visible = false
 	if phase == "place" and not result_shown:
-		# Turn timer (local player only in solo; both seats online).
-		if mode == "solo":
+		# Turn timer (local player only in solo/tour; both seats online).
+		if _is_local_ai_mode():
 			if int(rules_state["turn"]) == local_seat:
 				_tick_timer(delta)
 		else:
 			_tick_timer(delta)
 		# AI move.
-		if mode == "solo" and int(rules_state["turn"]) != local_seat:
+		if _is_local_ai_mode() and int(rules_state["turn"]) != local_seat:
 			_run_ai(delta)
 	_update_timer_bar()
 
@@ -563,7 +589,7 @@ func _run_ai(delta: float) -> void:
 		if _ai_wait >= 0.9:
 			_ai_wait = 0.0
 			var own := CarromRules.own_color(rules_state, 1 - local_seat)
-			_ai_shot = CarromAI.choose_shot(pieces, own, difficulty, rules_state, is_break)
+			_ai_shot = CarromAI.choose_shot(pieces, own, difficulty, rules_state, is_break, 1 - local_seat)
 			_ai_stage = 1
 	elif _ai_stage == 1:
 		# Slide the striker to the chosen x, then shoot.
@@ -601,11 +627,13 @@ func _show_result() -> void:
 		Sfx.win()
 	elif not is_draw:
 		Sfx.foul()
-	# Pot math (online only). 2p: pot = your stake + opponent's stake.
-	# 4p: pot = all four stakes; YOUR share = your team's half of the pot.
+	# Pot math (staked modes only: online + tour). 2p: pot = your stake +
+	# opponent's stake. 4p: pot = all four stakes; YOUR share = your
+	# team's half of the pot. Tour: the bot mirrors your stake, so the
+	# pot is always 2x your stake (WorldTour.mirror_stake).
 	var pot := 0
 	var my_share := 0
-	if mode == "online":
+	if _is_staked_mode():
 		if player_count == 4:
 			pot = Stakes.pot_4p(stakes4)
 			my_share = Stakes.payout_4p(stakes4, local_seat, "win" if won else ("draw" if is_draw else "loss"))
@@ -613,19 +641,24 @@ func _show_result() -> void:
 			pot = your_stake + opp_stake
 			my_share = Stakes.payout(your_stake, opp_stake, "win" if won else ("draw" if is_draw else "loss"))
 	# Economy (v5): solo vs AI is free practice — ZERO coins, win or lose.
-	# Online pays the POT — but an online WIN does not credit immediately:
+	# Staked modes pay the POT — but a WIN does not credit immediately:
 	# the premium win screen HOLDS the pot until the player COLLECTs it,
 	# or watches 2 ads to DOUBLE it (see _show_premium_win). A draw
 	# refunds immediately; a loss credits nothing. No queen / no-guide /
 	# level-up coin bonuses anywhere — the only coin sources are the ad
-	# ladder and online stakes, so a zero balance can never be farmed
-	# back through matches.
+	# ladder and match stakes, so a zero balance can never be farmed
+	# back through matches. World Tour (v8) is staked exactly like
+	# online: the bot mirrors your stake, so the pot is real coins in
+	# and out — and losing a tour match costs the stake.
 	var coins_earned := 0
 	if mode == "solo":
 		if won:
 			Save.solo_wins += 1
 	elif won:
-		Save.online_wins += 1
+		if mode == "tour":
+			Save.tour_wins += 1
+		else:
+			Save.online_wins += 1
 		_pot_pending = my_share
 		_pot_credited = false
 		_double_ads = 0
@@ -654,7 +687,10 @@ func _show_result() -> void:
 				lines.append("Your team lost — the pot ◉ %d goes to the other team" % pot)
 			else:
 				lines.append("Your stake ◉ %d  •  Opponent stake ◉ %d" % [your_stake, opp_stake])
-				lines.append("Online loss — you lost your stake ◉ %d" % your_stake)
+				if mode == "tour":
+					lines.append("World Tour loss — %s wins your stake ◉ %d" % [opponent_name, your_stake])
+				else:
+					lines.append("Online loss — you lost your stake ◉ %d" % your_stake)
 		lines.append("XP: +%d" % xp_earned)
 		if new_level > 0:
 			lines.append("LEVEL UP! Now Lv %d · %s" % [new_level, Save.rank_name()])
@@ -695,15 +731,18 @@ func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, 
 	big.add_theme_constant_override("shadow_offset_x", 3)
 	big.add_theme_constant_override("shadow_offset_y", 3)
 	box.add_child(big)
-	if mode == "online":
+	if _is_staked_mode():
 		if player_count == 4:
 			box.add_child(UiKit.body_label("Your team wins!  Pot ◉ %d (4 stakes) — your team's half ◉ %d" % [pot, my_share], 20))
 		else:
 			box.add_child(UiKit.body_label("Your stake ◉ %d + Opponent stake ◉ %d" % [your_stake, opp_stake], 20))
+		if mode == "tour":
+			# The opponent is a computer — say so right on the win screen.
+			box.add_child(UiKit.body_label("World Tour — you beat %s" % opponent_name, 20))
 	else:
 		box.add_child(UiKit.body_label("Practice win — no coins earned.", 20))
-	# Button 1 — COLLECT (online) / CONTINUE (solo): the amount BIG.
-	if mode == "online":
+	# Button 1 — COLLECT (staked) / CONTINUE (solo): the amount BIG.
+	if _is_staked_mode():
 		var collect := _stacked_button([
 			{"text": "◉ %d" % my_share, "size": 44, "color": Color(0.12, 0.10, 0.02)},
 			{"text": "TAP TO COLLECT", "size": 18, "color": Color(0.12, 0.10, 0.02)}], false)
@@ -723,6 +762,26 @@ func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, 
 			_double_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			box.add_child(_double_label)
 	else:
+		# v8: a solo win pays no coins — but the player may watch ONE ad
+		# to earn the ladder amount (same ladder as the FREE COINS panel).
+		# The ladder itself is paid by Main's rewarded handler; this
+		# button is only the offer. Capped days show "come back tomorrow".
+		var earn_amount := Save.ad_next_reward()
+		if earn_amount > 0:
+			var earn := _stacked_button([
+				{"text": "WATCH 1 AD", "size": 26, "color": Color(1, 1, 1)},
+				{"text": "EARN ◉ %d" % earn_amount, "size": 34, "color": UiKit.GOLD_LIGHT}], true)
+			_solo_earn_button = earn["button"]
+			_solo_earn_label = earn["labels"][1]
+			_solo_earn_button.pressed.connect(_on_solo_earn_pressed)
+			box.add_child(_solo_earn_button)
+			var earn_note := UiKit.muted_label("One ad pays the ad-ladder amount — same as FREE COINS.", 17)
+			earn_note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			box.add_child(earn_note)
+		else:
+			var capped := UiKit.muted_label("Ad limit reached today — come back tomorrow for ad coins.", 17)
+			capped.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			box.add_child(capped)
 		var cont := _stacked_button([
 			{"text": "★ PRACTICE WIN ★", "size": 30, "color": Color(0.12, 0.10, 0.02)},
 			{"text": "TAP TO CONTINUE", "size": 18, "color": Color(0.12, 0.10, 0.02)}], false)
@@ -836,6 +895,25 @@ func on_double_ad_watched() -> void:
 		if _double_label:
 			_double_label.text = "Ad 1 of 2 watched — one more to DOUBLE to ◉ %d!" % (_pot_pending * 2)
 
+## Solo win ad-earn (v8): one rewarded ad pays the ladder amount. The
+## ladder itself is credited by Main's rewarded handler; these methods
+## only update this screen's button. Called by Main.
+func _on_solo_earn_pressed() -> void:
+	if _solo_earn_button:
+		_solo_earn_button.disabled = true # re-enabled only if the ad fails
+	Ads.show_rewarded("solo_win")
+
+func on_solo_win_ad_watched() -> void:
+	if _solo_earn_button:
+		_solo_earn_button.disabled = true
+	if _solo_earn_label:
+		_solo_earn_label.text = "EARNED ✓"
+	_show_message("Ad coins earned — check your balance!", 2.5)
+
+func on_solo_win_ad_failed() -> void:
+	if _solo_earn_button:
+		_solo_earn_button.disabled = false
+
 ## Exit paths from the win screen: credit the base pot first if it is
 ## still held, then leave (coins are never lost by closing the screen).
 func _exit_result_home() -> void:
@@ -906,8 +984,9 @@ func _build_hud() -> void:
 			row.add_child(lv)
 			opp_box.add_child(row)
 	# Online: show both stakes under the opponent name so the pot is
-	# visible for the whole match.
-	if mode == "online":
+	# visible for the whole match. Tour shows the same line (the bot
+	# mirrors your stake).
+	if _is_staked_mode():
 		var stake_l := Label.new()
 		stake_l.name = "StakeLine"
 		stake_l.mouse_filter = Control.MOUSE_FILTER_IGNORE

@@ -5,15 +5,34 @@ extends RefCounted
 ## then adds Gaussian aim/power error per difficulty. Easy never chases the
 ## queen; Medium sometimes does; Hard chases her and plays cut + bank shots.
 ##
-## Difficulties: 0 Easy, 1 Medium, 2 Hard.
-##   Easy:   aim error ~2 deg, power error ~16%, misses ~1 in 5
-##   Medium: aim error ~1 deg, power error ~8%
-##   Hard:   aim error ~0.3 deg, power error ~3%
+## Difficulties: 0 Easy, 1 Medium, 2 Hard, 3 Advanced, 4 Expert, 5 Master
+## (World Tour bots, v8 — all above Hard).
+##   Easy:     aim error ~2 deg, power error ~16%, misses ~1 in 5
+##   Medium:   aim error ~1 deg, power error ~8%
+##   Hard:     aim error ~0.3 deg, power error ~3%
+##   Advanced: aim error ~0.15 deg, power error ~2%
+##   Expert:   aim error ~0.1 deg, power error ~1.5%
+##   Master:   aim error ~0.05 deg, power error ~1%
+## Difficulties 3+ also play SMARTER, not just straighter (v8):
+##   * Queen cover is urgent: when the queen is pending for the AI (she
+##     must be covered on this very shot or she returns), own-coin shots
+##     get a big bonus — the cover comes first.
+##   * Defensive when ahead: ahead by 2+ coins, the AI stops chasing
+##     the queen (she is not worth the risk) and penalises high cut
+##     angles harder — it protects the lead instead of gambling.
+##   * Striker safety: shots whose striker would end up near a pocket
+##     (a foul waiting to happen) are penalised.
+##   * Bank shots: when no direct shot exists, the AI tries a
+##     one-cushion bank (mirror the target across the cushion) before
+##     falling back to a defensive nudge.
 
 const ERRORS := [
 	{"aim_deg": 2.0, "power": 0.16, "miss_chance": 0.20, "queen_chase": 0.0},
 	{"aim_deg": 1.0, "power": 0.08, "miss_chance": 0.05, "queen_chase": 0.5},
 	{"aim_deg": 0.3, "power": 0.03, "miss_chance": 0.0, "queen_chase": 1.0},
+	{"aim_deg": 0.15, "power": 0.02, "miss_chance": 0.0, "queen_chase": 1.0},
+	{"aim_deg": 0.10, "power": 0.015, "miss_chance": 0.0, "queen_chase": 1.0},
+	{"aim_deg": 0.05, "power": 0.01, "miss_chance": 0.0, "queen_chase": 1.0},
 ]
 
 static func _gauss(sigma: float) -> float:
@@ -25,23 +44,33 @@ static func _gauss(sigma: float) -> float:
 	return sqrt(-2.0 * log(u1)) * cos(TAU * u2) * sigma
 
 ## Choose a shot. Returns {"striker_x": float, "dir": Vector2, "power": float}.
-static func choose_shot(pieces: Array, own_color: String, difficulty: int, rules_state: Dictionary, is_break: bool) -> Dictionary:
-	var cfg: Dictionary = ERRORS[clampi(difficulty, 0, 2)]
-	var striker: Dictionary = _find(pieces, "striker")
+## ai_seat is the AI's seat (default 1, the top seat in solo/tour matches).
+static func choose_shot(pieces: Array, own_color: String, difficulty: int, rules_state: Dictionary, is_break: bool, ai_seat: int = 1) -> Dictionary:
+	var cfg: Dictionary = ERRORS[clampi(difficulty, 0, ERRORS.size() - 1)]
 	var baseline_y := CarromPhysics.baseline_y(1) # AI plays from the top
 	var best := {}
 	var best_score := -1.0e9
 
+	# Game sense (v8): how the board stands for the AI.
+	var my_team := CarromRules.team_of(rules_state, ai_seat)
+	var my_pocketed := int((rules_state.get("pocketed", [0, 0]) as Array)[my_team])
+	var opp_pocketed := int((rules_state.get("pocketed", [0, 0]) as Array)[1 - my_team])
+	var ahead_by := my_pocketed - opp_pocketed
+	var defending := ahead_by >= 2
+	# Queen pending for the AI: she MUST be covered on this shot or she
+	# goes back to the centre — covering her outranks everything.
+	var queen_pending_me := String(rules_state.get("queen", "board")) == "pending" and int(rules_state.get("queen_owner", -1)) == ai_seat
+
 	# Candidate targets: own coins, plus the queen when allowed.
+	# Defending a lead: never chase the queen — she is not worth the risk.
 	var targets: Array = []
 	for p in pieces:
 		if not p["active"]:
 			continue
 		if p["kind"] == own_color:
 			targets.append(p)
-		elif p["kind"] == "queen" and float(cfg["queen_chase"]) > 0.0:
-			var own_pocketed: int = rules_state["pocketed"][1]
-			if own_pocketed >= 1 and rules_state["queen"] == "board":
+		elif p["kind"] == "queen" and float(cfg["queen_chase"]) > 0.0 and not defending:
+			if my_pocketed >= 1 and rules_state["queen"] == "board":
 				if randf() < float(cfg["queen_chase"]):
 					targets.append(p)
 
@@ -81,10 +110,24 @@ static func choose_shot(pieces: Array, own_color: String, difficulty: int, rules
 				var score: float = 1000.0 - d1 * 0.5 - d2 * 0.8 - cut * 6.0
 				if target["kind"] == "queen":
 					score += 120.0
+				# v8 game sense:
+				if queen_pending_me and target["kind"] == own_color:
+					# Cover first — losing the queen costs 3 points.
+					score += 200.0
+				if defending:
+					# Protect the lead: high cut angles are a gamble.
+					score -= cut * 4.0
+				# Striker safety: the striker runs on past the coin
+				# roughly along the shot line — if it would end up
+				# near a pocket, that is a foul waiting to happen.
+				score -= _striker_end_risk(tpos, to_coin.normalized(), pockets)
 				if score > best_score:
 					best_score = score
 					var power := clampf(0.35 + (d1 + d2) / 1100.0, 0.3, 0.95)
 					best = {"striker_x": sx, "dir": to_coin.normalized(), "power": power}
+	if best.is_empty():
+		# No direct shot: try a one-cushion bank before the nudge.
+		best = _find_bank_shot(pieces, targets, pockets, baseline_y, cfg, queen_pending_me, defending)
 	if best.is_empty():
 		# No clean shot: hit the nearest own coin toward the nearest pocket
 		# with a soft touch (defensive nudge).
@@ -100,6 +143,123 @@ static func choose_shot(pieces: Array, own_color: String, difficulty: int, rules
 		var from := Vector2(clampf(nearest["pos"].x, CarromPhysics.BOARD_CENTER.x - CarromPhysics.BASELINE_HALF_LEN, CarromPhysics.BOARD_CENTER.x + CarromPhysics.BASELINE_HALF_LEN), baseline_y)
 		best = {"striker_x": from.x, "dir": (nearest["pos"] - from).normalized(), "power": 0.45}
 	return _apply_error(best, cfg)
+
+## Penalty when the striker's estimated resting spot (220 px past the
+## hit coin, along the shot line) lands near a pocket. 0 when safe.
+static func _striker_end_risk(tpos: Vector2, shot_dir: Vector2, pockets: Array) -> float:
+	var end_pos: Vector2 = tpos + shot_dir * 220.0
+	for pk in pockets:
+		if end_pos.distance_to(pk as Vector2) < 70.0:
+			return 150.0
+	return 0.0
+
+## One-cushion bank shot: mirror the target coin across the cushion's
+## striker-bounce line, aim at the mirrored coin — the striker bounces
+## off the cushion into the real coin. Returns a shot dict or {} when
+## no bank exists. Pure geometry, unit-testable via bank_shot_for().
+static func _find_bank_shot(pieces: Array, targets: Array, pockets: Array, baseline_y: float, cfg: Dictionary, queen_pending_me: bool, defending: bool) -> Dictionary:
+	var best := {}
+	var best_score := -1.0e9
+	for sx_i in range(9):
+		var sx := CarromPhysics.BOARD_CENTER.x - CarromPhysics.BASELINE_HALF_LEN + float(sx_i) * (2.0 * CarromPhysics.BASELINE_HALF_LEN / 8.0)
+		var from := Vector2(sx, baseline_y)
+		for target in targets:
+			var shot: Dictionary = bank_shot_for(pieces, from, target, pockets)
+			if shot.is_empty():
+				continue
+			var score: float = float(shot["score"])
+			if queen_pending_me:
+				score += 200.0
+			if defending:
+				score -= 40.0 # banks are a gamble; less so when protecting a lead
+			if score > best_score:
+				best_score = score
+				best = {"striker_x": sx, "dir": shot["dir"], "power": shot["power"]}
+	return best
+
+## The bank geometry for one striker position and one target coin.
+## Returns {"dir": Vector2, "power": float, "score": float} or {}.
+## The striker bounces off a cushion line (offset by the striker radius,
+## where its centre actually turns) into the coin, which then runs to a
+## pocket. The bounce point must sit on the wall segment, clear of the
+## corner pockets, with both legs of the path clear.
+static func bank_shot_for(pieces: Array, from: Vector2, target: Dictionary, pockets: Array) -> Dictionary:
+	var tpos: Vector2 = target["pos"]
+	var c := CarromPhysics.BOARD_CENTER
+	var half := CarromPhysics.SURFACE_HALF
+	var r := CarromPhysics.STRIKER_R
+	# Cushion lines the striker centre bounces on: [axis, line, is_vertical].
+	var walls := [
+		{"v": true, "line": c.x - half + r},
+		{"v": true, "line": c.x + half - r},
+		{"v": false, "line": c.y - half + r},
+		{"v": false, "line": c.y + half - r},
+	]
+	var best := {}
+	var best_score := -1.0e9
+	for wall in walls:
+		var mirrored := Vector2.ZERO
+		if bool(wall["v"]):
+			mirrored = Vector2(2.0 * float(wall["line"]) - tpos.x, tpos.y)
+		else:
+			mirrored = Vector2(tpos.x, 2.0 * float(wall["line"]) - tpos.y)
+		var to_mirror := mirrored - from
+		if to_mirror.length() < 1.0:
+			continue
+		var dir := to_mirror.normalized()
+		# Bounce point: where the ray crosses the wall line.
+		var t := -1.0
+		if bool(wall["v"]):
+			if absf(dir.x) < 0.001:
+				continue
+			t = (float(wall["line"]) - from.x) / dir.x
+		else:
+			if absf(dir.y) < 0.001:
+				continue
+			t = (float(wall["line"]) - from.y) / dir.y
+		if t <= 0.0:
+			continue
+		var bounce: Vector2 = from + dir * t
+		# The bounce must sit on the wall segment (not past a corner).
+		if bool(wall["v"]):
+			if bounce.y < c.y - half + r or bounce.y > c.y + half - r:
+				continue
+		else:
+			if bounce.x < c.x - half + r or bounce.x > c.x + half - r:
+				continue
+		# Keep the bounce clear of the corner pockets.
+		var near_pocket := false
+		for pk in pockets:
+			if bounce.distance_to(pk as Vector2) < 45.0:
+				near_pocket = true
+				break
+		if near_pocket:
+			continue
+		if not CarromPhysics.path_clear(pieces, from, bounce, target):
+			continue
+		if not CarromPhysics.path_clear(pieces, bounce, tpos, target):
+			continue
+		# The coin leaves along the striker's arrival direction.
+		var coin_dir := (tpos - bounce).normalized()
+		for pocket in pockets:
+			var pk: Vector2 = pocket
+			if not CarromPhysics.path_clear(pieces, tpos, pk, target):
+				continue
+			var to_pocket: Vector2 = pk - tpos
+			var d2: float = to_pocket.length()
+			if d2 < 1.0:
+				continue
+			var cut := rad_to_deg(acos(clampf(coin_dir.dot(to_pocket.normalized()), -1.0, 1.0)))
+			if cut > 75.0:
+				continue
+			# Banks score below direct shots (same geometry, -100).
+			var d1 := (tpos - from).length()
+			var score: float = 900.0 - d1 * 0.5 - d2 * 0.8 - cut * 6.0
+			if score > best_score:
+				best_score = score
+				var power := clampf((0.35 + (d1 + d2) / 1100.0) * 1.15, 0.3, 0.95)
+				best = {"dir": dir, "power": power, "score": score}
+	return best
 
 static func _apply_error(shot: Dictionary, cfg: Dictionary) -> Dictionary:
 	var dir: Vector2 = shot["dir"]

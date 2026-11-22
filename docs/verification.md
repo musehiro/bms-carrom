@@ -382,3 +382,117 @@ In `verification/v7/` (720x1280 + 720x1640 each):
   the game server; until it is up, accepting an invite says so and
   NEARBY is the way to play together.
 - No real-money code anywhere; stakes are virtual coins only.
+
+## v8 verification (2026-11-22)
+
+World Tour — advanced computer opponents with names, countries,
+cartoon avatars and skill levels; stakes like a real match; solo
+stays free with a watch-an-ad-to-earn offer. Two real bugs found
+and fixed during verification (below).
+
+### 1. What changed
+- **World Tour roster** (`scripts/world_tour.gd`, `scripts/tour_roster.gd`):
+  5 bots — Arjun Mehta (India, ADVANCED, Lv 12), Kasun Perera
+  (Sri Lanka, ADVANCED, Lv 14), Sarah Collins (England, EXPERT,
+  Lv 18), David Chen (USA, EXPERT, Lv 21), Emma Wilson (Canada,
+  MASTER, Lv 26). Each card shows a cartoon avatar (coloured face,
+  eyes, smile — no photos), country • skill • level, a blurb, and a
+  BOT tag. Honest labelling is the hard rule: the roster says
+  "Advanced COMPUTER opponents from around the world. Every opponent
+  is a BOT — clearly marked. No real players here." No "searching for
+  a real player", no fake-human wording anywhere (checked by test).
+- **Advanced AI** (`scripts/ai.gd`): difficulties 3/4/5 above Hard —
+  aim error 0.15°/0.10°/0.05°, power error 0.02/0.015/0.01, never
+  miss outright, always chase the queen. Game sense: queen-cover
+  urgency (+200 own-coin bonus while the queen is pending for the
+  AI), defensive play when ahead by 2+ (no queen chase, cut-angle
+  penalty), striker safety (150 penalty when the striker's estimated
+  rest spot lands within 70 px of a pocket), one-cushion bank shots
+  (mirror geometry, pocket + path checks).
+- **Tour economy** (`scripts/match.gd`): stakes lock at match start
+  (see bug 1); pot = both stakes, winner takes it all, draw refunds;
+  premium win screen with COLLECT (pot big) + WATCH 2 ADS → DOUBLE
+  (pot x2, each doubling ad also pays the ad ladder); tour_wins
+  counted; no daily cap (the hard bots limit farming). Losing costs
+  the stake; the loss screen names the bot.
+- **Solo** (`scripts/match.gd`): free, no coins — win pays zero;
+  the win screen offers WATCH 1 AD → EARN the ladder amount
+  (one ad, same as FREE COINS); solo_wins counted.
+- **Backend config**: v8 ships with the LIVE Supabase URL + anon key
+  in backend_config.json (parent verified the key live — auth health
+  endpoint returns HTTP 200). No service_role key anywhere.
+- Home footer now reads "BMS Carrom v8.0 • Account required •
+  Free to play".
+
+### 2. Tests — 404 checks green (all suites re-run)
+- Logic (test_runner.gd): 150/150 — incl. 46 new v8 checks
+  (roster 10: 5 bots + honest-labelling UI check; tour stakes 9:
+  mirror + pot 2x + payout win/loss/draw; advanced AI 8: ERRORS
+  table ordering + Master accuracy < 0.005 rad mean error;
+  queen-cover 4 incl. bank cover; defensive play 4; bank-shot
+  geometry 6 incl. fence integration; striker-safety 5).
+- Win-double scene (win_double_test.tscn): 46/46 — incl. 26 new
+  v8 checks (real tour match: stake locked at start, pot held 200,
+  COLLECT ◉ 200, DOUBLE TO ◉ 400, doubled pot + ladder credited,
+  tour_wins++; tour loss: stake lost, loss screen names the bot;
+  solo win: zero coins, WATCH 1 AD → ladder paid, earn button
+  disables). The ad ladder is reset at the start of the run so the
+  ladder math is deterministic across repeated runs.
+- Server 38/38, LAN 16/16, aim 19/19, stakes 32/32, accounts 32/32,
+  Supabase mock 28/28, input 9/9, popup flow 18/18, popup double
+  5/5, auth flow 11/11, ads simulated pass (no regressions).
+
+### 3. Screenshots — checked by eye (xvfb, software GL)
+In `verification/v8/` (720x1280 + 720x1640 each):
+- `shot-tour-*` — World Tour roster: all 5 bots with BOT tags,
+  countries, skills, levels, blurbs, cartoon avatars; honest
+  subtitle; "Stakes like a real match: winner takes the pot."
+- `shot-tourmatch-*` — tour match in progress: "Arjun Mehta (BOT)
+  Lv 12" top panel, board mid-game, player panel below.
+- `shot-tourwin-*` — ★ WINNER ★, "Your stake ◉ 100 + Opponent
+  stake ◉ 100", "World Tour — you beat Arjun Mehta (BOT)",
+  COLLECT ◉ 200, WATCH 2 ADS → DOUBLE TO ◉ 400, XP +150.
+- `shot-solowin-*` — ★ WINNER ★, "Practice win — no coins
+  earned.", WATCH 1 AD → EARN ◉ 150, "★ PRACTICE WIN ★ TAP TO
+  CONTINUE", XP +150 (LEVEL UP in one capture).
+
+### 4. Bugs found and fixed during verification
+1. **Stakes were never deducted — every staked match was free**
+   (CRITICAL, economy): `_ready()` runs at add_child, which main.gd
+   calls BEFORE setup(), so in _ready mode was still "" and the
+   stake 0 — the deduction never fired. A player could stake 100,
+   win, and collect the full 200 pot without ever paying in, in
+   tour AND online matches (v6/v7 too). The v7 win-double test never
+   caught it because it forged the online state after the match was
+   created. Fixed: the deduction moved into a `_lock_entry_stake()`
+   called at the end of setup() and setup_4p() (entry_paid guards
+   double-deduction; cancelling a search still costs nothing).
+   Caught by the new tour test ("stake locked at match start").
+2. **Opponent panel showed "Computer Lv 1" at match start**
+   (cosmetic): _ready() built the HUD with the default opponent
+   name before setup() set the real one ("Arjun Mehta (BOT)" /
+   "Medium Bot"); the name only refreshed after the first shot.
+   Fixed: setup()/setup_4p() now call _update_hud() after setting
+   the fields. Verified in the re-taken win screenshots.
+3. **Test fence blocked the bank legs too** — the first bank-test
+   fence (y=405, target y=430) sat on the bounce→target leg, so no
+   bank existed. Fixed: target moved to (300,550), fence widened
+   (x=190..505) — direct paths blocked, left-wall bank open.
+4. **Test detail string had 1 placeholder for 2 args** — "not all
+   arguments converted" error in the tour-loss check. Fixed the
+   format string.
+5. **Roster UI check found no labels** — in -s mode the tree never
+   iterates, so _ready never fired after add_child before quit().
+   Fixed: the test builds the screen by calling _ready() directly.
+
+### 5. Still honest (v8)
+- Live two-device play and live Gmail login on real phones can only
+  be confirmed by Buddhika playing. Verified instead: 404 checks
+  green across 12 suites + 8 screenshots checked by eye.
+- No hosted internet game server yet — AWS signup is blocked at the
+  billing (card) step; Buddhika's decision on the card is pending.
+  Worldwide online still needs a server; NEARBY same-Wi-Fi play
+  works today, and World Tour needs no server at all.
+- No real-money code anywhere; stakes are virtual coins only.
+- Minor cosmetic nit (not fixed): the BOT tag on roster cards sits
+  flush against the card's right edge — readable, just tight.

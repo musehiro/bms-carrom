@@ -160,9 +160,10 @@ static func popup_window(title: String, size: Vector2) -> Dictionary:
 ## validates with Stakes.valid_stake and calls on_confirm(stake) only on
 ## success (the popup is freed here); errors show in the popup itself.
 ## Quick amounts exist so the flow is one tap on a phone (and testable).
+## `title` overrides the popup title (World Tour uses its own, v8).
 ## Returns {dim, box, close, stake_edit, error_label, confirm}.
-static func stake_picker(balance: int, on_confirm: Callable, note: String = "") -> Dictionary:
-	var pop: Dictionary = popup_window("ONLINE — CHOOSE YOUR STAKE", Vector2(580, 580))
+static func stake_picker(balance: int, on_confirm: Callable, note: String = "", title: String = "ONLINE — CHOOSE YOUR STAKE") -> Dictionary:
+	var pop: Dictionary = popup_window(title, Vector2(580, 580))
 	var box: VBoxContainer = pop["box"]
 	var intro := note if note != "" else "Real players worldwide, matched within ±2 levels. You choose your own stake — any amount up to your balance. Winner takes the pot (both stakes)."
 	box.add_child(body_label(intro, 20))
