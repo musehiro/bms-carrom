@@ -22,7 +22,8 @@ var _assist_button: Button
 func _ready() -> void:
 	UiKit.full_rect(self)
 	var bg := ColorRect.new()
-	bg.color = Color(0.10, 0.08, 0.07)
+	bg.color = Color(0.15, 0.11, 0.07)
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	UiKit.full_rect(bg)
 	add_child(bg)
 	var root := VBoxContainer.new()
@@ -79,22 +80,29 @@ func _ready() -> void:
 	hero.add_child(title)
 	var sub := UiKit.muted_label("Real carrom • Online & offline • Fewer ads", 18)
 	hero.add_child(sub)
+	var divider := ColorRect.new()
+	divider.color = Color(0.83, 0.69, 0.22, 0.55)
+	divider.custom_minimum_size = Vector2(0, 3)
+	divider.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hero.add_child(divider)
 	var board_holder := Control.new()
-	board_holder.custom_minimum_size = Vector2(680, 300)
+	board_holder.custom_minimum_size = Vector2(680, 380)
+	board_holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hero.add_child(board_holder)
 	var mini := BoardView.new()
 	mini.board_id = Save.equipped_board
 	mini.striker_id = Save.equipped_striker
+	mini.draw_backdrop = false
 	mini.pieces = CarromPhysics.setup_pieces()
-	mini.position = Vector2(189, -90)
-	mini.scale = Vector2(0.42, 0.42)
+	mini.position = Vector2(142, -135)
+	mini.scale = Vector2(0.55, 0.55)
 	board_holder.add_child(mini)
 	# ---- Big PLAY ----
 	var play := UiKit.gold_button("▶  PLAY", 40)
 	play.custom_minimum_size = Vector2(0, 84)
-	play.pressed.connect(func() -> void: play_online.emit(0))
+	play.pressed.connect(_on_play_pressed)
 	root.add_child(play)
-	var play_hint := UiKit.muted_label("One tap — online quick match (Low table, 100 coins)", 16)
+	var play_hint := UiKit.muted_label("One tap — choose Solo (offline) or Online", 16)
 	root.add_child(play_hint)
 	# ---- SOLO / ONLINE ----
 	var modes := HBoxContainer.new()
@@ -150,7 +158,7 @@ func _ready() -> void:
 	fill.set_corner_radius_all(7)
 	_xp_bar.add_theme_stylebox_override("fill", fill)
 	bottom.add_child(_xp_bar)
-	var ver := UiKit.muted_label("BMS Carrom v1.0  •  Free to play  •  No account needed", 15)
+	var ver := UiKit.muted_label("BMS Carrom v2.0  •  Free to play  •  No account needed", 15)
 	bottom.add_child(ver)
 	refresh()
 
@@ -191,6 +199,25 @@ func _on_daily_pressed() -> void:
 		_daily_button.text = "CLAIMED +%d COINS!" % amount
 		Sfx.win()
 	refresh()
+
+func _on_play_pressed() -> void:
+	# v2: PLAY opens a clear mode choice — it used to jump straight into
+	# online matchmaking, which dead-ended (no server, no players).
+	var pop: Dictionary = UiKit.popup_window("PLAY — choose a mode", Vector2(560, 440))
+	add_child(pop["dim"])
+	var box: VBoxContainer = pop["box"]
+	box.add_child(UiKit.body_label("Solo is offline vs the computer. Online is a real player, anywhere in the world.", 20))
+	var solo := UiKit.gold_button("SOLO — vs AI (offline)", 26)
+	var online := UiKit.dark_button("ONLINE — vs real players", 26)
+	box.add_child(solo)
+	box.add_child(online)
+	solo.pressed.connect(func() -> void:
+		pop["dim"].queue_free()
+		_on_solo_pressed())
+	online.pressed.connect(func() -> void:
+		pop["dim"].queue_free()
+		_on_online_pressed())
+	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
 
 func _on_solo_pressed() -> void:
 	var pop: Dictionary = UiKit.popup_window("SOLO — vs AI (offline)", Vector2(560, 460))

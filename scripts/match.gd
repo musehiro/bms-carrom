@@ -160,6 +160,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			_dragging = true
 			_drag_mode = ""
 			_press_pos = pos
+		elif _striker["active"] and absf(pos.y - CarromPhysics.baseline_y(local_seat)) < 55.0 and absf(pos.x - CarromPhysics.BOARD_CENTER.x) <= CarromPhysics.BASELINE_HALF_LEN + 40.0:
+			# Forgiving grab (v2): touching the baseline anywhere starts a
+			# slide, so the striker is easy to move on a phone.
+			_dragging = true
+			_drag_mode = "slide"
+			_press_pos = pos
 	elif dragged and _dragging:
 		_handle_drag(pos)
 	elif released and _dragging:
@@ -547,8 +553,12 @@ func _build_hud() -> void:
 	UiKit.full_rect(root)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_hud.add_child(root)
+	# Every non-interactive HUD piece must be IGNORE too (v2): a STOP panel
+	# or label over the board would eat the drag before _unhandled_input.
+	# Only the pause Button stays interactive (default STOP).
 	# Opponent panel (top).
 	_opp_panel = PanelContainer.new()
+	_opp_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_opp_panel.add_theme_stylebox_override("panel", UiKit.panel_style())
 	_opp_panel.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	_opp_panel.offset_left = 16
@@ -575,11 +585,13 @@ func _build_hud() -> void:
 	opp_top.add_child(opp_lv)
 	opp_box.add_child(opp_top)
 	_opp_dots = Dots.new()
+	_opp_dots.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_opp_dots.color = Color(0.15, 0.15, 0.17)
 	_opp_dots.custom_minimum_size = Vector2(200, 24)
 	opp_box.add_child(_opp_dots)
 	# Turn label.
 	_turn_label = Label.new()
+	_turn_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_turn_label.add_theme_font_size_override("font_size", 26)
 	_turn_label.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
 	_turn_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -590,6 +602,7 @@ func _build_hud() -> void:
 	root.add_child(_turn_label)
 	# Timer bar.
 	_timer_bar = ProgressBar.new()
+	_timer_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_timer_bar.min_value = 0
 	_timer_bar.max_value = 20
 	_timer_bar.show_percentage = false
@@ -606,6 +619,7 @@ func _build_hud() -> void:
 	root.add_child(_timer_bar)
 	# Aim-assist chip.
 	_assist_chip = Label.new()
+	_assist_chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_assist_chip.add_theme_font_size_override("font_size", 18)
 	_assist_chip.add_theme_color_override("font_color", Color(0.4, 0.9, 0.5))
 	_assist_chip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -616,6 +630,7 @@ func _build_hud() -> void:
 	root.add_child(_assist_chip)
 	# Message label (centre of board).
 	_msg_label = Label.new()
+	_msg_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_msg_label.add_theme_font_size_override("font_size", 28)
 	_msg_label.add_theme_color_override("font_color", Color(1, 0.9, 0.5))
 	_msg_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
@@ -631,6 +646,7 @@ func _build_hud() -> void:
 	root.add_child(_msg_label)
 	# Power meter (horizontal, just above the bottom panel, while aiming).
 	_power_bar = ProgressBar.new()
+	_power_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_power_bar.min_value = 0
 	_power_bar.max_value = 100
 	_power_bar.show_percentage = false
@@ -648,6 +664,7 @@ func _build_hud() -> void:
 	root.add_child(_power_bar)
 	# My panel (bottom).
 	_my_panel = PanelContainer.new()
+	_my_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_my_panel.add_theme_stylebox_override("panel", UiKit.panel_style())
 	_my_panel.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
 	_my_panel.offset_left = 16
@@ -674,6 +691,7 @@ func _build_hud() -> void:
 	my_top.add_child(pause)
 	my_box.add_child(my_top)
 	_my_dots = Dots.new()
+	_my_dots.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_my_dots.color = Color(0.94, 0.92, 0.86)
 	_my_dots.custom_minimum_size = Vector2(200, 24)
 	my_box.add_child(_my_dots)
