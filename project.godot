@@ -44,4 +44,4 @@ Net="*res://scripts/net_client.gd"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/admob/plugin.cfg")
+enabled=PackedStringArray("res://addons/admob/plugin.cfg", "res://addons/bin_decode/plugin.cfg")
