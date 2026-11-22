@@ -1,0 +1,6 @@
+# This directory is intentionally empty: all sound effects in BMS Carrom
+# are generated procedurally in code (see scripts/sfx.gd), so there are
+# no .wav files. This placeholder exists because Git does not track empty
+# directories, and the CI workflow's "Normalize binary assets" step does
+# os.listdir("audio") — without this file the directory is missing from
+# the checkout and the build fails (run #1, 2026-11-22).
