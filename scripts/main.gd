@@ -5,6 +5,7 @@ extends Control
 ## handles the --shot=... screenshot mode used for verification.
 
 var _home: HomeScreen = null
+var _mode: ModeChoiceScreen = null
 var _match: MatchScreen = null
 var _searching: Control = null
 var _search_table := 0
@@ -63,6 +64,7 @@ func _clear() -> void:
 	for c in get_children():
 		c.queue_free()
 	_home = null
+	_mode = null
 	_match = null
 	_searching = null
 	_searching_active = false
@@ -73,6 +75,7 @@ func _show_home() -> void:
 	add_child(_home)
 	_home.play_solo.connect(_start_solo)
 	_home.play_online.connect(_start_matchmaking)
+	_home.open_mode_choice.connect(_open_mode_choice)
 	_home.open_shop.connect(_open_shop)
 	_home.open_howto.connect(_open_howto)
 	_home.open_aim_assist.connect(_open_aim_assist)
@@ -90,6 +93,54 @@ func _start_solo(difficulty: int) -> void:
 	_match.setup("solo", difficulty, 0, names[difficulty], difficulty + 1, null)
 	_match.exit_to_home.connect(_show_home)
 	_match.rematch_requested.connect(func() -> void: _start_solo(difficulty))
+
+# ---------------------------------------------------------- mode choice (v3)
+
+func _open_mode_choice() -> void:
+	# Full-screen mode screen (like Shop), NOT a popup: the v2 PLAY popup's
+	# buttons were dead on Buddhika's phone while the X worked, and the
+	# home screen's own buttons work there — this screen is built the same
+	# plain way. The difficulty/table popups below are the ones proven to
+	# work on his phone (homepage SOLO -> EASY enters a match).
+	_clear()
+	_mode = ModeChoiceScreen.new()
+	add_child(_mode)
+	_mode.solo_chosen.connect(_show_solo_difficulty)
+	_mode.online_chosen.connect(_show_online_tables)
+	_mode.go_back.connect(_show_home)
+
+func _show_solo_difficulty() -> void:
+	var pop: Dictionary = UiKit.popup_window("SOLO — vs AI (offline)", Vector2(560, 460))
+	add_child(pop["dim"])
+	var box: VBoxContainer = pop["box"]
+	box.add_child(UiKit.body_label("No internet needed. Win coins: Easy +50, Medium +100, Hard +200.", 20))
+	for i in range(3):
+		var names := ["EASY", "MEDIUM", "HARD"]
+		var descs := ["Relaxed — misses often, never chases the queen.", "A fair fight — sometimes chases the queen.", "Sharp — near-perfect aim, chases the queen."]
+		var b := UiKit.gold_button(names[i], 26) if i == 1 else UiKit.dark_button(names[i], 26)
+		box.add_child(b)
+		var d := UiKit.muted_label(descs[i], 17)
+		box.add_child(d)
+		var diff := i
+		b.pressed.connect(func() -> void:
+			pop["dim"].queue_free()
+			_start_solo(diff))
+	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
+
+func _show_online_tables() -> void:
+	var pop: Dictionary = UiKit.popup_window("ONLINE — pick a table", Vector2(560, 500))
+	add_child(pop["dim"])
+	var box: VBoxContainer = pop["box"]
+	box.add_child(UiKit.body_label("Real players worldwide, matched within ±2 levels. Winner takes the pot (both entries).", 20))
+	var tables := [["LOW", 100, "Entry 100 • Pot 200"], ["MID", 500, "Entry 500 • Pot 1,000"], ["HIGH", 2000, "Entry 2,000 • Pot 4,000"]]
+	for i in range(3):
+		var b := UiKit.dark_button("%s — %s" % [tables[i][0], tables[i][2]], 22)
+		box.add_child(b)
+		var t := i
+		b.pressed.connect(func() -> void:
+			pop["dim"].queue_free()
+			_start_matchmaking(t))
+	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
 
 func _open_shop() -> void:
 	_clear()
@@ -296,9 +347,15 @@ func _run_shot_mode() -> void:
 		"match":
 			_start_solo(1)
 			_demo_shot_and_capture()
+		"aim":
+			# Aim guide preview: local turn, striker placed, aim state
+			# forced on so the capture shows the dotted line, the orange
+			# arrow and the striker halo.
+			_start_solo(1)
+			_demo_aim_and_capture()
 		"playchoice":
-			_show_home()
-			_home._on_play_pressed()
+			# v3: PLAY opens the full-screen mode-choice screen (no popup).
+			_open_mode_choice()
 			_capture_after(1.0)
 		"search":
 			# Search with the queue-failed handler disconnected so the popup
@@ -335,6 +392,29 @@ func _demo_shot_and_capture() -> void:
 		var dir: Vector2 = (CarromPhysics.BOARD_CENTER - _match._striker["pos"]).normalized()
 		_match._shoot(dir, 0.95, false)
 		await get_tree().create_timer(2.6).timeout
+	_capture()
+
+func _demo_aim_and_capture() -> void:
+	# Wait until it is the local player's turn (the AI may break first),
+	# then place the striker and force the aim state on for the capture.
+	var waited := 0.0
+	while waited < 9.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+		if _match == null:
+			_capture()
+			return
+		if _match.phase == "place" and int(_match.rules_state["turn"]) == 0:
+			break
+	if _match and _match.phase == "place":
+		_match._striker["pos"] = Vector2(360.0, CarromPhysics.baseline_y(0))
+		var dir: Vector2 = (CarromPhysics.BOARD_CENTER - _match._striker["pos"]).normalized()
+		_match.board_view.aim_visible = true
+		_match.board_view.aim_from = _match._striker["pos"]
+		_match.board_view.aim_dir = dir
+		_match.board_view.aim_power = 0.6
+		_match.board_view.your_turn = true
+		await get_tree().create_timer(0.4).timeout
 	_capture()
 
 func _capture() -> void:

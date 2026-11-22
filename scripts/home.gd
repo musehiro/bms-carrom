@@ -7,6 +7,7 @@ extends Control
 
 signal play_solo(difficulty: int)
 signal play_online(table: int)
+signal open_mode_choice
 signal open_shop
 signal open_howto
 signal open_aim_assist
@@ -100,7 +101,11 @@ func _ready() -> void:
 	# ---- Big PLAY ----
 	var play := UiKit.gold_button("▶  PLAY", 40)
 	play.custom_minimum_size = Vector2(0, 84)
-	play.pressed.connect(_on_play_pressed)
+	# v3: PLAY opens the full-screen mode-choice screen (Main handles it).
+	# The v2 popup's SOLO/ONLINE buttons were dead on Buddhika's phone
+	# (only the X worked); this screen uses the home screen's own plain
+	# button layout, which works on his phone. No popup overlay here.
+	play.pressed.connect(func() -> void: open_mode_choice.emit())
 	root.add_child(play)
 	var play_hint := UiKit.muted_label("One tap — choose Solo (offline) or Online", 16)
 	root.add_child(play_hint)
@@ -158,7 +163,7 @@ func _ready() -> void:
 	fill.set_corner_radius_all(7)
 	_xp_bar.add_theme_stylebox_override("fill", fill)
 	bottom.add_child(_xp_bar)
-	var ver := UiKit.muted_label("BMS Carrom v2.0  •  Free to play  •  No account needed", 15)
+	var ver := UiKit.muted_label("BMS Carrom v3.0  •  Free to play  •  No account needed", 15)
 	bottom.add_child(ver)
 	refresh()
 
@@ -199,25 +204,6 @@ func _on_daily_pressed() -> void:
 		_daily_button.text = "CLAIMED +%d COINS!" % amount
 		Sfx.win()
 	refresh()
-
-func _on_play_pressed() -> void:
-	# v2: PLAY opens a clear mode choice — it used to jump straight into
-	# online matchmaking, which dead-ended (no server, no players).
-	var pop: Dictionary = UiKit.popup_window("PLAY — choose a mode", Vector2(560, 440))
-	add_child(pop["dim"])
-	var box: VBoxContainer = pop["box"]
-	box.add_child(UiKit.body_label("Solo is offline vs the computer. Online is a real player, anywhere in the world.", 20))
-	var solo := UiKit.gold_button("SOLO — vs AI (offline)", 26)
-	var online := UiKit.dark_button("ONLINE — vs real players", 26)
-	box.add_child(solo)
-	box.add_child(online)
-	solo.pressed.connect(func() -> void:
-		pop["dim"].queue_free()
-		_on_solo_pressed())
-	online.pressed.connect(func() -> void:
-		pop["dim"].queue_free()
-		_on_online_pressed())
-	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
 
 func _on_solo_pressed() -> void:
 	var pop: Dictionary = UiKit.popup_window("SOLO — vs AI (offline)", Vector2(560, 460))

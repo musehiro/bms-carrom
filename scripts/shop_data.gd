@@ -5,9 +5,9 @@ extends RefCounted
 ## Striker stat differences are SMALL and capped at +15% (doc 6.4).
 
 const BOARDS := [
-	{"id": "classic", "name": "Classic Wood", "desc": "Warm honey teak, the original.", "price": 0, "level": 1,
-		"surface": Color(0.78, 0.58, 0.32), "surface2": Color(0.72, 0.51, 0.27),
-		"frame": Color(0.42, 0.22, 0.12), "line": Color(0.96, 0.94, 0.88), "accent": Color(0.85, 0.16, 0.16)},
+	{"id": "classic", "name": "Classic Wood", "desc": "Pale beech, the original.", "price": 0, "level": 1,
+		"surface": Color(0.90, 0.78, 0.62), "surface2": Color(0.86, 0.72, 0.55),
+		"frame": Color(0.42, 0.22, 0.12), "line": Color(0.52, 0.24, 0.16), "accent": Color(0.85, 0.16, 0.16)},
 	{"id": "mahogany", "name": "Royal Mahogany", "desc": "Dark red-brown wood, gold lines.", "price": 1500, "level": 3,
 		"surface": Color(0.55, 0.25, 0.18), "surface2": Color(0.49, 0.21, 0.15),
 		"frame": Color(0.32, 0.12, 0.10), "line": Color(0.85, 0.68, 0.25), "accent": Color(0.85, 0.68, 0.25)},
@@ -26,8 +26,8 @@ const BOARDS := [
 ]
 
 const STRIKERS := [
-	{"id": "classic", "name": "Classic White", "desc": "The standard striker.", "price": 0, "level": 1,
-		"force": 100, "aim": 100, "time": 20, "color": Color(0.94, 0.92, 0.86), "ring": Color(0.85, 0.68, 0.25)},
+	{"id": "classic", "name": "Golden Sun", "desc": "Gold with a sun emblem, the Carrom Pool look.", "price": 0, "level": 1,
+		"force": 100, "aim": 100, "time": 20, "color": Color(0.95, 0.78, 0.28), "ring": Color(0.85, 0.55, 0.15)},
 	{"id": "ivory", "name": "Ivory Pearl", "desc": "Smooth pearl finish.", "price": 800, "level": 1,
 		"force": 102, "aim": 105, "time": 20, "color": Color(0.98, 0.96, 0.92), "ring": Color(0.75, 0.75, 0.78)},
 	{"id": "crimson", "name": "Crimson King", "desc": "Deep red, hits harder.", "price": 2000, "level": 3,

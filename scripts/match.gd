@@ -746,6 +746,9 @@ func _update_hud() -> void:
 	_my_dots.queue_redraw()
 	_turn_label.text = "YOUR TURN — %s" % my_color.to_upper() if int(rules_state["turn"]) == local_seat else "OPPONENT'S TURN — %s" % opp_color.to_upper()
 	_turn_label.add_theme_color_override("font_color", UiKit.GOLD_LIGHT if int(rules_state["turn"]) == local_seat else UiKit.MUTED)
+	# Glowing orange halo around the striker on your turn (Carrom Pool look).
+	if board_view != null:
+		board_view.your_turn = int(rules_state["turn"]) == local_seat
 	if Save.aim_assist_active():
 		var left := Save.aim_assist_remaining_sec()
 		_assist_chip.text = "✦ AIM-ASSIST %02d:%02d" % [left / 60, left % 60]
