@@ -1,0 +1,27 @@
+; BMS Carrom server — headless Godot 4.3 matchmaking + relay server.
+; Runs with: godot --headless -s server.gd -- --port 8910
+; (project.godot exists so the project imports cleanly; the server itself is
+; a single script run with -s, no scene needed.)
+
+config_version=5
+
+[application]
+
+config/name="BMS Carrom Server"
+config/description="Matchmaking + relay server for BMS Carrom online play."
+run/main_scene="res://server.tscn"
+config/features=PackedStringArray("4.3", "GL Compatibility")
+
+[autoload]
+
+Net="*res://net_server.gd"
+
+[display]
+
+window/size/viewport_width=720
+window/size/viewport_height=1280
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

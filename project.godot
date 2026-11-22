@@ -1,0 +1,47 @@
+; Engine configuration file.
+; BMS Carrom — original carrom board game (Godot 4.3).
+; Working title "BMS Carrom". Package com.musehiro.carrom.
+
+config_version=5
+
+[application]
+
+config/name="BMS Carrom"
+config/description="Play real carrom online or offline. Real physics, fair matches, fewer ads."
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.3", "GL Compatibility")
+config/icon="res://icon.png"
+; BMS boot splash at launch: big gold BMS on black, never the Godot logo.
+boot_splash/bg_color=Color(0.063, 0.051, 0.039, 1)
+boot_splash/image="res://art/bms_splash.png"
+boot_splash/fullsize=true
+boot_splash/minimum_display_time=1500
+
+[display]
+
+window/size/viewport_width=720
+window/size/viewport_height=1280
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/handheld/orientation=1
+
+[input_devices]
+
+pointing/emulate_touch_from_mouse=true
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+textures/vram_compression/import_etc2_astc=true
+
+[autoload]
+
+Save="*res://scripts/save_data.gd"
+Ads="*res://scripts/ads.gd"
+Sfx="*res://scripts/sfx.gd"
+Net="*res://scripts/net_client.gd"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/admob/plugin.cfg")
