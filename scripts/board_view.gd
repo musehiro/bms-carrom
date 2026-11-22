@@ -188,8 +188,13 @@ func _draw_side_markings(c: Vector2, half: float, line_c: Color, accent: Color, 
 	draw_line(p1a, p1b, line_c, 3.0)
 	draw_line(p2a, p2b, Color(0.35, 0.18, 0.10, 0.25), 5.0)
 	draw_line(p2a, p2b, line_c, 3.0)
-	# Red base circles closing each end (ICF: 3.18 cm diameter).
-	for p in [p1a, p1b, p2a, p2b]:
+	# Red base circles: ONE per lane end, centred between the two
+	# parallel lines (ICF: 3.18 cm diameter) — exactly 2 per corner,
+	# 8 total. (v3 drew one at the end of EACH line = 4 per side, so
+	# 3 clustered at each corner; fixed in v4 per Buddhika.)
+	var oc := (o1 + o2) / 2.0
+	for px in [-len2, len2]:
+		var p: Vector2 = xform * Vector2(px, oc)
 		draw_circle(p, 13.0, accent)
 		draw_arc(p, 13.0, 0, TAU, 24, Color(0.96, 0.94, 0.88, 0.95), 2.0)
 	# Diagonal arrow from this side's base circle toward the NEAREST pocket
@@ -197,7 +202,7 @@ func _draw_side_markings(c: Vector2, half: float, line_c: Color, accent: Color, 
 	# far pocket; fixed here (side 0 -> BL, 1 -> TR, 2 -> TL, 3 -> BR).
 	var pockets := CarromPhysics.pocket_centers()
 	var target: Vector2 = pockets[2] if side == 0 else (pockets[1] if side == 1 else (pockets[0] if side == 2 else pockets[3]))
-	var base_c: Vector2 = xform * Vector2(-len2, o1)
+	var base_c: Vector2 = xform * Vector2(-len2, oc)
 	var dir := (target - base_c).normalized()
 	var start := base_c + dir * 16.0
 	var arrow_len := base_c.distance_to(target) - 40.0

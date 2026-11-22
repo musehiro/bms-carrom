@@ -73,12 +73,11 @@ func _ready() -> void:
 	_sound_button.custom_minimum_size = Vector2(52, 52)
 	_sound_button.pressed.connect(_on_sound_pressed)
 	top.add_child(_sound_button)
-	# ---- Hero: title + mini board ----
+	# ---- Hero: mini board (the homepage logo — board only, no title
+	# text; Buddhika 2026-11-22: logo = JUST a carrom board) ----
 	var hero := VBoxContainer.new()
 	hero.add_theme_constant_override("separation", 0)
 	root.add_child(hero)
-	var title := UiKit.title_label("BMS CARROM", 56)
-	hero.add_child(title)
 	var sub := UiKit.muted_label("Real carrom • Online & offline • Fewer ads", 18)
 	hero.add_child(sub)
 	var divider := ColorRect.new()
@@ -163,7 +162,7 @@ func _ready() -> void:
 	fill.set_corner_radius_all(7)
 	_xp_bar.add_theme_stylebox_override("fill", fill)
 	bottom.add_child(_xp_bar)
-	var ver := UiKit.muted_label("BMS Carrom v3.0  •  Free to play  •  No account needed", 15)
+	var ver := UiKit.muted_label("BMS Carrom v4.0  •  Free to play  •  No account needed", 15)
 	bottom.add_child(ver)
 	refresh()
 
