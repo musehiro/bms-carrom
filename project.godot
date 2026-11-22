@@ -41,6 +41,9 @@ Save="*res://scripts/save_data.gd"
 Ads="*res://scripts/ads.gd"
 Sfx="*res://scripts/sfx.gd"
 Net="*res://scripts/net_client.gd"
+Supabase="*res://scripts/supabase.gd"
+Accounts="*res://scripts/accounts.gd"
+Friends="*res://scripts/friends.gd"
 
 [editor_plugins]
 

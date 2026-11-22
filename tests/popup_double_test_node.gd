@@ -23,6 +23,13 @@ var _input_scale := 1.0
 func _ready() -> void:
 	_input_scale = get_viewport().get_visible_rect().size.x / maxf(1.0, float(get_viewport().size.x))
 	print("INFO: input scale factor=", _input_scale)
+	# v7: registration is mandatory — seed a test account so Main
+	# reaches the home screen instead of the auth screen.
+	Save.account_gmail = "test.player@gmail.com"
+	Save.account_id = "test-account-id"
+	Save.account_verified = true
+	Save.player_name = "Test Player"
+	Save.save()
 	var main_scene: PackedScene = load("res://scenes/main.tscn")
 	_main = main_scene.instantiate()
 	add_child(_main)

@@ -16,6 +16,13 @@ var _ad_earned := 0
 
 func _ready() -> void:
 	Ads.rewarded_earned.connect(func(_reason: String, _sim: bool) -> void: _ad_earned += 1)
+	# v7: registration is mandatory — seed a test account so Main
+	# reaches the home screen instead of the auth screen.
+	Save.account_gmail = "test.player@gmail.com"
+	Save.account_id = "test-account-id"
+	Save.account_verified = true
+	Save.player_name = "Test Player"
+	Save.save()
 	var main_scene: PackedScene = load("res://scenes/main.tscn")
 	_main = main_scene.instantiate()
 	add_child(_main)

@@ -25,12 +25,18 @@ const DEFAULT_PORT := 8910
 const MAX_PEERS := 1024 # ENet cap per process; see docs for real capacity
 const WIDEN_AFTER_SEC := 30.0
 const MATCH_SCAN_INTERVAL := 1.0 # seconds between widening re-scans
+# Invite rooms (v7): friends join by group_id after accepting an invite.
+# The match starts when every expected player has joined; the room is
+# cleaned up after 3 minutes so a slow invitee does not hold it forever.
+const INVITE_ROOM_TIMEOUT := 180.0
 
 var _peer: ENetMultiplayerPeer = null
 var _queue: Array = [] # {id, name, level, table, stake, mode, at}
 var _rooms := {} # room_id -> {mode, players: [peer ids]}
 var _peer_room := {} # peer_id -> room_id
 var _names := {} # peer_id -> display name
+var _invite_rooms := {} # group_id -> {mode, expected, table, players: [...], at}
+var _peer_invite := {} # peer_id -> group_id (waiting in an invite room)
 var _room_seq := 0
 var _scan_timer := 0.0
 
@@ -58,6 +64,7 @@ func _process(delta: float) -> void:
 	if _scan_timer >= MATCH_SCAN_INTERVAL:
 		_scan_timer = 0.0
 		_try_match()
+		_expire_invite_rooms()
 
 func _on_peer_connected(id: int) -> void:
 	print("[Server] Peer connected: %d" % id)
@@ -65,6 +72,7 @@ func _on_peer_connected(id: int) -> void:
 func _on_peer_disconnected(id: int) -> void:
 	print("[Server] Peer disconnected: %d" % id)
 	_remove_from_queue(id)
+	_leave_invite_room(id)
 	var room_id: int = int(_peer_room.get(id, -1))
 	if room_id >= 0:
 		_dissolve_room(room_id, id)
@@ -113,6 +121,9 @@ func _relay(payload: String) -> void:
 				"at": Time.get_unix_time_from_system()})
 			print("[Server] %s (Lv %d) queued for %s table %d, stake %d" % [data.get("name"), int(data.get("level", 1)), mode, int(data.get("table", 0)), int(data.get("stake", 0))])
 			_try_match()
+		"invite_join":
+			_names[sender] = String(data.get("name", "Player"))
+			_join_invite_room(sender, data)
 		"shot", "state":
 			_relay_to_room(sender, data)
 		"forfeit":
@@ -195,6 +206,130 @@ func _collect_group(anchor: Dictionary, window: int, now: float) -> Array:
 		if absf(int(e["level"]) - int(anchor["level"])) <= w:
 			group.append(e)
 	return group
+
+## Invite rooms (v7): friends join by group_id after accepting a
+## Supabase invite. The match starts when every expected player has
+## joined; stakes lock only at match start, as in v6. The inviter is
+## always seat 0 (they join last, when the group is ready); invitees
+## take seats 1.. in join order.
+
+func _join_invite_room(sender: int, data: Dictionary) -> void:
+	var group_id := String(data.get("group_id", ""))
+	if group_id == "":
+		_send_to(sender, {"type": "invite_failed", "error": "No invite group — try again."})
+		return
+	var mode := String(data.get("mode", "2p"))
+	if mode != "4p":
+		mode = "2p"
+	var expected := 4 if mode == "4p" else 2
+	if _peer_invite.has(sender):
+		return # duplicate join — already waiting
+	var room: Dictionary = _invite_rooms.get(group_id, {})
+	if room.is_empty():
+		room = {"mode": mode, "expected": expected,
+			"table": int(data.get("table", 0)), "players": [],
+			"at": Time.get_unix_time_from_system()}
+		_invite_rooms[group_id] = room
+	if String(room.get("mode", "2p")) != mode or int(room.get("table", 0)) != int(data.get("table", 0)):
+		_send_to(sender, {"type": "invite_failed", "error": "This invite does not match the group."})
+		return
+	var players: Array = room["players"]
+	players.append({"id": sender, "name": String(data.get("name", "Player")),
+		"level": int(data.get("level", 1)), "stake": maxi(0, int(data.get("stake", 0))),
+		"is_inviter": bool(data.get("is_inviter", false))})
+	_peer_invite[sender] = group_id
+	print("[Server] Invite room %s: %s joined (%d/%d)" % [group_id, data.get("name"), players.size(), expected])
+	if invite_room_ready(players, expected):
+		_start_invite_match(group_id, room)
+
+func _start_invite_match(group_id: String, room: Dictionary) -> void:
+	var ordered := invite_room_order(room["players"])
+	var mode := String(room.get("mode", "2p"))
+	var ids: Array = []
+	for p in ordered:
+		ids.append(int(p["id"]))
+		_peer_invite.erase(int(p["id"]))
+	_invite_rooms.erase(group_id)
+	if mode == "4p":
+		var infos := invite_room_players_to_infos(ordered)
+		var breaker_seat := randi() % 4
+		var room_id := _new_room("4p", ids)
+		var payloads := matched_payloads_4p(infos, breaker_seat)
+		for k in range(4):
+			_send_to(ids[k], payloads[k])
+		print("[Server] Invite match #%d (4p, group %s): %s + %s vs %s + %s" % [room_id, group_id, infos[0]["name"], infos[2]["name"], infos[1]["name"], infos[3]["name"]])
+	else:
+		var a_breaks := randi() % 2 == 0
+		var room_id2 := _new_room("2p", ids)
+		var payloads2 := matched_payloads(ordered[0], ordered[1], a_breaks)
+		_send_to(ids[0], payloads2["a"])
+		_send_to(ids[1], payloads2["b"])
+		print("[Server] Invite match #%d (2p, group %s): %s vs %s" % [room_id2, group_id, ordered[0]["name"], ordered[1]["name"]])
+
+## A player left (or disconnected) before the invite match started:
+## the rest cannot play, so tell them and drop the group.
+func _leave_invite_room(peer_id: int) -> void:
+	var group_id: String = String(_peer_invite.get(peer_id, ""))
+	if group_id == "":
+		return
+	_peer_invite.erase(peer_id)
+	var room: Dictionary = _invite_rooms.get(group_id, {})
+	if room.is_empty():
+		return
+	var players: Array = room["players"]
+	for i in range(players.size() - 1, -1, -1):
+		if int(players[i]["id"]) == peer_id:
+			players.remove_at(i)
+	if players.is_empty():
+		_invite_rooms.erase(group_id)
+		return
+	for p in players:
+		_peer_invite.erase(int(p["id"]))
+		_send_to(int(p["id"]), {"type": "invite_failed", "error": "A player left before the match started."})
+	_invite_rooms.erase(group_id)
+	print("[Server] Invite room %s dissolved (a player left)" % group_id)
+
+## Drop invite rooms that never filled within the timeout.
+func _expire_invite_rooms() -> void:
+	var now := Time.get_unix_time_from_system()
+	var dead: Array = []
+	for gid in _invite_rooms.keys():
+		var room: Dictionary = _invite_rooms[gid]
+		if now - float(room.get("at", 0.0)) > INVITE_ROOM_TIMEOUT:
+			dead.append(gid)
+	for gid in dead:
+		var room2: Dictionary = _invite_rooms[gid]
+		for p in room2.get("players", []):
+			_peer_invite.erase(int(p["id"]))
+			_send_to(int(p["id"]), {"type": "invite_failed", "error": "Not everyone joined in time — send the invite again."})
+		_invite_rooms.erase(gid)
+		print("[Server] Invite room %s expired (not everyone joined)" % gid)
+
+## Pure helpers (unit-tested): the room is ready when every expected
+## player has joined.
+static func invite_room_ready(players: Array, expected: int) -> bool:
+	return players.size() >= expected
+
+## Seat order: the inviter is seat 0; invitees take seats 1.. in join
+## order. Pure — unit-tested.
+static func invite_room_order(players: Array) -> Array:
+	var ordered: Array = []
+	for p in players:
+		if bool(p.get("is_inviter", false)):
+			ordered.push_front(p)
+		else:
+			ordered.append(p)
+	return ordered
+
+## Ordered invite-room players -> the infos shape matched_payloads_4p
+## wants ({name, level, stake, seat}). Pure — unit-tested.
+static func invite_room_players_to_infos(ordered: Array) -> Array:
+	var infos: Array = []
+	for k in range(ordered.size()):
+		var p: Dictionary = ordered[k]
+		infos.append({"name": String(p["name"]), "level": int(p["level"]),
+			"stake": maxi(0, int(p.get("stake", 0))), "seat": k})
+	return infos
 
 func _new_room(mode: String, player_ids: Array) -> int:
 	_room_seq += 1

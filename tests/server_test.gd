@@ -102,6 +102,50 @@ func _initialize() -> void:
 	server._dissolve_room(rid, 71)
 	_check("server 4p: dissolve removes the room", _room_count(server) == 0)
 	_check("server 4p: dissolve clears peer->room for the rest", not (server._peer_room as Dictionary).has(72) and not (server._peer_room as Dictionary).has(74))
+	# --- v7: invite rooms ---
+	# 14. Two invite_join (2p, invitee first, inviter last) -> one room,
+	#     inviter is seat 0, invite room is gone.
+	_reset(server)
+	server._join_invite_room(82, {"group_id": "grp-1", "name": "Bob", "level": 6, "stake": 150, "mode": "2p", "table": 0, "is_inviter": false})
+	_check("server invite: one joiner waits, no room yet", _room_count(server) == 0 and (server._invite_rooms as Dictionary).size() == 1)
+	server._join_invite_room(81, {"group_id": "grp-1", "name": "Alice", "level": 5, "stake": 100, "mode": "2p", "table": 0, "is_inviter": true})
+	_check("server invite: both joined -> one 2p room", _room_count(server) == 1 and _room_players(server) == [81, 82])
+	_check("server invite: inviter is seat 0", _room_players(server)[0] == 81)
+	_check("server invite: invite room cleaned up after start", (server._invite_rooms as Dictionary).is_empty())
+	# 15. Duplicate join is ignored (same peer joins twice).
+	_reset(server)
+	server._join_invite_room(91, {"group_id": "grp-2", "name": "Bob", "level": 6, "stake": 0, "mode": "2p", "table": 0, "is_inviter": false})
+	server._join_invite_room(91, {"group_id": "grp-2", "name": "Bob", "level": 6, "stake": 0, "mode": "2p", "table": 0, "is_inviter": false})
+	_check("server invite: duplicate join ignored", ((server._invite_rooms as Dictionary)["grp-2"]["players"] as Array).size() == 1)
+	# 16. Mismatched table join is refused (not added to the room).
+	server._join_invite_room(92, {"group_id": "grp-2", "name": "Carol", "level": 5, "stake": 0, "mode": "2p", "table": 1, "is_inviter": true})
+	_check("server invite: wrong-table joiner refused", ((server._invite_rooms as Dictionary)["grp-2"]["players"] as Array).size() == 1)
+	# 17. 4p invite: three invitees + inviter -> one 4p room, seats 0-3.
+	_reset(server)
+	for k in range(3):
+		server._join_invite_room(101 + k, {"group_id": "grp-3", "name": "P%d" % k, "level": 5, "stake": 100, "mode": "4p", "table": 0, "is_inviter": false})
+	_check("server invite 4p: three joined, still waiting", _room_count(server) == 0)
+	server._join_invite_room(104, {"group_id": "grp-3", "name": "Host", "level": 5, "stake": 100, "mode": "4p", "table": 0, "is_inviter": true})
+	_check("server invite 4p: fourth joined -> one 4p room of 4", _room_count(server) == 1 and _room_players(server).size() == 4)
+	_check("server invite 4p: room mode is 4p", String(_room(server).get("mode", "")) == "4p")
+	_check("server invite 4p: inviter is seat 0", _room_players(server)[0] == 104)
+	# 18. A player leaving before the match starts dissolves the group.
+	_reset(server)
+	server._join_invite_room(111, {"group_id": "grp-4", "name": "Bob", "level": 6, "stake": 0, "mode": "2p", "table": 0, "is_inviter": false})
+	server._join_invite_room(112, {"group_id": "grp-4", "name": "Alice", "level": 5, "stake": 0, "mode": "2p", "table": 0, "is_inviter": true})
+	# (grp-4 started — use a fresh waiting group for the leave test)
+	server._join_invite_room(121, {"group_id": "grp-5", "name": "Bob", "level": 6, "stake": 0, "mode": "2p", "table": 0, "is_inviter": false})
+	server._leave_invite_room(121)
+	_check("server invite: leaver dissolves the waiting group", (server._invite_rooms as Dictionary).is_empty())
+	# 19. Pure helpers: ready / order / infos.
+	_check("server invite: room not ready with 1 of 2", not script.invite_room_ready([{"id": 1}], 2))
+	_check("server invite: room ready with 2 of 2", script.invite_room_ready([{"id": 1}, {"id": 2}], 2))
+	var ordered: Array = script.invite_room_order([
+		{"id": 2, "name": "Bob", "level": 6, "stake": 150, "is_inviter": false},
+		{"id": 1, "name": "Alice", "level": 5, "stake": 100, "is_inviter": true}])
+	_check("server invite: order puts the inviter first", int(ordered[0]["id"]) == 1 and int(ordered[1]["id"]) == 2)
+	var ordered_infos: Array = script.invite_room_players_to_infos(ordered)
+	_check("server invite: infos carry seats 0,1 in order", int(ordered_infos[0]["seat"]) == 0 and int(ordered_infos[1]["seat"]) == 1 and String(ordered_infos[0]["name"]) == "Alice" and int(ordered_infos[1]["stake"]) == 150)
 	print("=== %d passed, %d failed ===" % [_passed, _failed])
 	quit(0 if _failed == 0 else 1)
 
@@ -109,6 +153,8 @@ func _reset(server: Node) -> void:
 	(server._queue as Array).clear()
 	(server._rooms as Dictionary).clear()
 	(server._peer_room as Dictionary).clear()
+	(server._invite_rooms as Dictionary).clear()
+	(server._peer_invite as Dictionary).clear()
 
 func _room_count(server: Node) -> int:
 	return (server._rooms as Dictionary).size()

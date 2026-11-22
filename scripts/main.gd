@@ -8,6 +8,7 @@ var _home: HomeScreen = null
 var _mode: ModeChoiceScreen = null
 var _nearby: NearbyScreen = null
 var _match: MatchScreen = null
+var _auth: AuthScreen = null
 var _searching: Control = null
 var _search_table := 0 # matchmaking band for the current search (Stakes.band_for_stake)
 var _search_stake := 0 # chosen stake for the current search
@@ -15,7 +16,9 @@ var _search_players := 2 # 2 or 4 — how many players this search is for
 var _search_elapsed := 0.0
 var _searching_active := false
 var _search_widened := false
-var _search_mode := "" # "internet" | "host" | "join" — which search is running
+var _search_mode := "" # "internet" | "host" | "join" | "invite" — which search is running
+var _invite_group_id := "" # the Supabase invite group being joined
+var _invite_is_inviter := false # I sent this invite (seat 0)
 var _search_bot_button: Button = null
 var _search_status: Label = null
 var _lan_hosts_box: VBoxContainer = null # join popup: found-host buttons
@@ -39,6 +42,9 @@ func _ready() -> void:
 	Net.connected_to_server.connect(_on_net_connected)
 	Net.lan_host_found.connect(_on_lan_host_found)
 	Net.lan_discovery_failed.connect(_on_lan_discovery_failed)
+	Friends.invite_received.connect(_on_invite_received)
+	Friends.group_ready.connect(_on_group_ready)
+	Friends.group_failed.connect(_on_group_failed)
 	var args := OS.get_cmdline_user_args()
 	for a in args:
 		if a.begins_with("--shot="):
@@ -47,8 +53,13 @@ func _ready() -> void:
 			_shot_out = a.trim_prefix("--shot-out=")
 	if _shot_mode != "":
 		_run_shot_mode()
-	else:
+	elif Accounts.has_account():
+		# Returning player: straight to home; invites start listening.
+		Friends.start_listening()
 		_show_home()
+	else:
+		# First screen: register / sign in (mandatory — no guest mode).
+		_show_auth()
 
 func _process(delta: float) -> void:
 	if _searching_active:
@@ -63,6 +74,16 @@ func _process(delta: float) -> void:
 			# is chosen and _start_matchmaking takes over (mode internet).
 			if _search_status:
 				_search_status.text = "Listening for nearby hosts… %ds\nMake sure the other phone taps NEARBY → HOST." % int(_search_elapsed)
+			return
+		if _search_mode == "invite":
+			# Invite room: waiting for the other player(s) to join the
+			# game server. No BOT fallback — this is a match with a
+			# named friend, not random matchmaking.
+			if _search_status:
+				if _search_players == 4:
+					_search_status.text = "Waiting for the other players… %ds\nThe match starts when everyone has joined." % int(_search_elapsed)
+				else:
+					_search_status.text = "Waiting for the other player… %ds\nThe match starts when they join." % int(_search_elapsed)
 			return
 		if _search_elapsed >= 30.0 and not _search_widened:
 			_search_widened = true
@@ -93,9 +114,25 @@ func _clear() -> void:
 	_mode = null
 	_nearby = null
 	_match = null
+	_auth = null
 	_searching = null
 	_searching_active = false
 	_search_mode = ""
+
+# ------------------------------------------------------- auth first (v7)
+# Registration is mandatory — the game opens on the register/login
+# screen until the player has an account. There is no guest mode.
+
+func _show_auth() -> void:
+	_clear()
+	_auth = AuthScreen.new()
+	add_child(_auth)
+	_auth.registered.connect(_on_auth_done)
+	_auth.signed_in.connect(_on_auth_done)
+
+func _on_auth_done() -> void:
+	Friends.start_listening()
+	_show_home()
 
 func _show_home() -> void:
 	_clear()
@@ -109,8 +146,107 @@ func _show_home() -> void:
 	_home.open_aim_assist.connect(_open_aim_assist)
 	_home.watch_ad_coins.connect(_on_watch_ad_coins)
 	_home.watch_ad_daily.connect(_on_watch_ad_daily)
+	_home.invite_accept_chosen.connect(_on_invite_accept_chosen)
+	_home.invite_send_chosen.connect(_on_invite_send_chosen)
+	_home.group_invite_send_chosen.connect(_on_group_invite_send_chosen)
 	_home.refresh()
 	Ads.show_home_banner()
+	# Keep the cloud profile up to date (coins/XP change after matches
+	# and ads). Silent no-op when there is no session yet.
+	Accounts.sync_to_cloud()
+
+# ------------------------------------------------------ invites (v7)
+# Accept -> choose YOUR OWN stake (each player stakes their own
+# amount, v5/v6) -> join the game server's invite room for the group.
+# The server starts the match when everyone has joined; stakes lock
+# only at match start, so cancelling costs nothing.
+
+func _on_invite_accept_chosen(invite: Dictionary) -> void:
+	_show_stake_picker(func(stake: int) -> void:
+		_join_invite_room(String(invite.get("group_id", "")), String(invite.get("mode", "2p")), stake, false),
+		"Accepting %s's invite — choose YOUR stake (any amount up to your balance). Winner takes the pot (both stakes)." % String(invite.get("from_name", "a friend")))
+
+func _on_invite_send_chosen(player: Dictionary) -> void:
+	_show_stake_picker(func(stake: int) -> void:
+		var res := await Friends.send_invite(String(player.get("id", "")), String(player.get("display_name", "?")), stake)
+		if bool(res.get("ok", false)):
+			_toast("Invite sent to %s!" % String(player.get("display_name", "?")))
+		else:
+			_toast(String(res.get("error", "Could not send the invite."))),
+		"Invite %s to a 1 vs 1 match — choose YOUR stake (any amount up to your balance). Winner takes the pot." % String(player.get("display_name", "?")))
+
+func _on_group_invite_send_chosen(players: Array) -> void:
+	_show_stake_picker(func(stake: int) -> void:
+		var res := await Friends.send_group_invite(players, stake)
+		if bool(res.get("ok", false)):
+			_toast("4-player invite sent — the match starts when all accept!")
+		else:
+			_toast(String(res.get("error", "Could not send the invites."))),
+		"Invite %d friends to a doubles match — choose YOUR stake (any amount up to your balance). The winning TEAM splits the pot." % players.size())
+
+func _on_invite_received(invite: Dictionary) -> void:
+	_toast("New invite from %s!" % String(invite.get("from_name", "a friend")))
+	if _home:
+		_home.refresh()
+
+func _on_group_ready(group_id: String, invites: Array) -> void:
+	# Everyone accepted my invite — I join the room as the inviter
+	# (seat 0) with the stake I chose when I sent it.
+	var stake := 0
+	var mode := "2p"
+	if not invites.is_empty():
+		stake = int(invites[0].get("stake", 0))
+		mode = String(invites[0].get("mode", "2p"))
+	_toast("Everyone accepted — starting the match!")
+	_join_invite_room(group_id, mode, stake, true)
+
+func _on_group_failed(group_id: String, reason: String) -> void:
+	_toast(reason)
+
+func _join_invite_room(group_id: String, mode: String, stake: int, is_inviter: bool) -> void:
+	if group_id == "":
+		_toast("That invite has no group — ask your friend to send it again.")
+		return
+	if not Stakes.valid_stake(stake, Save.coins):
+		_toast("Not enough coins for that stake — watch an ad to earn more.")
+		return
+	_invite_group_id = group_id
+	_invite_is_inviter = is_inviter
+	_search_stake = stake
+	_search_players = 4 if mode == "4p" else 2
+	_search_table = Stakes.band_for_stake(stake)
+	_search_elapsed = 0.0
+	_search_widened = false
+	_search_mode = "invite"
+	_searching_active = true
+	_searching = Control.new()
+	UiKit.full_rect(_searching)
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.75)
+	UiKit.full_rect(dim)
+	_searching.add_child(dim)
+	var pop: Dictionary = UiKit.popup_window("WAITING FOR PLAYERS", Vector2(560, 460))
+	_searching.add_child(pop["dim"])
+	var box: VBoxContainer = pop["box"]
+	if _search_players == 4:
+		_search_status = UiKit.body_label("Waiting for the other players… 0s\nThe match starts when everyone has joined.", 22)
+	else:
+		_search_status = UiKit.body_label("Waiting for the other player… 0s\nThe match starts when they join.", 22)
+	box.add_child(_search_status)
+	box.add_child(UiKit.body_label("Your stake ◉ %d — it is only taken when the match starts." % stake, 18))
+	_search_bot_button = null # no BOT fallback for a friend invite
+	var cancel := UiKit.dark_button("CANCEL", 24)
+	cancel.pressed.connect(_cancel_search)
+	box.add_child(cancel)
+	pop["close"].pressed.connect(_cancel_search)
+	if _home:
+		_home.add_child(_searching)
+	else:
+		add_child(_searching)
+	if Net.is_connected_to_server():
+		Net.join_invite_room(group_id, Save.player_name, Save.level(), stake, mode, _search_table, is_inviter)
+	else:
+		Net.connect_to_server(Save.online_host, NetClient.DEFAULT_PORT)
 
 func _start_solo(difficulty: int) -> void:
 	_clear()
@@ -397,7 +533,10 @@ func _start_matchmaking(stake: int, host_ip: String = "", players: int = 2) -> v
 
 func _on_net_connected() -> void:
 	if _searching_active:
-		Net.queue_up(Save.player_name, Save.level(), _search_table, _search_stake, "4p" if _search_players == 4 else "2p")
+		if _search_mode == "invite":
+			Net.join_invite_room(_invite_group_id, Save.player_name, Save.level(), _search_stake, "4p" if _search_players == 4 else "2p", _search_table, _invite_is_inviter)
+		else:
+			Net.queue_up(Save.player_name, Save.level(), _search_table, _search_stake, "4p" if _search_players == 4 else "2p")
 
 func _on_matched(data: Dictionary) -> void:
 	if not _searching_active:
@@ -536,6 +675,7 @@ func _on_rewarded_earned(reason: String, simulated: bool) -> void:
 			_match.on_double_ad_watched()
 	if _home:
 		_home.refresh()
+		Accounts.sync_to_cloud()
 
 func _on_rewarded_failed(reason: String) -> void:
 	_toast("Ad didn't load — no reward. Try again later.")
@@ -637,6 +777,30 @@ func _run_shot_mode() -> void:
 			# 100 + 100) on a solo match so the pot + DOUBLE offer show.
 			_start_solo(1)
 			_demo_win_and_capture()
+		"login":
+			# v7: the register / sign-in screen (mandatory — first screen).
+			_show_auth()
+			_capture_after(1.0)
+		"invitebox":
+			# v7: home with the invite box open (canned invites: one 2p,
+			# one 4p incoming, one sent, two search results).
+			_show_home()
+			_demo_invite_box()
+			_capture_after(1.2)
+		"invite":
+			# v7: accepting an invite — the invite box open with the
+			# stake picker on top (choose YOUR stake, then join).
+			_show_home()
+			_demo_invite_box()
+			_show_stake_picker(func(stake: int) -> void: pass,
+				"Accepting Nimal's invite — choose YOUR stake (any amount up to your balance). Winner takes the pot (both stakes).")
+			_capture_after(1.2)
+		"invite4p":
+			# v7: 4-player invite — two friends selected for 4P with the
+			# SEND 4-PLAYER INVITE button showing.
+			_show_home()
+			_demo_invite_box_4p()
+			_capture_after(1.2)
 		_:
 			_show_home()
 			_capture_after(1.5)
@@ -662,6 +826,38 @@ func _demo_win_and_capture() -> void:
 		_match._show_result()
 		await get_tree().create_timer(0.8).timeout
 	_capture()
+
+func _demo_invite_box() -> void:
+	# Canned invite data for the screenshot only (no Supabase here):
+	# one 2p invite, one 4p invite, one sent invite, two search results.
+	Friends.incoming = [
+		{"id": "inv-1", "group_id": "grp-1", "from_id": "p-nimal", "to_id": "me",
+			"from_name": "Nimal", "to_name": "Player", "mode": "2p", "stake": 100,
+			"status": "pending", "created_at": "2026-11-22T13:00:00+00:00"},
+		{"id": "inv-2", "group_id": "grp-2", "from_id": "p-saman", "to_id": "me",
+			"from_name": "Saman", "to_name": "Player", "mode": "4p", "stake": 200,
+			"status": "pending", "created_at": "2026-11-22T13:05:00+00:00"},
+	]
+	Friends.outgoing = [
+		{"id": "inv-3", "group_id": "grp-3", "from_id": "me", "to_id": "p-kasun",
+			"from_name": "Player", "to_name": "Kasun", "mode": "2p", "stake": 50,
+			"status": "pending", "created_at": "2026-11-22T12:55:00+00:00"},
+	]
+	if _home:
+		_home._search_results = [
+			{"id": "p-nimal", "display_name": "Nimal", "level": 3},
+			{"id": "p-saman", "display_name": "Saman", "level": 5},
+		]
+		_home._toggle_invite_box()
+
+func _demo_invite_box_4p() -> void:
+	_demo_invite_box()
+	if _home:
+		_home._selected_4p = {
+			"p-nimal": {"id": "p-nimal", "display_name": "Nimal", "level": 3},
+			"p-saman": {"id": "p-saman", "display_name": "Saman", "level": 5},
+		}
+		_home._refresh_invite_box()
 
 func _capture_after(seconds: float) -> void:
 	await get_tree().create_timer(seconds).timeout

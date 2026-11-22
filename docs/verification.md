@@ -178,3 +178,207 @@ the `server/` sub-project).
   stuck, but worldwide online is NOT claimed working.
 - Real on-device touch feel can only be confirmed by Buddhika playing
   the APK on his phone.
+
+## v6 verification (2026-11-22, commit 90c2572e)
+
+### Test suites (all green, 197 checks)
+- Logic (rules/physics/AI/stakes/economy, incl. 4p rules + 4p stakes):
+  87/87 — `godot --headless --path . -s tests/test_runner.gd`
+- Server (2p + 4p matchmaking, rooms, dissolve, payloads): 23/23 —
+  `tests/server_test.gd`. NOTE: the old test referenced `server._matches`,
+  which the v6 rewrite replaced with `_rooms`/`_peer_room`; the stale
+  reference aborted `_initialize` before `quit()`, so the run hung with
+  no output (piped through `tail`). Fixed by rewriting the test for
+  rooms. The rpc_id errors in the log are the fake-peer calls in the
+  harness — harmless.
+- LAN host mode (beacon round-trip, parse rejections, host state
+  machine): 16/16 — `tests/lan_test.gd`
+- Aim prediction: 19/19 — `tests/aim_predict_test.gd`
+- Win screen + doubling (full path: pot held → 2 ads → doubled pot +
+  ladder → collect → exit credits base pot): 20/20 —
+  `tests/win_double_test.tscn` (xvfb)
+- Input: 9/9 — `tests/input_test.tscn`
+- Popup flow (incl. new 2P/4P choice step): 18/18 —
+  `tests/popup_flow_test.tscn`
+- Double-tap (android event sequence): 5/5 —
+  `tests/popup_double_test.tscn`
+- Ads (simulated rewarded): pass — `tests/ads_test.tscn`
+
+### Screenshots (looked at, in verification/v6/)
+- `shot-nearby-720x1280.png` + `shot-nearby-720x1640.png` — NEARBY screen,
+  clean after the autowrap fix below.
+- `shot-lanhost-720x1280.png` — HOSTING ON WI-FI popup (stake 100,
+  "Hosting on Wi-Fi… 1s"), home dimmed behind it.
+- `shot-search4p-720x1280.png` — 4p search: "No players yet — play vs
+  the computer instead." + "winning TEAM splits the pot (all four
+  stakes)".
+- `shot-win-720x1280.png` + `shot-win-720x1640.png` — premium win
+  screen: ★ WINNER ★, gold COLLECT ◉ 200 big, purple
+  "WATCH 2 ADS / DOUBLE TO ◉ 400", ladder note, XP/level/score line,
+  FIND REMATCH + HOME.
+- `shot-home-720x1280.png` — home unchanged from v5, clean.
+
+### Bugs found and fixed during v6 verification
+1. **NEARBY screen blown out past the right edge** — the long server-note
+   label had no autowrap, so its minimum width (~1159 px) forced the
+   whole VBox to 1159 wide (measured via a debug tree dump: VBox
+   size=(1159, 1140), min=(1159, 711)). Fixed: `autowrap_mode =
+   TextServer.AUTOWRAP_WORD_SMART` on the server note + the subtitle in
+   `scripts/nearby.gd`. Re-shot: clean.
+2. **Stale global class cache** — `main.gd` failed to parse
+   ("Could not find type NearbyScreen") because the editor's
+   `global_script_class_cache.cfg` predated `scripts/nearby.gd` and
+   headless runs never refresh it. Fixed: one
+   `godot --headless --editor --quit` import; the cache now lists
+   NearbyScreen. (Side effect: the editor re-downloaded the AdMob iOS
+   plugin into `addons/admob/downloads/` — local-only, NOT pushed.)
+3. **Flow test F4 vs the new 2P/4P choice** — the test expected the stake
+   picker to go straight to the search popup; v6 inserts the 2P/4P
+   choice. Fixed the test to tap "2 PLAYERS" first (18/18).
+4. **4p search status text at 12 s** — `_process` overwrote the 4p
+   wording with the generic 2p text. Fixed: status text is now
+   mode-aware (`_search_players`).
+
+### Still honest (v6)
+- No hosted internet server exists yet — Oracle needs an account + a
+  card for verification (Buddhika enters it in the browser; see
+  `verification/v6/oracle-signup-handoff.md` and
+  `server/deploy-oracle.sh`). Worldwide online is NOT claimed working.
+- Live two-phone LAN matching + live 4-player matching can only be
+  confirmed by Buddhika on real phones (UDP is blocked in this sandbox,
+  so no live handshake is testable here).
+- Real on-device touch feel (incl. side-seat slide/aim for 4p) can only
+  be confirmed by him playing the APK.
+- No real-money code anywhere; stakes are virtual coins only.
+
+## v7 verification (2026-11-22)
+
+Mandatory registration (Buddhika 2026-11-22 13:34 — NO guest mode),
+Gmail login + profile restore, friend search + invite box, 2-player
+and 4-player invites, Supabase free backend (card-free).
+
+### 1. What changed
+- **Auth first**: the game opens on the register/login screen
+  (`scripts/auth_screen.gd`) — display name + Gmail, REGISTER &
+  PLAY / SIGN IN tabs, SIGN IN WITH GOOGLE. No guest mode anywhere:
+  no "Play as guest" button, no playing before login (auth-flow test
+  A1/A2). The logo is just the carrom board (BoardView, no text).
+- **OTP is the account**: registration creates the local account;
+  a 6-digit code sent to the Gmail verifies it, and that OTP sign-in
+  IS the account — the Supabase Auth user id for the Gmail becomes
+  the profile id, so exactly one account per Gmail and reinstall +
+  same-Gmail sign-in restores coins, level, XP, stats and shop
+  ownership (last-write-wins if the local copy is newer). A
+  "VERIFY GMAIL" banner stays on home until the Gmail is proven, so
+  an unverified account is never silently unprotected.
+- **Google one-tap**: PKCE loopback (`http://127.0.0.1:8765/callback`,
+  no plugin, no deep-link intent). Falls back to Gmail + code when
+  the Google provider is not set up yet.
+- **Friends + invites** (`scripts/friends.gd`): search by display
+  name only (RPC returns id + name + level, never Gmail/coins);
+  invite box as a side panel on home (✉ button with pending count):
+  incoming invites with ACCEPT / DECLINE, sent invites (waiting),
+  FRIENDS search + INVITE (2p) and 4P multi-select + SEND 4-PLAYER
+  INVITE (up to 3 friends). Accept -> choose YOUR OWN stake ->
+  join the game server's invite room (group_id); the server starts
+  the match when everyone has joined (inviter seat 0, invitees
+  1.. in join order), 3-minute room timeout, stakes lock only at
+  match start. Invites expire after 24 h; Realtime delivers them
+  live, with a 10 s poll as backstop.
+- **Backend** (`scripts/supabase.gd`, `supabase/schema.sql`,
+  `docs/supabase-setup.md`): Supabase free, card-free. The v7 APK
+  ships with an empty `backend_config.json` — the game runs
+  local-only (registration works, invites show "not connected yet")
+  until the parent creates the project in the browser (exact steps
+  in the setup doc, no card at any step) and fills in the URL + anon
+  key; a config-only update then activates cloud accounts/invites.
+  No service_role key anywhere; RLS enforces own-rows-only.
+- **Design correction found in testing**: anonymous-first sign-in
+  was WRONG — the anonymous user id differs from the email user's
+  id, so the profile would land under the wrong id and restore
+  would break. Registration now does NOT sign in anonymously; the
+  OTP-verified Gmail is the account from the start.
+
+### 2. Tests — 333 checks green (all suites re-run)
+- Logic (test_runner.gd): 104/104 — incl. 16 new v7 checks
+  (PKCE RFC 7636 vector, Realtime message parsing, profile/invite
+  row builders, invite_join message).
+- Server (server_test.gd): 38/38 — incl. 15 new invite-room checks
+  (2p join -> room, inviter seat 0, duplicate join ignored,
+  wrong-table refused, 4p room of 4, leaver dissolves the group,
+  ready/order/infos helpers).
+- LAN 16/16, aim 19/19, stakes 32/32 (no regressions).
+- Accounts scene (accounts_test.tscn): 32/32 — name/Gmail
+  validation, last-write-wins resolve, uuid shape, group state
+  machine, invite expiry.
+- Supabase mock scene (supabase_mock_test.tscn): 28/28 — the REAL
+  client + Accounts + Friends against a local Python mock of
+  GoTrue/PostgREST/Realtime: anonymous signup, register, OTP
+  send/wrong/right, cloud profile create + restore, search
+  (no Gmail in results), 2p invite send/accept, 4p group
+  waiting -> ready, Realtime invite arriving live in the box,
+  Google loopback exchange (code TESTCODE -> Gmail linked).
+- Win-double 20/20, input 9/9, popup flow 18/18, popup double
+  5/5, ads simulated pass (no regressions).
+- Auth-flow scene (auth_flow_test.tscn): 11/11 — auth screen
+  first, no guest button, register -> home, invite box opens with
+  ACCEPT/DECLINE, ACCEPT -> stake picker, 4P select -> SEND
+  4-PLAYER INVITE appears.
+
+### 3. Screenshots — checked by eye (xvfb, software GL)
+In `verification/v7/` (720x1280 + 720x1640 each):
+- `shot-login-*` — register/login screen: board-only logo, tabs,
+  name + Gmail fields, REGISTER & PLAY, SIGN IN WITH GOOGLE,
+  "BMS Carrom v7.0 • Account required • Free to play". No guest path.
+- `shot-invitebox-*` — home with the invite box open: 2p + 4p
+  incoming invites (ACCEPT/DECLINE), waiting sent invite, FRIENDS
+  search with results (4P + INVITE).
+- `shot-invite-*` — accepting an invite: the stake picker on top
+  ("Accepting Nimal's invite — choose YOUR stake").
+- `shot-invite4p-*` — two friends selected (4P ✓), SEND 4-PLAYER
+  INVITE (2) + the wrapped note naming them.
+
+### 4. Bugs found and fixed during verification
+1. **Class hides an autoload singleton** — `class_name Accounts` /
+   `class_name Friends` collided with the autoloads of the same
+   name. Fixed: no class_name on autoload scripts (SupabaseClient
+   keeps its distinct class name); tests load the scripts by path.
+2. **-s test runner cannot compile autoload-referencing scripts**
+   — `Save`/`Supabase` are not registered identifiers under `-s`,
+   so accounts.gd/friends.gd failed to load there. Fixed: the
+   accounts/friends pure tests moved to a scene test
+   (accounts_test.tscn) where autoloads exist.
+3. **Null profile row crashed verify** — `get_profile_by_*` returned
+   `data: null` when no row existed; typed Dictionary assignment
+   rejected it. Fixed: return `{}` for "not found" (callers test
+   `is_empty()`).
+4. **Realtime used wss against the plain-http mock** — TLS handshake
+   error. Fixed: ws:// for http base URLs, wss:// for https.
+5. **Test signal helper never fired** — a lambda capturing a local
+   bool captures it by value. Fixed: member-var flag.
+6. **Invite box panel never visually closed** — the close branch
+   freed only the dim, not the panel; the panel stayed on screen
+   (caught by the auth-flow test). Fixed: queue_free the panel too.
+7. **Invite box overflowed right (4p)** — a long non-wrapping
+   muted_label widened the ScrollContainer child past the panel,
+   and the long SEND button text did the same. Fixed: horizontal
+   scroll disabled, autowrapping note, shorter button text,
+   fixed-width SEARCH/4P buttons.
+8. **`LineEdit.keyboard_type` int assignment rejected at runtime**
+   — removed the three keyboard-type hints (cosmetic only).
+
+### 5. Still honest (v7)
+- The Supabase project does NOT exist yet — the parent must create
+  it in the browser (docs/supabase-setup.md, no card). Until then
+  the shipped APK registers locally and invites show "not connected
+  yet"; cloud restore/invites activate with a config-only update.
+- Live Gmail login on real phones, live two-device invite/match
+  flow, and live Google one-tap can only be confirmed by Buddhika
+  playing (sandbox cannot do live Google Sign-In or two-phone
+  handshakes). Verified instead: the full flow against the local
+  mock (28 checks) + the real server's invite rooms (15 checks).
+- No hosted internet game server yet (AWS signup in progress by
+  Buddhika; Oracle refused on the card step) — invite matches need
+  the game server; until it is up, accepting an invite says so and
+  NEARBY is the way to play together.
+- No real-money code anywhere; stakes are virtual coins only.

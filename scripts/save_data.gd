@@ -50,6 +50,17 @@ var aim_assist_ads_progress: int = 0 # 0..1 ads watched toward next hour
 var interstitial_counter: int = 0 # matches since last interstitial
 var online_host: String = "127.0.0.1" # matchmaking server; set a real host in Settings
 
+# Account (v7, mandatory registration — NO guest mode). A player cannot
+# play without registering (display name + Gmail). The account id is the
+# Supabase Auth user id once synced; before the first sync it is a local
+# uuid placeholder. The cloud profile (coins, XP, stats, shop) is the
+# restore source after a reinstall.
+var account_gmail: String = ""
+var account_id: String = ""
+var account_verified: bool = false
+var account_created_at: String = "" # YYYY-MM-DD
+var account_synced_at: int = 0 # unix time of the last successful cloud sync
+
 var _cfg := ConfigFile.new()
 
 func _ready() -> void:
@@ -82,6 +93,11 @@ func load_save() -> void:
 	aim_assist_ads_progress = int(_cfg.get_value("ads", "aim_assist_ads_progress", 0))
 	interstitial_counter = int(_cfg.get_value("ads", "interstitial_counter", 0))
 	online_host = String(_cfg.get_value("online", "host", "127.0.0.1"))
+	account_gmail = String(_cfg.get_value("account", "gmail", ""))
+	account_id = String(_cfg.get_value("account", "id", ""))
+	account_verified = bool(_cfg.get_value("account", "verified", false))
+	account_created_at = String(_cfg.get_value("account", "created_at", ""))
+	account_synced_at = int(_cfg.get_value("account", "synced_at", 0))
 
 func save() -> void:
 	_cfg.set_value("player", "coins", coins)
@@ -107,6 +123,11 @@ func save() -> void:
 	_cfg.set_value("ads", "aim_assist_ads_progress", aim_assist_ads_progress)
 	_cfg.set_value("ads", "interstitial_counter", interstitial_counter)
 	_cfg.set_value("online", "host", online_host)
+	_cfg.set_value("account", "gmail", account_gmail)
+	_cfg.set_value("account", "id", account_id)
+	_cfg.set_value("account", "verified", account_verified)
+	_cfg.set_value("account", "created_at", account_created_at)
+	_cfg.set_value("account", "synced_at", account_synced_at)
 	_cfg.save(SAVE_PATH)
 
 func level() -> int:

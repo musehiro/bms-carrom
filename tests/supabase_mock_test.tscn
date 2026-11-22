@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://bmscarromsupamock"]
+
+[ext_resource type="Script" path="res://tests/supabase_mock_test_node.gd" id="1"]
+
+[node name="SupabaseMockTest" type="Node"]
+script = ExtResource("1")

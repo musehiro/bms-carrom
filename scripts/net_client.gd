@@ -289,6 +289,28 @@ func queue_up(player_name: String, level: int, table: int, stake: int = 0, mode:
 		return
 	_send({"type": "queue", "name": player_name, "level": level, "table": table, "stake": stake, "mode": mode})
 
+## Join an invite room (v7): after accepting a friend invite (or when
+## the group is ready, for the inviter), both sides send this to the
+## game server with the same group_id. The server starts the match when
+## every expected player has joined. The inviter is seat 0; invitees
+## take seats 1.. in join order. Requires a connection to the internet
+## game server (not LAN hosting) — invite matches do not run over
+## NEARBY; NEARBY is the direct challenge instead.
+func join_invite_room(group_id: String, player_name: String, level: int, stake: int = 0, mode: String = "2p", table: int = 0, is_inviter: bool = false) -> void:
+	if _hosting:
+		queue_failed.emit("Invite matches need the game server — use NEARBY to play together on the same Wi-Fi.")
+		return
+	if not _connected:
+		queue_failed.emit("Not connected to the game server yet — the server is not online. Play NEARBY together for now.")
+		return
+	_send(invite_join_message(group_id, player_name, level, stake, mode, table, is_inviter))
+
+## The invite_join message (pure, unit-tested).
+static func invite_join_message(group_id: String, player_name: String, level: int, stake: int, mode: String, table: int, is_inviter: bool) -> Dictionary:
+	return {"type": "invite_join", "group_id": group_id, "name": player_name,
+		"level": level, "stake": maxi(0, stake), "mode": mode, "table": table,
+		"is_inviter": is_inviter}
+
 func send_shot(data: Dictionary) -> void:
 	data["type"] = "shot"
 	_send(data)
@@ -334,6 +356,8 @@ func _relay(payload: String) -> void:
 		"opponent_left":
 			last_opponent_left_seat = int(data.get("seat", -1))
 			opponent_left.emit()
+		"invite_failed":
+			queue_failed.emit(String(data.get("error", "The invite match could not start.")))
 		"error":
 			queue_failed.emit(String(data.get("message", "Server error")))
 

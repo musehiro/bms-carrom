@@ -17,16 +17,31 @@ signal open_howto
 signal open_aim_assist
 signal watch_ad_coins
 signal watch_ad_daily
+# v7 invites: the invite box lives on this screen; Main owns the stake
+# picker + the game-server join, so these signals hand the choice over.
+signal invite_accept_chosen(invite: Dictionary)
+signal invite_send_chosen(player: Dictionary)
+signal group_invite_send_chosen(players: Array)
 
 var _coins_label: Label
 var _level_label: Label
 var _xp_bar: ProgressBar
 var _daily_button: Button
 var _sound_button: Button
+var _invite_button: Button
 var _assist_button: Button
 var _free_coins_button: Button
 var _out_box: PanelContainer
+var _verify_box: PanelContainer
 var _ladder_box: VBoxContainer
+# v7 invite box (side panel) + friend search state.
+var _invite_dim: ColorRect = null
+var _invite_panel: PanelContainer = null
+var _invite_content: VBoxContainer = null
+var _invite_body: VBoxContainer = null
+var _search_edit: LineEdit = null
+var _search_results: Array = []
+var _selected_4p: Dictionary = {} # player id -> {id, name, level}
 
 func _ready() -> void:
 	UiKit.full_rect(self)
@@ -81,6 +96,33 @@ func _ready() -> void:
 	_sound_button.custom_minimum_size = Vector2(52, 52)
 	_sound_button.pressed.connect(_on_sound_pressed)
 	top.add_child(_sound_button)
+	# v7: invite box — ✉ in the top bar, with the pending-invite count
+	# in the label (e.g. "✉ 2"). Tapping opens the side panel.
+	_invite_button = UiKit.dark_button("✉", 24)
+	_invite_button.custom_minimum_size = Vector2(52, 52)
+	_invite_button.pressed.connect(_toggle_invite_box)
+	top.add_child(_invite_button)
+	Friends.invites_changed.connect(_on_invites_changed)
+	# ---- Verify-Gmail banner (v7, only until the Gmail is proven) ----
+	# An unverified account has no cloud profile yet — if the player
+	# deletes the app now, there is nothing to restore. The banner
+	# stays until verification so the protection is not forgotten.
+	_verify_box = PanelContainer.new()
+	_verify_box.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.25, 0.18, 0.05, 0.97), UiKit.GOLD, 14, 2))
+	root.add_child(_verify_box)
+	var ver_v := VBoxContainer.new()
+	ver_v.add_theme_constant_override("separation", 4)
+	_verify_box.add_child(ver_v)
+	var ver_title := UiKit.body_label("VERIFY YOUR GMAIL", 22)
+	ver_title.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
+	ver_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ver_v.add_child(ver_title)
+	var ver_body := UiKit.body_label("Your coins and level are only saved on this phone until your Gmail is verified — verify now so they come back if you reinstall.", 17)
+	ver_body.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ver_v.add_child(ver_body)
+	var ver_btn := UiKit.gold_button("VERIFY GMAIL", 22)
+	ver_btn.pressed.connect(_open_verify_popup)
+	ver_v.add_child(ver_btn)
 	# ---- OUT OF COINS banner (only at zero — points at the ad ladder) ----
 	_out_box = PanelContainer.new()
 	_out_box.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.25, 0.08, 0.08, 0.97), Color(0.95, 0.35, 0.25), 16, 2))
@@ -209,7 +251,7 @@ func _ready() -> void:
 	fill.set_corner_radius_all(7)
 	_xp_bar.add_theme_stylebox_override("fill", fill)
 	root.add_child(_xp_bar)
-	var ver := UiKit.muted_label("BMS Carrom v5.0  •  Free to play  •  No account needed", 15)
+	var ver := UiKit.muted_label("BMS Carrom v7.0  •  Account required  •  Free to play", 15)
 	root.add_child(ver)
 	# ---- Banner-ad slot (bottom; the native banner covers it on Android) ----
 	var banner_slot := PanelContainer.new()
@@ -243,6 +285,9 @@ func refresh() -> void:
 	_xp_bar.value = Save.xp_into_level()
 	_xp_bar.max_value = Save.XP_PER_LEVEL
 	_sound_button.text = "♪" if Save.sound_on else "∅"
+	var pending := Friends.pending_count()
+	_invite_button.text = "✉ %d" % pending if pending > 0 else "✉"
+	_verify_box.visible = Supabase.configured and Accounts.has_account() and not Accounts.is_verified()
 	_out_box.visible = Save.coins == 0
 	if Save.can_claim_daily():
 		_daily_button.visible = true
@@ -261,9 +306,237 @@ func refresh() -> void:
 	else:
 		_assist_button.text = "AIM-ASSIST"
 	_build_ladder()
+	if _invite_panel != null:
+		_refresh_invite_box()
 
-## Rebuilds the ad-ladder strip: five tier chips (1st +150 … 5th+ +400),
-## done tiers dimmed with a tick, the CURRENT tier gold, future tiers dark.
+func _on_invites_changed() -> void:
+	refresh()
+
+## Verify-Gmail popup (v7): sends a fresh code to the account Gmail,
+## the player enters it, and the cloud profile is created from the
+## local save (verify_code_and_login with allow_create=true).
+func _open_verify_popup() -> void:
+	var pop: Dictionary = UiKit.popup_window("VERIFY YOUR GMAIL", Vector2(560, 520))
+	add_child(pop["dim"])
+	var box: VBoxContainer = pop["box"]
+	box.add_child(UiKit.body_label("We will send a 6-digit code to %s. Enter it below — your coins, level and shop items are then saved to your account." % Save.account_gmail, 20))
+	var code_edit := LineEdit.new()
+	code_edit.placeholder_text = "6-digit code"
+	code_edit.max_length = 6
+	code_edit.add_theme_font_size_override("font_size", 26)
+	code_edit.custom_minimum_size = Vector2(0, 60)
+	box.add_child(code_edit)
+	var err := Label.new()
+	err.add_theme_font_size_override("font_size", 18)
+	err.add_theme_color_override("font_color", UiKit.RED)
+	err.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(err)
+	var send := UiKit.dark_button("SEND CODE", 22)
+	send.pressed.connect(func() -> void:
+		var res := await Accounts.request_login_code(Save.account_gmail)
+		if not bool(res.get("ok", false)):
+			err.text = String(res.get("error", "Could not send the code."))
+		else:
+			err.text = ""
+			code_edit.grab_focus())
+	box.add_child(send)
+	var verify := UiKit.gold_button("VERIFY", 24)
+	verify.pressed.connect(func() -> void:
+		var res := await Accounts.verify_code_and_login(Save.account_gmail, code_edit.text, true)
+		if not bool(res.get("ok", false)):
+			err.text = String(res.get("error", "Wrong code — try again."))
+			return
+		pop["dim"].queue_free()
+		refresh())
+	box.add_child(verify)
+	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
+
+# ------------------------------------------------------- invite box (v7)
+# A side panel on the right of the home screen: incoming invites
+# (Accept / Decline), sent invites (waiting), and FRIENDS — search by
+# display name, invite one friend (2 players) or pick up to 3 friends
+# for a 4-player doubles invite. The panel rebuilds whenever the
+# invite state changes (Realtime / poll) while it is open.
+
+func _toggle_invite_box() -> void:
+	if _invite_panel != null:
+		_invite_dim.queue_free()
+		_invite_panel.queue_free()
+		_invite_dim = null
+		_invite_panel = null
+		_invite_content = null
+		_invite_body = null
+		_search_edit = null
+		return
+	_invite_dim = ColorRect.new()
+	_invite_dim.color = Color(0, 0, 0, 0.55)
+	_invite_dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	UiKit.full_rect(_invite_dim)
+	_invite_dim.gui_input.connect(func(event: InputEvent) -> void:
+		if event is InputEventMouseButton and (event as InputEventMouseButton).pressed:
+			_toggle_invite_box())
+	add_child(_invite_dim)
+	_invite_panel = PanelContainer.new()
+	_invite_panel.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.10, 0.10, 0.13, 1.0), UiKit.GOLD, 18, 2))
+	_invite_panel.anchor_left = 1.0
+	_invite_panel.anchor_top = 0.0
+	_invite_panel.anchor_right = 1.0
+	_invite_panel.anchor_bottom = 1.0
+	_invite_panel.offset_left = -580.0
+	_invite_panel.offset_top = 0.0
+	_invite_panel.offset_right = 0.0
+	_invite_panel.offset_bottom = 0.0
+	add_child(_invite_panel)
+	_invite_content = VBoxContainer.new()
+	_invite_content.add_theme_constant_override("separation", 10)
+	_invite_panel.add_child(_invite_content)
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	# No horizontal scrolling: the body must fit the panel width so
+	# labels wrap and buttons stay on screen (a ScrollContainer child
+	# otherwise grows to its widest content and everything overflows).
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_invite_content.add_child(scroll)
+	# The scrollable body is rebuilt by _refresh_invite_box; keep a
+	# stable reference to it.
+	_invite_body = VBoxContainer.new()
+	_invite_body.add_theme_constant_override("separation", 10)
+	scroll.add_child(_invite_body)
+	_refresh_invite_box()
+
+func _refresh_invite_box() -> void:
+	if _invite_panel == null or _invite_body == null:
+		return
+	var body: VBoxContainer = _invite_body
+	for c in body.get_children():
+		c.queue_free()
+	var top := HBoxContainer.new()
+	body.add_child(top)
+	var title := UiKit.title_label("✉  INVITE BOX", 28)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	top.add_child(title)
+	var x := UiKit.red_x_button()
+	x.pressed.connect(_toggle_invite_box)
+	top.add_child(x)
+	if not Supabase.configured:
+		# The backend is not set up yet (v7 ships with an empty
+		# backend_config.json until the Supabase project exists). Say
+		# so at the top — but still render any invites below, so the
+		# box stays truthful and testable.
+		body.add_child(UiKit.body_label("Invites are not connected yet — the account server is still being set up. Play NEARBY together on the same Wi-Fi for now.", 18))
+	# ---- Incoming invites ----
+	var incoming: Array = []
+	for inv in Friends.incoming:
+		if not Friends.is_expired(inv):
+			incoming.append(inv)
+	if incoming.is_empty():
+		body.add_child(UiKit.muted_label("No invites yet — search for a friend below and send one!", 17))
+	else:
+		for inv in incoming:
+			var card := PanelContainer.new()
+			card.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.16, 0.17, 0.20), UiKit.GOLD, 12, 1))
+			body.add_child(card)
+			var vb := VBoxContainer.new()
+			vb.add_theme_constant_override("separation", 6)
+			card.add_child(vb)
+			var mode_text := "4 players — doubles" if String(inv.get("mode", "2p")) == "4p" else "2 players — 1 vs 1"
+			vb.add_child(UiKit.body_label("%s invited you — %s, stake ◉ %d" % [String(inv.get("from_name", "A player")), mode_text, int(inv.get("stake", 0))], 20))
+			var row := HBoxContainer.new()
+			row.add_theme_constant_override("separation", 10)
+			vb.add_child(row)
+			var accept := UiKit.gold_button("ACCEPT", 22)
+			accept.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			var inv_copy: Dictionary = inv
+			accept.pressed.connect(func() -> void:
+				_toggle_invite_box()
+				invite_accept_chosen.emit(inv_copy))
+			row.add_child(accept)
+			var decline := UiKit.dark_button("DECLINE", 22)
+			decline.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			decline.pressed.connect(func() -> void:
+				var res := await Friends.decline_invite(inv_copy)
+				if not bool(res.get("ok", false)):
+					refresh())
+			row.add_child(decline)
+	# ---- Sent invites (waiting) ----
+	if not Friends.outgoing.is_empty():
+		body.add_child(UiKit.muted_label("WAITING FOR…", 17))
+		for inv in Friends.outgoing:
+			var st := String(inv.get("status", "pending"))
+			if st == "pending":
+				body.add_child(UiKit.body_label("• %s — %s" % [String(inv.get("to_name", "a player")), "4 players" if String(inv.get("mode", "2p")) == "4p" else "2 players"], 18))
+	# ---- Friends: search + invite ----
+	body.add_child(UiKit.title_label("FRIENDS", 24))
+	body.add_child(UiKit.muted_label("Search by display name — never by Gmail.", 16))
+	var srow := HBoxContainer.new()
+	srow.add_theme_constant_override("separation", 10)
+	body.add_child(srow)
+	_search_edit = LineEdit.new()
+	_search_edit.placeholder_text = "Friend's name…"
+	_search_edit.add_theme_font_size_override("font_size", 22)
+	_search_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_search_edit.custom_minimum_size = Vector2(0, 56)
+	srow.add_child(_search_edit)
+	var search_btn := UiKit.dark_button("SEARCH", 22)
+	search_btn.custom_minimum_size = Vector2(130, 56)
+	search_btn.pressed.connect(_on_search_pressed)
+	srow.add_child(search_btn)
+	for player in _search_results:
+		var pcard := PanelContainer.new()
+		pcard.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.16, 0.17, 0.20), Color(0.83, 0.69, 0.22, 0.35), 12, 1))
+		body.add_child(pcard)
+		var prow := HBoxContainer.new()
+		prow.add_theme_constant_override("separation", 10)
+		pcard.add_child(prow)
+		var plabel := UiKit.body_label("%s  •  Lv %d" % [String(player.get("display_name", "?")), int(player.get("level", 1))], 20)
+		plabel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		prow.add_child(plabel)
+		var pid := String(player.get("id", ""))
+		var selected := _selected_4p.has(pid)
+		var sel_btn := UiKit.dark_button("4P ✓" if selected else "4P", 18)
+		sel_btn.custom_minimum_size = Vector2(76, 0)
+		sel_btn.pressed.connect(func() -> void:
+			if _selected_4p.has(pid):
+				_selected_4p.erase(pid)
+			elif _selected_4p.size() < Friends.MAX_GROUP_TARGETS:
+				_selected_4p[pid] = player
+			_refresh_invite_box())
+		prow.add_child(sel_btn)
+		var inv_btn := UiKit.gold_button("INVITE", 20)
+		inv_btn.pressed.connect(func() -> void:
+			_toggle_invite_box()
+			invite_send_chosen.emit(player))
+		prow.add_child(inv_btn)
+	if not _selected_4p.is_empty():
+		var send4 := UiKit.gold_button("SEND 4-PLAYER INVITE (%d)" % _selected_4p.size(), 20)
+		send4.pressed.connect(func() -> void:
+			var picked: Array = []
+			for p in _selected_4p.values():
+				picked.append(p)
+			_selected_4p.clear()
+			_toggle_invite_box()
+			group_invite_send_chosen.emit(picked))
+		body.add_child(send4)
+		var picked_names: Array = []
+		for p in _selected_4p.values():
+			picked_names.append(String(p.get("display_name", "?")))
+		# body_label (autowrap) — a muted_label has no autowrap, so a
+		# long note would widen the whole scroll body past the panel.
+		body.add_child(UiKit.body_label("To: %s. Tap 4P on 1–3 friends, then send — the match starts when all accept. You are the fourth player." % ", ".join(picked_names), 16))
+
+func _on_search_pressed() -> void:
+	if _search_edit == null:
+		return
+	var res := await Friends.search(_search_edit.text)
+	if not bool(res.get("ok", false)):
+		_search_results = []
+		_refresh_invite_box()
+		return
+	_search_results = res.get("results", [])
+	_refresh_invite_box()
+
+# ------------------------------------------------------- invite box (v7)
 func _build_ladder() -> void:
 	for c in _ladder_box.get_children():
 		c.queue_free()

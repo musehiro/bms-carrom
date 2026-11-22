@@ -37,6 +37,10 @@ func _initialize() -> void:
 	_test_base_circle_geometry()
 	_test_stakes()
 	_test_economy_v5_consts()
+	_test_supabase_pkce()
+	_test_supabase_realtime_parse()
+	_test_supabase_rows()
+	_test_net_invite_join_message()
 	print("=== %d passed, %d failed ===" % [_passed, _failed])
 	for f in _failures:
 		print("FAIL: ", f)
@@ -430,3 +434,52 @@ func _test_economy_v5_consts() -> void:
 	_check("econ: daily ad cap 2500", SaveScript.DAILY_AD_COIN_CAP == 2500)
 	_check("econ: cap is exactly 8 ads (150+200+250+300+400x4)", 150 + 200 + 250 + 300 + 400 * 4 == SaveScript.DAILY_AD_COIN_CAP)
 	_check("econ: starting balance stays 1000", SaveScript.STARTING_COINS == 1000)
+
+func _test_supabase_pkce() -> void:
+	# RFC 7636 Appendix B test vector.
+	var challenge := SupabaseClient.pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
+	_check("v7 supa: PKCE challenge matches RFC 7636 vector", challenge == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+	var v := SupabaseClient.random_verifier()
+	_check("v7 supa: verifier is 64 chars", v.length() == 64)
+	var url := SupabaseClient.google_authorize_url("https://xyz.supabase.co", "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", "http://127.0.0.1:8765/callback")
+	_check("v7 supa: authorize URL has provider + S256 challenge", url.contains("provider=google") and url.contains("code_challenge_method=S256") and url.contains("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"))
+	_check("v7 supa: authorize URL encodes the loopback redirect", url.contains("http%3A%2F%2F127.0.0.1%3A8765%2Fcallback"))
+
+func _test_supabase_realtime_parse() -> void:
+	var join_ok := SupabaseClient.parse_realtime_message(JSON.stringify({
+		"topic": "realtime:public:invites", "event": "phx_reply",
+		"payload": {"status": "ok", "response": {}}, "ref": "1"}))
+	_check("v7 supa: join reply parses as joined", String(join_ok.get("kind", "")) == "joined")
+	var invite_msg := SupabaseClient.parse_realtime_message(JSON.stringify({
+		"topic": "realtime:public:invites", "event": "postgres_changes",
+		"payload": {"data": {"record": {"id": "inv-1", "from_name": "Nimal", "status": "pending"}}}}))
+	_check("v7 supa: postgres_changes parses as invite with the row", String(invite_msg.get("kind", "")) == "invite" and String((invite_msg.get("record", {}) as Dictionary).get("from_name", "")) == "Nimal")
+	var other := SupabaseClient.parse_realtime_message(JSON.stringify({
+		"topic": "realtime:public:profiles", "event": "postgres_changes",
+		"payload": {"data": {"record": {"id": "x"}}}}))
+	_check("v7 supa: other table ignored", other.is_empty())
+	_check("v7 supa: garbage ignored", SupabaseClient.parse_realtime_message("not json").is_empty())
+	var hb := SupabaseClient.parse_realtime_message(JSON.stringify({
+		"topic": "phoenix", "event": "phx_reply",
+		"payload": {"status": "ok"}, "ref": "9"}))
+	_check("v7 supa: heartbeat reply parses as heartbeat", String(hb.get("kind", "")) == "heartbeat")
+
+func _test_supabase_rows() -> void:
+	var row := SupabaseClient.profile_row("uid-1", "nimal@gmail.com", "Nimal", 1500, 1200, 10, 6, 3, 2,
+		["classic", "bms"], ["classic", "gold"], "bms", "gold")
+	_check("v7 supa: profile row keeps gmail + coins + xp", String(row.get("gmail", "")) == "nimal@gmail.com" and int(row.get("coins", 0)) == 1500 and int(row.get("xp", 0)) == 1200)
+	_check("v7 supa: profile row keeps shop ownership", (row.get("owned_boards", []) as Array).size() == 2 and String(row.get("equipped_striker", "")) == "gold")
+	var inv := SupabaseClient.invite_row("grp-1", "uid-1", "uid-2", "Nimal", "Saman", "2p", 100)
+	_check("v7 supa: invite row is pending 2p with the stake", String(inv.get("status", "")) == "pending" and String(inv.get("mode", "")) == "2p" and int(inv.get("stake", 0)) == 100)
+	_check("v7 supa: invite row carries both names", String(inv.get("from_name", "")) == "Nimal" and String(inv.get("to_name", "")) == "Saman")
+	var neg := SupabaseClient.invite_row("grp-1", "uid-1", "uid-2", "Nimal", "Saman", "2p", -50)
+	_check("v7 supa: negative stake clamped to 0", int(neg.get("stake", -1)) == 0)
+	var join := SupabaseClient.realtime_join_payload("uid-1", "3")
+	var filters: Array = ((join.get("payload", {}) as Dictionary).get("config", {}) as Dictionary).get("postgres_changes", [])
+	_check("v7 supa: realtime join subscribes to my invites both ways", filters.size() == 2 and String((filters[0] as Dictionary).get("filter", "")).contains("to_id=eq.uid-1") and String((filters[1] as Dictionary).get("filter", "")).contains("from_id=eq.uid-1"))
+
+func _test_net_invite_join_message() -> void:
+	var msg := NetClient.invite_join_message("grp-9", "Nimal", 3, 100, "2p", 0, false)
+	_check("v7 net: invite_join message shape", String(msg.get("type", "")) == "invite_join" and String(msg.get("group_id", "")) == "grp-9" and int(msg.get("stake", 0)) == 100 and not bool(msg.get("is_inviter", true)))
+	var inviter := NetClient.invite_join_message("grp-9", "Me", 3, 100, "4p", 1, true)
+	_check("v7 net: inviter flag + 4p mode carried", bool(inviter.get("is_inviter", false)) and String(inviter.get("mode", "")) == "4p" and int(inviter.get("table", -1)) == 1)
