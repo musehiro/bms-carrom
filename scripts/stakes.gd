@@ -48,3 +48,30 @@ static func payout(your_stake: int, opp_stake: int, outcome: String) -> int:
 			return your_stake
 		_:
 			return 0
+
+## 4-player doubles payout. `stakes` is all four players' stakes in seat
+## order; `your_seat` is the local player's seat. The winning TEAM
+## splits the whole pot equally between its two partners; a draw refunds
+## every stake. `my_team_won` is true when the local player's team won.
+## The pot is split equally; an odd leftover coin goes to the team's
+## first seat (lowest seat number on the winning team).
+static func pot_4p(stakes: Array) -> int:
+	var total := 0
+	for s in stakes:
+		total += int(s)
+	return total
+
+static func payout_4p(stakes: Array, your_seat: int, outcome: String) -> int:
+	var your_stake := int(stakes[your_seat]) if your_seat >= 0 and your_seat < stakes.size() else 0
+	match outcome:
+		"draw":
+			return your_stake
+		"win":
+			var pot := pot_4p(stakes)
+			var share := pot / 2
+			var first_seat := 0 if (your_seat % 2) == 0 else 1
+			if your_seat == first_seat and pot % 2 == 1:
+				share += 1
+			return share
+		_:
+			return 0

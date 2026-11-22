@@ -6,15 +6,20 @@ extends Control
 
 var _home: HomeScreen = null
 var _mode: ModeChoiceScreen = null
+var _nearby: NearbyScreen = null
 var _match: MatchScreen = null
 var _searching: Control = null
 var _search_table := 0 # matchmaking band for the current search (Stakes.band_for_stake)
 var _search_stake := 0 # chosen stake for the current search
+var _search_players := 2 # 2 or 4 — how many players this search is for
 var _search_elapsed := 0.0
 var _searching_active := false
 var _search_widened := false
+var _search_mode := "" # "internet" | "host" | "join" — which search is running
 var _search_bot_button: Button = null
 var _search_status: Label = null
+var _lan_hosts_box: VBoxContainer = null # join popup: found-host buttons
+var _lan_found_buttons: Dictionary = {} # ip -> Button (no duplicates)
 var _toast_label: Label = null
 var _shot_mode := ""
 var _shot_out := ""
@@ -32,6 +37,8 @@ func _ready() -> void:
 	Net.matched.connect(_on_matched)
 	Net.queue_failed.connect(_on_queue_failed)
 	Net.connected_to_server.connect(_on_net_connected)
+	Net.lan_host_found.connect(_on_lan_host_found)
+	Net.lan_discovery_failed.connect(_on_lan_discovery_failed)
 	var args := OS.get_cmdline_user_args()
 	for a in args:
 		if a.begins_with("--shot="):
@@ -46,6 +53,17 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if _searching_active:
 		_search_elapsed += delta
+		if _search_mode == "host":
+			# Hosting: no level widening, no BOT fallback — just wait.
+			if _search_status:
+				_search_status.text = "Hosting on Wi-Fi… %ds\nWaiting for a nearby player…" % int(_search_elapsed)
+			return
+		if _search_mode == "join":
+			# Discovering: no BOT fallback yet — it applies once a host
+			# is chosen and _start_matchmaking takes over (mode internet).
+			if _search_status:
+				_search_status.text = "Listening for nearby hosts… %ds\nMake sure the other phone taps NEARBY → HOST." % int(_search_elapsed)
+			return
 		if _search_elapsed >= 30.0 and not _search_widened:
 			_search_widened = true
 			if _search_status:
@@ -55,9 +73,15 @@ func _process(delta: float) -> void:
 			_search_bot_button.visible = true
 		if _search_status and not _search_widened:
 			if _search_elapsed >= 12.0:
-				_search_status.text = "Searching… %ds\nNo opponent yet — play vs the computer instead." % int(_search_elapsed)
+				if _search_players == 4:
+					_search_status.text = "Searching… %ds\nNo players yet — play vs the computer instead." % int(_search_elapsed)
+				else:
+					_search_status.text = "Searching… %ds\nNo opponent yet — play vs the computer instead." % int(_search_elapsed)
 			else:
-				_search_status.text = "Searching for an opponent… %ds\nMatched within ±2 levels." % int(_search_elapsed)
+				if _search_players == 4:
+					_search_status.text = "Searching for 3 more players… %ds\nDoubles — matched within ±2 levels." % int(_search_elapsed)
+				else:
+					_search_status.text = "Searching for an opponent… %ds\nMatched within ±2 levels." % int(_search_elapsed)
 
 # ------------------------------------------------------------------- screens
 
@@ -67,9 +91,11 @@ func _clear() -> void:
 		c.queue_free()
 	_home = null
 	_mode = null
+	_nearby = null
 	_match = null
 	_searching = null
 	_searching_active = false
+	_search_mode = ""
 
 func _show_home() -> void:
 	_clear()
@@ -108,6 +134,7 @@ func _open_mode_choice() -> void:
 	add_child(_mode)
 	_mode.solo_chosen.connect(_show_solo_difficulty)
 	_mode.online_chosen.connect(_show_online_stake)
+	_mode.nearby_chosen.connect(_open_nearby)
 	_mode.go_back.connect(_show_home)
 
 func _show_solo_difficulty() -> void:
@@ -129,11 +156,154 @@ func _show_solo_difficulty() -> void:
 	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
 
 ## Stake picker (v5): before an online match the player chooses ANY
-## stake up to their balance — no fixed tables any more.
+## stake up to their balance — no fixed tables any more. Then (v6) they
+## choose 2 players (1 vs 1) or 4 players (doubles, 2 vs 2).
 func _show_online_stake() -> void:
+	_show_stake_picker(func(stake: int) -> void: _show_online_players(stake))
+
+func _show_online_players(stake: int) -> void:
+	var pop: Dictionary = UiKit.popup_window("ONLINE — HOW MANY PLAYERS?", Vector2(560, 520))
+	add_child(pop["dim"])
+	var box: VBoxContainer = pop["box"]
+	box.add_child(UiKit.body_label("Your stake ◉ %d. The winning team splits the whole pot." % stake, 20))
+	var b2 := UiKit.gold_button("2 PLAYERS — 1 vs 1", 26)
+	b2.pressed.connect(func() -> void:
+		pop["dim"].queue_free()
+		_start_matchmaking(stake, "", 2))
+	box.add_child(b2)
+	box.add_child(UiKit.muted_label("Classic match — you vs one opponent. Winner takes both stakes.", 17))
+	var b4 := UiKit.dark_button("4 PLAYERS — DOUBLES (2 vs 2)", 26)
+	b4.pressed.connect(func() -> void:
+		pop["dim"].queue_free()
+		_start_matchmaking(stake, "", 4))
+	box.add_child(b4)
+	box.add_child(UiKit.muted_label("One player per side — opposite sides are partners. The winning TEAM splits all four stakes.", 17))
+	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
+
+## The same picker with a caller-chosen continuation + intro note, so
+## the LAN flows (host/join) can reuse it with their own wording.
+func _show_stake_picker(on_confirm: Callable, note: String = "") -> void:
 	var parent: Control = _home if _home else self
-	var pop := UiKit.stake_picker(Save.coins, func(stake: int) -> void: _start_matchmaking(stake))
+	var pop := UiKit.stake_picker(Save.coins, on_confirm, note)
 	parent.add_child(pop["dim"])
+
+# ------------------------------------------------------- nearby (v6, LAN)
+
+func _open_nearby() -> void:
+	_clear()
+	_nearby = NearbyScreen.new()
+	add_child(_nearby)
+	_nearby.host_chosen.connect(func() -> void: _show_stake_picker(func(s: int) -> void: _start_lan_host(s), "Same-Wi-Fi match — the other phone joins from the NEARBY screen. You choose your own stake — any amount up to your balance. Winner takes the pot (both stakes)."))
+	_nearby.join_chosen.connect(func() -> void: _show_stake_picker(func(s: int) -> void: _start_lan_join(s), "Same-Wi-Fi match — find a phone on your Wi-Fi that is hosting. You choose your own stake — any amount up to your balance. Winner takes the pot (both stakes)."))
+	_nearby.go_back.connect(_open_mode_choice)
+
+func _start_lan_host(stake: int) -> void:
+	if not Stakes.valid_stake(stake, Save.coins):
+		_toast("Not enough coins for that stake — watch an ad to earn more.")
+		return
+	_search_stake = stake
+	_search_table = Stakes.band_for_stake(stake)
+	_search_elapsed = 0.0
+	_search_widened = false
+	_search_mode = "host"
+	_searching_active = true
+	_searching = Control.new()
+	UiKit.full_rect(_searching)
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.75)
+	UiKit.full_rect(dim)
+	_searching.add_child(dim)
+	var pop: Dictionary = UiKit.popup_window("HOSTING ON WI-FI", Vector2(560, 520))
+	_searching.add_child(pop["dim"])
+	var box: VBoxContainer = pop["box"]
+	_search_status = UiKit.body_label("Hosting on Wi-Fi… 0s\nWaiting for a nearby player…", 22)
+	box.add_child(_search_status)
+	var ips := NetClient.lan_local_ips()
+	var ip_text := ", ".join(ips) if not ips.is_empty() else "—"
+	box.add_child(UiKit.body_label("Your Wi-Fi address: %s\nThe other phone taps NEARBY → JOIN." % ip_text, 18))
+	box.add_child(UiKit.body_label("Your stake ◉ %d — winner takes the pot (your stake + opponent's stake)." % stake, 18))
+	box.add_child(UiKit.muted_label("Both phones must be on the same Wi-Fi.", 17))
+	_search_bot_button = null # no BOT fallback while hosting
+	var cancel := UiKit.dark_button("CANCEL", 24)
+	cancel.pressed.connect(_cancel_search)
+	box.add_child(cancel)
+	pop["close"].pressed.connect(_cancel_search)
+	add_child(_searching)
+	Net.start_host(Save.player_name, Save.level(), _search_table, stake)
+
+func _start_lan_join(stake: int) -> void:
+	if not Stakes.valid_stake(stake, Save.coins):
+		_toast("Not enough coins for that stake — watch an ad to earn more.")
+		return
+	_search_stake = stake
+	_search_table = Stakes.band_for_stake(stake)
+	_search_elapsed = 0.0
+	_search_widened = false
+	_search_mode = "join"
+	_searching_active = true
+	_lan_found_buttons.clear()
+	_searching = Control.new()
+	UiKit.full_rect(_searching)
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.75)
+	UiKit.full_rect(dim)
+	_searching.add_child(dim)
+	var pop: Dictionary = UiKit.popup_window("NEARBY PLAYERS", Vector2(560, 560))
+	_searching.add_child(pop["dim"])
+	var box: VBoxContainer = pop["box"]
+	_search_status = UiKit.body_label("Listening for nearby hosts… 0s\nMake sure the other phone taps NEARBY → HOST.", 22)
+	box.add_child(_search_status)
+	_lan_hosts_box = VBoxContainer.new()
+	_lan_hosts_box.add_theme_constant_override("separation", 8)
+	box.add_child(_lan_hosts_box)
+	box.add_child(UiKit.muted_label("Or type the host's Wi-Fi address:", 17))
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	box.add_child(row)
+	var edit := LineEdit.new()
+	edit.placeholder_text = "e.g. 192.168.1.5"
+	edit.add_theme_font_size_override("font_size", 22)
+	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	edit.custom_minimum_size = Vector2(0, 56)
+	row.add_child(edit)
+	var go := UiKit.dark_button("CONNECT", 22)
+	go.pressed.connect(func() -> void:
+		var ip := edit.text.strip_edges()
+		if ip != "":
+			_join_lan_host(ip))
+	row.add_child(go)
+	_search_bot_button = null # no BOT fallback while discovering
+	var cancel := UiKit.dark_button("CANCEL", 24)
+	cancel.pressed.connect(_cancel_search)
+	box.add_child(cancel)
+	pop["close"].pressed.connect(_cancel_search)
+	add_child(_searching)
+	Net.start_discovery()
+
+func _on_lan_host_found(host: Dictionary) -> void:
+	if _searching == null or _search_mode != "join" or _lan_hosts_box == null:
+		return
+	var ip := String(host["ip"])
+	if _lan_found_buttons.has(ip):
+		return
+	var b := UiKit.dark_button("%s — %s" % [String(host["name"]), ip], 22)
+	_lan_hosts_box.add_child(b)
+	_lan_found_buttons[ip] = b
+	b.pressed.connect(func() -> void: _join_lan_host(ip))
+
+func _on_lan_discovery_failed(message: String) -> void:
+	_toast(message)
+
+## Join a discovered (or manually typed) LAN host: stop discovering and
+## run the normal search flow against that IP.
+func _join_lan_host(ip: String) -> void:
+	Net.stop_discovery()
+	if _searching:
+		_searching.queue_free()
+		_searching = null
+	_searching_active = false
+	_search_mode = ""
+	_start_matchmaking(_search_stake, ip)
 
 func _open_shop() -> void:
 	_clear()
@@ -176,16 +346,18 @@ func _open_aim_assist() -> void:
 
 # -------------------------------------------------------------- matchmaking
 
-func _start_matchmaking(stake: int) -> void:
+func _start_matchmaking(stake: int, host_ip: String = "", players: int = 2) -> void:
 	# The stake was validated in the picker; re-check defensively (the
 	# balance can only have changed via a shop purchase meanwhile).
 	if not Stakes.valid_stake(stake, Save.coins):
 		_toast("Not enough coins for that stake — watch an ad to earn more.")
 		return
 	_search_stake = stake
+	_search_players = players
 	_search_table = Stakes.band_for_stake(stake)
 	_search_elapsed = 0.0
 	_search_widened = false
+	_search_mode = "internet"
 	_searching_active = true
 	_searching = Control.new()
 	UiKit.full_rect(_searching)
@@ -196,9 +368,12 @@ func _start_matchmaking(stake: int) -> void:
 	var pop: Dictionary = UiKit.popup_window("FINDING OPPONENT", Vector2(560, 460))
 	_searching.add_child(pop["dim"])
 	var box: VBoxContainer = pop["box"]
-	_search_status = UiKit.body_label("Searching for an opponent… 0s\nMatched within ±2 levels.", 22)
+	if players == 4:
+		_search_status = UiKit.body_label("Searching for 3 more players… 0s\nDoubles — matched within ±2 levels.", 22)
+	else:
+		_search_status = UiKit.body_label("Searching for an opponent… 0s\nMatched within ±2 levels.", 22)
 	box.add_child(_search_status)
-	var stake_label := UiKit.body_label("Your stake ◉ %d — winner takes the pot (your stake + opponent's stake)." % stake, 18)
+	var stake_label := UiKit.body_label("Your stake ◉ %d — winning TEAM splits the pot (all four stakes)." % stake, 18) if players == 4 else UiKit.body_label("Your stake ◉ %d — winner takes the pot (your stake + opponent's stake)." % stake, 18)
 	box.add_child(stake_label)
 	_search_bot_button = UiKit.dark_button("NO OPPONENT? PLAY vs COMPUTER INSTEAD", 20)
 	_search_bot_button.visible = false
@@ -213,26 +388,37 @@ func _start_matchmaking(stake: int) -> void:
 	else:
 		add_child(_searching)
 	if Net.is_connected_to_server():
-		Net.queue_up(Save.player_name, Save.level(), _search_table, _search_stake)
+		Net.queue_up(Save.player_name, Save.level(), _search_table, _search_stake, "4p" if _search_players == 4 else "2p")
+	elif host_ip != "":
+		# LAN join: connect to the discovered host, not the internet server.
+		Net.connect_to_server(host_ip, NetClient.DEFAULT_PORT)
 	else:
 		Net.connect_to_server(Save.online_host, NetClient.DEFAULT_PORT)
 
 func _on_net_connected() -> void:
 	if _searching_active:
-		Net.queue_up(Save.player_name, Save.level(), _search_table, _search_stake)
+		Net.queue_up(Save.player_name, Save.level(), _search_table, _search_stake, "4p" if _search_players == 4 else "2p")
 
 func _on_matched(data: Dictionary) -> void:
 	if not _searching_active:
 		return
 	_searching_active = false
-	var opp_name := String(data.get("opponent", "Player"))
-	var opp_level := int(data.get("opp_level", 1))
-	var opp_stake := int(data.get("opp_stake", 0))
-	var you_break := bool(data.get("you_break", true))
 	_clear()
 	_match = MatchScreen.new()
 	add_child(_match)
-	_match.setup("online", 0, _search_table, opp_name, opp_level, Net, 0 if you_break else 1, _search_stake, opp_stake)
+	if String(data.get("mode", "2p")) == "4p" and data.has("players"):
+		# 4p doubles: the server sends the full seat-ordered roster,
+		# our seat and the breaker seat.
+		var roster: Array = data["players"]
+		var your_seat := int(data.get("your_seat", 0))
+		var breaker_seat := int(data.get("breaker_seat", 0))
+		_match.setup_4p(roster, your_seat, breaker_seat, Net)
+	else:
+		var opp_name := String(data.get("opponent", "Player"))
+		var opp_level := int(data.get("opp_level", 1))
+		var opp_stake := int(data.get("opp_stake", 0))
+		var you_break := bool(data.get("you_break", true))
+		_match.setup("online", 0, _search_table, opp_name, opp_level, Net, 0 if you_break else 1, _search_stake, opp_stake)
 	_match.exit_to_home.connect(_show_home)
 	# Rematch goes back to the stake picker — the player chooses a fresh
 	# stake for every online match.
@@ -253,6 +439,7 @@ func _on_play_bot_from_search() -> void:
 
 func _cancel_search() -> void:
 	_searching_active = false
+	_search_mode = ""
 	Net.disconnect_client()
 	if _searching:
 		_searching.queue_free()
@@ -261,6 +448,7 @@ func _cancel_search() -> void:
 func _on_queue_failed(message: String) -> void:
 	if _searching_active:
 		_searching_active = false
+		_search_mode = ""
 		if _searching:
 			_searching.queue_free()
 			_searching = null
@@ -340,6 +528,12 @@ func _on_rewarded_earned(reason: String, simulated: bool) -> void:
 		else:
 			_toast("Daily bonus already claimed.")
 		Save.save()
+	elif reason == "double_win":
+		# Win-screen doubling: the ladder payment above already applied
+		# (each double ad pays the ladder too and advances it); the
+		# match screen counts the ad toward the 2 needed to double.
+		if _match:
+			_match.on_double_ad_watched()
 	if _home:
 		_home.refresh()
 
@@ -421,9 +615,53 @@ func _run_shot_mode() -> void:
 			_show_home()
 			_show_online_stake()
 			_capture_after(1.0)
+		"nearby":
+			# v6: the NEARBY (LAN) screen — HOST / JOIN + server address.
+			_open_nearby()
+			_capture_after(1.0)
+		"lanhost":
+			# v6: the HOSTING ON WI-FI popup (stake 100, from the home screen).
+			_show_home()
+			_start_lan_host(100)
+			_capture_after(1.0)
+		"search4p":
+			# v6: 4-player doubles search — same as "search" but the 4p
+			# wording (3 more players, team splits the pot).
+			_show_home()
+			Net.queue_failed.disconnect(_on_queue_failed)
+			_start_matchmaking(100, "", 4)
+			_search_elapsed = 11.5
+			_capture_after(1.2)
+		"win":
+			# v6: the premium win screen — force an online win (stake
+			# 100 + 100) on a solo match so the pot + DOUBLE offer show.
+			_start_solo(1)
+			_demo_win_and_capture()
 		_:
 			_show_home()
 			_capture_after(1.5)
+
+func _demo_win_and_capture() -> void:
+	# Wait for the match to be live, then force an online win so the
+	# premium win screen (pot + COLLECT + DOUBLE) shows for the capture.
+	var waited := 0.0
+	while waited < 9.0:
+		await get_tree().create_timer(0.5).timeout
+		waited += 0.5
+		if _match == null:
+			_capture()
+			return
+		if _match.phase == "place":
+			break
+	if _match and _match.phase == "place":
+		_match.mode = "online"
+		_match.your_stake = 100
+		_match.opp_stake = 100
+		_match.rules_state["over"] = true
+		_match.rules_state["winner"] = 0
+		_match._show_result()
+		await get_tree().create_timer(0.8).timeout
+	_capture()
 
 func _capture_after(seconds: float) -> void:
 	await get_tree().create_timer(seconds).timeout

@@ -38,6 +38,37 @@ static func baseline_y(player: int) -> float:
 		return BOARD_CENTER.y + SURFACE_HALF - BASELINE_OFFSET
 	return BOARD_CENTER.y - SURFACE_HALF + BASELINE_OFFSET
 
+## Striker start position for any seat (v6 doubles): 0 bottom, 1 top,
+## 2 left, 3 right — each on their own baseline, centred.
+static func baseline_pos(seat: int) -> Vector2:
+	match int(seat) % 4:
+		0:
+			return Vector2(BOARD_CENTER.x, BOARD_CENTER.y + SURFACE_HALF - BASELINE_OFFSET)
+		1:
+			return Vector2(BOARD_CENTER.x, BOARD_CENTER.y - SURFACE_HALF + BASELINE_OFFSET)
+		2:
+			return Vector2(BOARD_CENTER.x - SURFACE_HALF + BASELINE_OFFSET, BOARD_CENTER.y)
+		_:
+			return Vector2(BOARD_CENTER.x + SURFACE_HALF - BASELINE_OFFSET, BOARD_CENTER.y)
+
+## Axis the striker slides along on this seat's baseline: "x" for the
+## bottom/top seats, "y" for the left/right seats.
+static func baseline_axis(seat: int) -> String:
+	return "y" if int(seat) % 4 >= 2 else "x"
+
+## Unit vector pointing INTO the board from this seat (aim must have a
+## positive dot with it — you shoot toward the board, never away).
+static func aim_into_board(seat: int) -> Vector2:
+	match int(seat) % 4:
+		0:
+			return Vector2(0, -1)
+		1:
+			return Vector2(0, 1)
+		2:
+			return Vector2(1, 0)
+		_:
+			return Vector2(-1, 0)
+
 static func make_piece(kind: String, pos: Vector2) -> Dictionary:
 	var r := COIN_R
 	var mass := 1.0

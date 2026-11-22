@@ -24,11 +24,30 @@ var mode := "solo" # solo | online
 var difficulty := 1 # 0 Easy, 1 Medium, 2 Hard
 var table := 0 # online matchmaking band (from Stakes.band_for_stake): 0 <250, 1 <1000, 2 >=1000
 var your_stake := 0 # online: own stake, locked (deducted) at match start
-var opp_stake := 0 # online: opponent's stake, from the server's matched message
+var opp_stake := 0 # online 2p: opponent's stake, from the server's matched message
 var practice := false # true for the labelled BOT fallback match (zero coins)
 var opponent_name := "Computer"
 var opponent_level := 1
 var net: NetClient = null
+# 4-player doubles (v6): player_count 2 = singles, 4 = doubles.
+# players4 is seat-ordered [{name, level, stake, seat}]; stakes4 is the
+# four stakes in seat order. Teams: seats 0,2 vs 1,3 (partners opposite).
+var player_count := 2
+var players4: Array = []
+var stakes4: Array = []
+# Win-pot hold (v6 premium win screen): an online win does NOT credit
+# the pot immediately — the player COLLECTs it, or watches 2 ads to
+# DOUBLE it. Closing the screen without collecting credits the base pot
+# (coins are never lost). _pot_pending is the base pot; _pot_credited
+# guards against double-credit; _double_ads counts the doubling ads.
+var _pot_pending := 0
+var _pot_credited := false
+var _double_ads := 0
+var _double_button: Button = null
+var _double_label: Label = null
+var _collect_button: Button = null
+var _collect_amount_label: Label = null
+var _result_pop: Dictionary = {}
 
 var pieces: Array = []
 var rules_state: Dictionary = {}
@@ -87,6 +106,25 @@ func setup(p_mode: String, p_difficulty: int, p_table: int, p_opp_name: String, 
 	opp_stake = p_opp_stake
 	practice = p_practice
 
+## 4-player doubles setup (v6): p_players is seat-ordered
+## [{name, level, stake, seat}]; p_your_seat is the local player's seat;
+## p_breaker_seat is the seat that breaks (their team plays white).
+func setup_4p(p_players: Array, p_your_seat: int, p_breaker_seat: int, p_net: NetClient) -> void:
+	mode = "online"
+	player_count = 4
+	players4 = p_players
+	stakes4 = []
+	for p in p_players:
+		stakes4.append(int(p.get("stake", 0)))
+	local_seat = p_your_seat
+	_breaker_override = p_breaker_seat
+	your_stake = int(stakes4[p_your_seat]) if p_your_seat < stakes4.size() else 0
+	opp_stake = 0 # 2p field unused in 4p; the pot is Stakes.pot_4p(stakes4)
+	net = p_net
+	# Opponent panel header shows the partner (seat+2) — set in _update_hud.
+	opponent_name = String(p_players[(p_your_seat + 2) % 4].get("name", "Partner")) + " (partner)"
+	opponent_level = int(p_players[(p_your_seat + 2) % 4].get("level", 1))
+
 func _ready() -> void:
 	randomize()
 	_build_hud()
@@ -100,13 +138,17 @@ func _ready() -> void:
 	pieces = CarromPhysics.setup_pieces()
 	_striker = _find_piece("striker")
 	var breaker := _breaker_override if _breaker_override >= 0 else randi() % 2
-	rules_state = CarromRules.fresh_state(breaker)
+	rules_state = CarromRules.fresh_state(breaker, player_count)
 	board_view.pieces = pieces
 	_place_striker_for_turn()
 	turn_time_max = _shot_time()
 	turn_time_left = turn_time_max
 	_update_hud()
-	_show_message("Breaker plays WHITE" if breaker == 0 else "Opponent breaks — plays WHITE", 2.5)
+	if player_count == 4:
+		var bname := String(players4[breaker].get("name", "Player")) if breaker < players4.size() else "Player"
+		_show_message("%s breaks — their team plays WHITE" % bname, 2.5)
+	else:
+		_show_message("Breaker plays WHITE" if breaker == 0 else "Opponent breaks — plays WHITE", 2.5)
 	if mode == "online" and entry_paid == false:
 		entry_paid = true
 		# The stake is LOCKED (deducted) when the match starts — never
@@ -135,7 +177,9 @@ func _place_striker_for_turn() -> void:
 	var seat: int = rules_state["turn"]
 	_striker["active"] = true
 	_striker["vel"] = Vector2.ZERO
-	_striker["pos"] = Vector2(CarromPhysics.BOARD_CENTER.x, CarromPhysics.baseline_y(seat))
+	# baseline_pos works for every seat (bottom/top/left/right); for
+	# singles it is identical to the old baseline_y behaviour.
+	_striker["pos"] = CarromPhysics.baseline_pos(seat)
 	board_view.aim_visible = false
 
 func _is_local_turn() -> bool:
@@ -169,7 +213,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			_dragging = true
 			_drag_mode = ""
 			_press_pos = pos
-		elif _striker["active"] and absf(pos.y - CarromPhysics.baseline_y(local_seat)) < 55.0 and absf(pos.x - CarromPhysics.BOARD_CENTER.x) <= CarromPhysics.BASELINE_HALF_LEN + 40.0:
+		elif _striker["active"] and _near_baseline(pos):
 			# Forgiving grab (v2): touching the baseline anywhere starts a
 			# slide, so the striker is easy to move on a phone.
 			_dragging = true
@@ -185,17 +229,37 @@ func _unhandled_input(event: InputEvent) -> void:
 		board_view.pocket_glow = -1
 		_power_bar.visible = false
 
+func _near_baseline(pos: Vector2) -> bool:
+	# Is this touch on (or near) the local seat's baseline band? Bottom
+	# and top seats slide along x; left and right seats slide along y.
+	var base := CarromPhysics.baseline_pos(local_seat)
+	if CarromPhysics.baseline_axis(local_seat) == "x":
+		return absf(pos.y - base.y) < 55.0 and absf(pos.x - CarromPhysics.BOARD_CENTER.x) <= CarromPhysics.BASELINE_HALF_LEN + 40.0
+	return absf(pos.x - base.x) < 55.0 and absf(pos.y - CarromPhysics.BOARD_CENTER.y) <= CarromPhysics.BASELINE_HALF_LEN + 40.0
+
 func _handle_drag(pos: Vector2) -> void:
 	var delta := pos - _press_pos
 	if _drag_mode == "":
-		if absf(delta.x) > 10.0 and absf(delta.x) > absf(delta.y):
-			_drag_mode = "slide"
-		elif absf(delta.y) > 10.0:
-			_drag_mode = "aim"
+		# Bottom/top seats slide horizontally and aim vertically; left/
+		# right seats slide vertically and aim horizontally.
+		if CarromPhysics.baseline_axis(local_seat) == "x":
+			if absf(delta.x) > 10.0 and absf(delta.x) > absf(delta.y):
+				_drag_mode = "slide"
+			elif absf(delta.y) > 10.0:
+				_drag_mode = "aim"
+		else:
+			if absf(delta.y) > 10.0 and absf(delta.y) > absf(delta.x):
+				_drag_mode = "slide"
+			elif absf(delta.x) > 10.0:
+				_drag_mode = "aim"
 	if _drag_mode == "slide":
-		var cx := CarromPhysics.BOARD_CENTER.x
-		_striker["pos"].x = clampf(pos.x, cx - CarromPhysics.BASELINE_HALF_LEN, cx + CarromPhysics.BASELINE_HALF_LEN)
-		_striker["pos"].y = CarromPhysics.baseline_y(local_seat)
+		var base := CarromPhysics.baseline_pos(local_seat)
+		if CarromPhysics.baseline_axis(local_seat) == "x":
+			_striker["pos"].x = clampf(pos.x, CarromPhysics.BOARD_CENTER.x - CarromPhysics.BASELINE_HALF_LEN, CarromPhysics.BOARD_CENTER.x + CarromPhysics.BASELINE_HALF_LEN)
+			_striker["pos"].y = base.y
+		else:
+			_striker["pos"].y = clampf(pos.y, CarromPhysics.BOARD_CENTER.y - CarromPhysics.BASELINE_HALF_LEN, CarromPhysics.BOARD_CENTER.y + CarromPhysics.BASELINE_HALF_LEN)
+			_striker["pos"].x = base.x
 	elif _drag_mode == "aim":
 		var pull: Vector2 = _striker["pos"] - pos
 		if pull.length() < 12.0:
@@ -203,8 +267,10 @@ func _handle_drag(pos: Vector2) -> void:
 			_power_bar.visible = false
 			return
 		var dir := pull.normalized()
-		# Local seat is the bottom: aim must point up the board.
-		if dir.y > -0.05:
+		# Aim must point into the board from your seat (up from the
+		# bottom, down from the top, right from the left, left from
+		# the right) — never away from it.
+		if dir.dot(CarromPhysics.aim_into_board(local_seat)) <= 0.05:
 			return
 		_aim_dir = dir
 		_aim_power = clampf(pull.length() / 280.0, 0.0, 1.0)
@@ -258,7 +324,9 @@ func _shoot(dir: Vector2, power: float, by_local: bool) -> void:
 	_prev_striker_vel = _striker["vel"]
 	Sfx.click(power)
 	if by_local and net:
-		net.send_shot({"sx": _striker["pos"].x, "dx": dir.x, "dy": dir.y, "power": power})
+		# The shot carries the striker's position + seat so every client
+		# (2p or 4p, any seat) replays it from exactly the same spot.
+		net.send_shot({"sx": _striker["pos"].x, "sy": _striker["pos"].y, "seat": int(rules_state["turn"]), "dx": dir.x, "dy": dir.y, "power": power})
 
 func _physics_process(delta: float) -> void:
 	if phase != "shooting":
@@ -394,7 +462,13 @@ func _serialize_state() -> Dictionary:
 func _on_remote_shot(data: Dictionary) -> void:
 	if phase != "place" or int(rules_state["turn"]) == local_seat:
 		return
-	_striker["pos"] = Vector2(float(data["sx"]), CarromPhysics.baseline_y(1 - local_seat))
+	# The sender's striker position travels with the shot (v6) — place
+	# it exactly there. Old 2p messages only carry sx: fall back to the
+	# opponent's baseline, as before.
+	if data.has("sy"):
+		_striker["pos"] = Vector2(float(data["sx"]), float(data["sy"]))
+	else:
+		_striker["pos"] = Vector2(float(data["sx"]), CarromPhysics.baseline_y(1 - local_seat))
 	_shoot(Vector2(float(data["dx"]), float(data["dy"])), float(data["power"]), false)
 
 func _on_remote_state(data: Dictionary) -> void:
@@ -414,9 +488,16 @@ func _on_remote_state(data: Dictionary) -> void:
 func _on_opponent_left() -> void:
 	if result_shown:
 		return
-	_show_message("Opponent left — you win!", 2.5)
-	rules_state["over"] = true
-	rules_state["winner"] = local_seat
+	# 4p: the server tells us which seat left (Net.last_opponent_left_seat).
+	# If my PARTNER left, my team forfeits; if an opponent left, my team wins.
+	if player_count == 4 and net != null and net.last_opponent_left_seat >= 0 and CarromRules.team_of(rules_state, net.last_opponent_left_seat) == CarromRules.team_of(rules_state, local_seat):
+		_show_message("Your partner left — your team loses.", 2.5)
+		rules_state["over"] = true
+		rules_state["winner"] = (local_seat + 1) % player_count
+	else:
+		_show_message("Opponent left — you win!", 2.5)
+		rules_state["over"] = true
+		rules_state["winner"] = local_seat
 	_show_result()
 
 # ---------------------------------------------------------------------- AI
@@ -448,15 +529,26 @@ func _tick_timer(delta: float) -> void:
 			if mode == "online" and timeouts_in_a_row >= 2:
 				_show_message("2 time-outs — you forfeit.", 2.5)
 				rules_state["over"] = true
-				rules_state["winner"] = 1 - local_seat
+				# Winner is a seat on the opposing team (2p: 1 - local).
+				rules_state["winner"] = (local_seat + 1) % player_count
 				_show_result()
 				return
 		else:
 			remote_timeouts += 1
-			_show_message("Opponent timed out.", 2.0)
+			var timed_out: int = rules_state["turn"]
+			var my_team := CarromRules.team_of(rules_state, local_seat)
+			if player_count == 4 and CarromRules.team_of(rules_state, timed_out) == my_team:
+				_show_message("Your partner timed out.", 2.0)
+			else:
+				_show_message("Opponent timed out.", 2.0)
 			if mode == "online" and remote_timeouts >= 2:
 				rules_state["over"] = true
-				rules_state["winner"] = local_seat
+				# If the timed-out player is on MY team, my team loses;
+				# otherwise my team wins (2p: always the opponent).
+				if player_count == 4 and CarromRules.team_of(rules_state, timed_out) == my_team:
+					rules_state["winner"] = (local_seat + 1) % player_count
+				else:
+					rules_state["winner"] = local_seat
 				_show_result()
 				return
 		# Missed shot: resolve an empty stroke.
@@ -501,35 +593,44 @@ func _show_result() -> void:
 	# board has a winner); the refund path below is implemented + tested
 	# so it is ready when a draw outcome exists.
 	var is_draw := winner < 0
-	var won := winner == local_seat
+	# Win = the winning TEAM is my team (2p: team == player).
+	var won := false
+	if not is_draw:
+		won = CarromRules.team_of(rules_state, winner) == CarromRules.team_of(rules_state, local_seat)
 	if won:
 		Sfx.win()
 	elif not is_draw:
 		Sfx.foul()
+	# Pot math (online only). 2p: pot = your stake + opponent's stake.
+	# 4p: pot = all four stakes; YOUR share = your team's half of the pot.
+	var pot := 0
+	var my_share := 0
+	if mode == "online":
+		if player_count == 4:
+			pot = Stakes.pot_4p(stakes4)
+			my_share = Stakes.payout_4p(stakes4, local_seat, "win" if won else ("draw" if is_draw else "loss"))
+		else:
+			pot = your_stake + opp_stake
+			my_share = Stakes.payout(your_stake, opp_stake, "win" if won else ("draw" if is_draw else "loss"))
 	# Economy (v5): solo vs AI is free practice — ZERO coins, win or lose.
-	# Online pays the POT only (stakes locked at match start): the winner
-	# takes both stakes, the loser loses theirs, a draw refunds both. No
-	# queen / no-guide / level-up coin bonuses anywhere — the only coin
-	# sources are the ad ladder and online stakes, so a zero balance can
-	# never be farmed back through matches.
+	# Online pays the POT — but an online WIN does not credit immediately:
+	# the premium win screen HOLDS the pot until the player COLLECTs it,
+	# or watches 2 ads to DOUBLE it (see _show_premium_win). A draw
+	# refunds immediately; a loss credits nothing. No queen / no-guide /
+	# level-up coin bonuses anywhere — the only coin sources are the ad
+	# ladder and online stakes, so a zero balance can never be farmed
+	# back through matches.
 	var coins_earned := 0
-	var lines: Array = []
 	if mode == "solo":
 		if won:
 			Save.solo_wins += 1
-		lines.append("Practice win — no coins earned. Win coins in online matches!" if won else "Practice loss — no coins lost.")
-	elif is_draw:
-		coins_earned = Stakes.payout(your_stake, opp_stake, "draw")
-		lines.append("Draw — your stake ◉ %d refunded" % your_stake)
 	elif won:
-		coins_earned = Stakes.payout(your_stake, opp_stake, "win")
-		lines.append("Your stake ◉ %d  •  Opponent stake ◉ %d" % [your_stake, opp_stake])
-		lines.append("Online win — pot: +%d coins" % coins_earned)
 		Save.online_wins += 1
-	else:
-		coins_earned = Stakes.payout(your_stake, opp_stake, "loss")
-		lines.append("Your stake ◉ %d  •  Opponent stake ◉ %d" % [your_stake, opp_stake])
-		lines.append("Online loss — you lost your stake ◉ %d" % your_stake)
+		_pot_pending = my_share
+		_pot_credited = false
+		_double_ads = 0
+	elif is_draw:
+		coins_earned = my_share # refund of own stake
 	var xp_earned := Save.XP_PER_MATCH + (Save.XP_PER_WIN if won else 0) + (Save.XP_PER_QUEEN if local_covered_queen else 0)
 	var new_level := Save.add_xp(xp_earned)
 	Save.add_coins(coins_earned)
@@ -538,29 +639,212 @@ func _show_result() -> void:
 		Save.matches_won += 1
 	Save.interstitial_counter += 1
 	Save.save()
-	lines.append("XP: +%d" % xp_earned)
-	if new_level > 0:
-		lines.append("LEVEL UP! Now Lv %d · %s" % [new_level, Save.rank_name()])
-	if winner >= 0:
-		lines.append("Board score: %d" % CarromRules.board_score(rules_state, winner))
-	if rules_state.get("lose_reason", "") != "":
-		lines.append("Reason: %s" % String(rules_state["lose_reason"]).replace("_", " "))
 	# Interstitial policy: only after every 3rd match.
 	var show_ad := Save.interstitial_counter % AdsConfig.INTERSTITIAL_EVERY_N_MATCHES == 0
-	# Build the result popup.
-	var pop: Dictionary = UiKit.popup_window("DRAW" if is_draw else ("YOU WIN!" if won else "YOU LOSE"), Vector2(560, 560))
+	if won:
+		_show_premium_win(my_share, pot, xp_earned, new_level, winner)
+	else:
+		var lines: Array = []
+		if mode == "solo":
+			lines.append("Practice loss — no coins lost.")
+		elif is_draw:
+			lines.append("Draw — your stake ◉ %d refunded" % your_stake)
+		else:
+			if player_count == 4:
+				lines.append("Your team lost — the pot ◉ %d goes to the other team" % pot)
+			else:
+				lines.append("Your stake ◉ %d  •  Opponent stake ◉ %d" % [your_stake, opp_stake])
+				lines.append("Online loss — you lost your stake ◉ %d" % your_stake)
+		lines.append("XP: +%d" % xp_earned)
+		if new_level > 0:
+			lines.append("LEVEL UP! Now Lv %d · %s" % [new_level, Save.rank_name()])
+		if winner >= 0:
+			lines.append("Board score: %d" % CarromRules.board_score(rules_state, winner))
+		if rules_state.get("lose_reason", "") != "":
+			lines.append("Reason: %s" % String(rules_state["lose_reason"]).replace("_", " "))
+		var pop: Dictionary = UiKit.popup_window("DRAW" if is_draw else "YOU LOSE", Vector2(560, 560))
+		_hud.add_child(pop["dim"])
+		var box: VBoxContainer = pop["box"]
+		box.add_child(UiKit.body_label("\n".join(lines), 24))
+		var again := UiKit.gold_button("REMATCH" if mode == "solo" else "FIND REMATCH", 28)
+		var home := UiKit.dark_button("HOME", 26)
+		box.add_child(again)
+		box.add_child(home)
+		pop["close"].pressed.connect(func() -> void: exit_to_home.emit())
+		home.pressed.connect(func() -> void: exit_to_home.emit())
+		again.pressed.connect(func() -> void: rematch_requested.emit())
+	if show_ad:
+		Ads.maybe_show_interstitial()
+
+## Premium win screen (v6): a BIG "WINNER" display plus two big premium
+## buttons — (1) COLLECT with the winnings amount BIG in the middle,
+## (2) WATCH 2 ADS to DOUBLE the winnings. The pot is HELD (not credited)
+## until the player collects, doubles, or leaves the screen — leaving
+## without collecting credits the base pot, so coins are never lost.
+func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, winner: int) -> void:
+	var pop: Dictionary = UiKit.popup_window("MATCH RESULT", Vector2(600, 680))
+	_result_pop = pop
 	_hud.add_child(pop["dim"])
 	var box: VBoxContainer = pop["box"]
-	box.add_child(UiKit.body_label("\n".join(lines), 24))
+	var big := Label.new()
+	big.text = "★ WINNER ★"
+	big.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	big.add_theme_font_size_override("font_size", 52)
+	big.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
+	big.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+	big.add_theme_constant_override("shadow_offset_x", 3)
+	big.add_theme_constant_override("shadow_offset_y", 3)
+	box.add_child(big)
+	if mode == "online":
+		if player_count == 4:
+			box.add_child(UiKit.body_label("Your team wins!  Pot ◉ %d (4 stakes) — your team's half ◉ %d" % [pot, my_share], 20))
+		else:
+			box.add_child(UiKit.body_label("Your stake ◉ %d + Opponent stake ◉ %d" % [your_stake, opp_stake], 20))
+	else:
+		box.add_child(UiKit.body_label("Practice win — no coins earned.", 20))
+	# Button 1 — COLLECT (online) / CONTINUE (solo): the amount BIG.
+	if mode == "online":
+		var collect := _stacked_button([
+			{"text": "◉ %d" % my_share, "size": 44, "color": Color(0.12, 0.10, 0.02)},
+			{"text": "TAP TO COLLECT", "size": 18, "color": Color(0.12, 0.10, 0.02)}], false)
+		_collect_button = collect["button"]
+		_collect_amount_label = collect["labels"][0]
+		_collect_button.pressed.connect(_on_collect_pot)
+		box.add_child(_collect_button)
+		# Button 2 — DOUBLE (only when there is a pot to double).
+		if my_share > 0:
+			var dbl := _stacked_button([
+				{"text": "WATCH 2 ADS", "size": 26, "color": Color(1, 1, 1)},
+				{"text": "DOUBLE TO ◉ %d" % (my_share * 2), "size": 34, "color": UiKit.GOLD_LIGHT}], true)
+			_double_button = dbl["button"]
+			_double_button.pressed.connect(_on_double_pressed)
+			box.add_child(_double_button)
+			_double_label = UiKit.muted_label("2 ads double your winnings — each ad also pays the ad ladder.", 17)
+			_double_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			box.add_child(_double_label)
+	else:
+		var cont := _stacked_button([
+			{"text": "★ PRACTICE WIN ★", "size": 30, "color": Color(0.12, 0.10, 0.02)},
+			{"text": "TAP TO CONTINUE", "size": 18, "color": Color(0.12, 0.10, 0.02)}], false)
+		_collect_button = cont["button"]
+		_collect_button.pressed.connect(func() -> void: rematch_requested.emit())
+		box.add_child(_collect_button)
+	# Info line: XP / level / board score.
+	var info := "XP: +%d" % xp_earned
+	if new_level > 0:
+		info += "  •  LEVEL UP! Now Lv %d · %s" % [new_level, Save.rank_name()]
+	if winner >= 0:
+		info += "  •  Board score: %d" % CarromRules.board_score(rules_state, winner)
+	var info_l := UiKit.muted_label(info, 18)
+	info_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(info_l)
 	var again := UiKit.gold_button("REMATCH" if mode == "solo" else "FIND REMATCH", 28)
 	var home := UiKit.dark_button("HOME", 26)
 	box.add_child(again)
 	box.add_child(home)
-	pop["close"].pressed.connect(func() -> void: exit_to_home.emit())
-	home.pressed.connect(func() -> void: exit_to_home.emit())
-	again.pressed.connect(func() -> void: rematch_requested.emit())
-	if show_ad:
-		Ads.maybe_show_interstitial()
+	pop["close"].pressed.connect(func() -> void: _exit_result_home())
+	home.pressed.connect(func() -> void: _exit_result_home())
+	again.pressed.connect(func() -> void: _exit_result_rematch())
+
+## A big premium button with stacked centred lines (amount BIG in the
+## middle). Returns {button, labels}. `purple` gives the rich purple +
+## gold style used for the DOUBLE offer; otherwise gold.
+func _stacked_button(lines: Array, purple: bool) -> Dictionary:
+	var b := UiKit.dark_button("", 28)
+	if not purple:
+		b = UiKit.gold_button("", 28)
+	else:
+		b.add_theme_stylebox_override("normal", UiKit.panel_style(Color(0.38, 0.18, 0.58, 1.0), UiKit.GOLD, 16, 3))
+		b.add_theme_stylebox_override("hover", UiKit.panel_style(Color(0.46, 0.24, 0.68, 1.0), UiKit.GOLD_LIGHT, 16, 3))
+		b.add_theme_stylebox_override("pressed", UiKit.panel_style(Color(0.30, 0.12, 0.48, 1.0), UiKit.GOLD, 16, 3))
+		b.add_theme_stylebox_override("disabled", UiKit.panel_style(Color(0.20, 0.20, 0.24, 1.0), Color(0.5, 0.5, 0.5), 16, 2))
+	b.custom_minimum_size = Vector2(0, 112)
+	var vb := VBoxContainer.new()
+	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	UiKit.full_rect(vb)
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	vb.add_theme_constant_override("separation", 2)
+	var labels: Array = []
+	for ln in lines:
+		var l := Label.new()
+		l.text = String(ln.get("text", ""))
+		l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		l.add_theme_font_size_override("font_size", int(ln.get("size", 24)))
+		l.add_theme_color_override("font_color", ln.get("color", UiKit.TEXT))
+		l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		vb.add_child(l)
+		labels.append(l)
+	b.add_child(vb)
+	return {"button": b, "labels": labels}
+
+## Credit the held pot if it has not been credited yet (base amount —
+## used by COLLECT and by every exit path, so coins are never lost).
+func _collect_pot_if_pending() -> void:
+	if _pot_pending > 0 and not _pot_credited:
+		Save.add_coins(_pot_pending)
+		_pot_credited = true
+		_pot_pending = 0
+		Save.save()
+
+func _on_collect_pot() -> void:
+	if _pot_credited:
+		return
+	var amount := _pot_pending
+	_collect_pot_if_pending()
+	if _collect_amount_label:
+		_collect_amount_label.text = "COLLECTED ✓ ◉ %d" % amount
+	if _collect_button:
+		_collect_button.disabled = true
+	if _double_button:
+		_double_button.disabled = true
+	if _double_label:
+		_double_label.text = "Collected ◉ %d ✓" % amount
+
+func _on_double_pressed() -> void:
+	if _pot_credited or _pot_pending <= 0 or _double_ads >= 2:
+		return
+	Ads.show_rewarded("double_win")
+	if _double_button:
+		_double_button.disabled = true # re-enabled after ad 1 lands
+	if _double_label:
+		_double_label.text = "Ad 1 of 2 playing…"
+
+## Called by Main when a "double_win" rewarded ad completes. Each of the
+## two ads ALSO pays the ad ladder (Main's handler pays the ladder for
+## every rewarded ad) and advances it — the doubling is on top of that.
+## After the 2nd ad the held pot is credited DOUBLED.
+func on_double_ad_watched() -> void:
+	if _pot_credited or _pot_pending <= 0:
+		return
+	_double_ads += 1
+	if _double_ads >= 2:
+		var doubled := _pot_pending * 2
+		_pot_credited = true
+		_pot_pending = 0
+		Save.add_coins(doubled)
+		Save.save()
+		if _collect_button:
+			_collect_button.disabled = true
+		if _double_button:
+			_double_button.disabled = true
+		if _double_label:
+			_double_label.text = "DOUBLED! ◉ %d collected ✓" % doubled
+		_show_message("Winnings DOUBLED — ◉ %d!" % doubled, 3.0)
+	else:
+		if _double_button:
+			_double_button.disabled = false
+		if _double_label:
+			_double_label.text = "Ad 1 of 2 watched — one more to DOUBLE to ◉ %d!" % (_pot_pending * 2)
+
+## Exit paths from the win screen: credit the base pot first if it is
+## still held, then leave (coins are never lost by closing the screen).
+func _exit_result_home() -> void:
+	_collect_pot_if_pending()
+	exit_to_home.emit()
+
+func _exit_result_rematch() -> void:
+	_collect_pot_if_pending()
+	rematch_requested.emit()
 
 # ---------------------------------------------------------------------- HUD
 
@@ -574,7 +858,7 @@ func _build_hud() -> void:
 	# Every non-interactive HUD piece must be IGNORE too (v2): a STOP panel
 	# or label over the board would eat the drag before _unhandled_input.
 	# Only the pause Button stays interactive (default STOP).
-	# Opponent panel (top).
+	# Opponent panel (top). 4p needs a taller panel (3 player rows).
 	_opp_panel = PanelContainer.new()
 	_opp_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_opp_panel.add_theme_stylebox_override("panel", UiKit.panel_style())
@@ -582,7 +866,7 @@ func _build_hud() -> void:
 	_opp_panel.offset_left = 16
 	_opp_panel.offset_right = -16
 	_opp_panel.offset_top = 12
-	_opp_panel.offset_bottom = 108
+	_opp_panel.offset_bottom = 168 if player_count == 4 else 108
 	root.add_child(_opp_panel)
 	var opp_box := VBoxContainer.new()
 	opp_box.name = "OppBox"
@@ -602,13 +886,35 @@ func _build_hud() -> void:
 	opp_lv.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
 	opp_top.add_child(opp_lv)
 	opp_box.add_child(opp_top)
+	# 4p doubles: two more rows so all three other players are listed
+	# (partner + two opponents, seat order). Names are set in _update_hud.
+	if player_count == 4:
+		for k in range(1, 3):
+			var row := HBoxContainer.new()
+			row.name = "OppRow%d" % k
+			var nm := Label.new()
+			nm.name = "OppName%d" % k
+			nm.text = "Player"
+			nm.add_theme_font_size_override("font_size", 20)
+			nm.add_theme_color_override("font_color", UiKit.TEXT)
+			row.add_child(nm)
+			var lv := Label.new()
+			lv.name = "OppLevel%d" % k
+			lv.text = "Lv 1"
+			lv.add_theme_font_size_override("font_size", 18)
+			lv.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
+			row.add_child(lv)
+			opp_box.add_child(row)
 	# Online: show both stakes under the opponent name so the pot is
 	# visible for the whole match.
 	if mode == "online":
 		var stake_l := Label.new()
 		stake_l.name = "StakeLine"
 		stake_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		stake_l.text = "Your stake ◉ %d  •  Opponent stake ◉ %d" % [your_stake, opp_stake]
+		if player_count == 4:
+			stake_l.text = "Pot ◉ %d — your team's half ◉ %d" % [Stakes.pot_4p(stakes4), Stakes.payout_4p(stakes4, local_seat, "win")]
+		else:
+			stake_l.text = "Your stake ◉ %d  •  Opponent stake ◉ %d" % [your_stake, opp_stake]
 		stake_l.add_theme_font_size_override("font_size", 18)
 		stake_l.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
 		opp_box.add_child(stake_l)
@@ -617,14 +923,14 @@ func _build_hud() -> void:
 	_opp_dots.color = Color(0.15, 0.15, 0.17)
 	_opp_dots.custom_minimum_size = Vector2(200, 24)
 	opp_box.add_child(_opp_dots)
-	# Turn label.
+	# Turn label. 4p: below the taller opponent panel.
 	_turn_label = Label.new()
 	_turn_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_turn_label.add_theme_font_size_override("font_size", 26)
 	_turn_label.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
 	_turn_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_turn_label.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_turn_label.offset_top = 118
+	_turn_label.offset_top = 178 if player_count == 4 else 118
 	_turn_label.offset_left = -200
 	_turn_label.offset_right = 200
 	root.add_child(_turn_label)
@@ -635,10 +941,10 @@ func _build_hud() -> void:
 	_timer_bar.max_value = 20
 	_timer_bar.show_percentage = false
 	_timer_bar.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_timer_bar.offset_top = 158
+	_timer_bar.offset_top = 218 if player_count == 4 else 158
 	_timer_bar.offset_left = -140
 	_timer_bar.offset_right = 140
-	_timer_bar.offset_bottom = 172
+	_timer_bar.offset_bottom = 232 if player_count == 4 else 172
 	_timer_bar.add_theme_stylebox_override("background", UiKit.panel_style(Color(0, 0, 0, 0.5), Color(0, 0, 0, 0), 6, 0))
 	var fill := StyleBoxFlat.new()
 	fill.bg_color = UiKit.GOLD
@@ -652,7 +958,7 @@ func _build_hud() -> void:
 	_assist_chip.add_theme_color_override("font_color", Color(0.4, 0.9, 0.5))
 	_assist_chip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_assist_chip.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_assist_chip.offset_top = 178
+	_assist_chip.offset_top = 238 if player_count == 4 else 178
 	_assist_chip.offset_left = -200
 	_assist_chip.offset_right = 200
 	root.add_child(_assist_chip)
@@ -749,7 +1055,7 @@ func _on_pause_pressed() -> void:
 		if mode == "online" and net:
 			net.send_forfeit()
 		rules_state["over"] = true
-		rules_state["winner"] = 1 - local_seat
+		rules_state["winner"] = (local_seat + 1) % player_count
 		_show_result())
 	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
 
@@ -759,21 +1065,52 @@ func _show_message(text: String, seconds: float) -> void:
 	_msg_timer = seconds
 
 func _update_hud() -> void:
-	var opp_panel_name: Label = _opp_panel.get_node("OppBox/OppTop/OppName")
-	opp_panel_name.text = opponent_name
-	var opp_lv: Label = _opp_panel.get_node("OppBox/OppTop/OppLevel")
-	opp_lv.text = "Lv %d" % opponent_level
+	var my_team := CarromRules.team_of(rules_state, local_seat)
 	var my_color := CarromRules.own_color(rules_state, local_seat)
 	var opp_color := CarromRules.opp_color(rules_state, local_seat)
-	# Dots show pocketed coins of each seat's colour.
-	_opp_dots.filled = int(rules_state["pocketed"][1 - local_seat])
+	if player_count == 4:
+		# Top panel lists the three other players in seat order, with
+		# a team tag (PARTNER = my team, OPP = the other team).
+		var others: Array = []
+		for s in range(4):
+			if s != local_seat:
+				others.append(s)
+		for k in range(3):
+			var seat: int = others[k]
+			var p: Dictionary = players4[seat]
+			var tag := "PARTNER" if CarromRules.team_of(rules_state, seat) == my_team else "OPP"
+			var nm: Label
+			var lv: Label
+			if k == 0:
+				nm = _opp_panel.get_node("OppBox/OppTop/OppName")
+				lv = _opp_panel.get_node("OppBox/OppTop/OppLevel")
+			else:
+				nm = _opp_panel.get_node("OppBox/OppRow%d/OppName%d" % [k, k])
+				lv = _opp_panel.get_node("OppBox/OppRow%d/OppLevel%d" % [k, k])
+			nm.text = "%s (%s)" % [String(p.get("name", "Player")), tag]
+			lv.text = "Lv %d" % int(p.get("level", 1))
+	else:
+		var opp_panel_name: Label = _opp_panel.get_node("OppBox/OppTop/OppName")
+		opp_panel_name.text = opponent_name
+		var opp_lv: Label = _opp_panel.get_node("OppBox/OppTop/OppLevel")
+		opp_lv.text = "Lv %d" % opponent_level
+	# Dots show pocketed coins of each TEAM's colour.
+	_opp_dots.filled = int(rules_state["pocketed"][1 - my_team])
 	_opp_dots.color = Color(0.15, 0.15, 0.17) if opp_color == "black" else Color(0.94, 0.92, 0.86)
-	_my_dots.filled = int(rules_state["pocketed"][local_seat])
+	_my_dots.filled = int(rules_state["pocketed"][my_team])
 	_my_dots.color = Color(0.15, 0.15, 0.17) if my_color == "black" else Color(0.94, 0.92, 0.86)
 	_opp_dots.queue_redraw()
 	_my_dots.queue_redraw()
-	_turn_label.text = "YOUR TURN — %s" % my_color.to_upper() if int(rules_state["turn"]) == local_seat else "OPPONENT'S TURN — %s" % opp_color.to_upper()
-	_turn_label.add_theme_color_override("font_color", UiKit.GOLD_LIGHT if int(rules_state["turn"]) == local_seat else UiKit.MUTED)
+	var turn_seat: int = rules_state["turn"]
+	if player_count == 4:
+		var turn_name := String(players4[turn_seat].get("name", "Player")) if turn_seat < players4.size() else "Player"
+		if turn_seat == local_seat:
+			_turn_label.text = "YOUR TURN — %s" % my_color.to_upper()
+		else:
+			_turn_label.text = "%s'S TURN — %s" % [turn_name.to_upper(), CarromRules.own_color(rules_state, turn_seat).to_upper()]
+	else:
+		_turn_label.text = "YOUR TURN — %s" % my_color.to_upper() if turn_seat == local_seat else "OPPONENT'S TURN — %s" % opp_color.to_upper()
+	_turn_label.add_theme_color_override("font_color", UiKit.GOLD_LIGHT if turn_seat == local_seat else UiKit.MUTED)
 	# Glowing orange halo around the striker on your turn (Carrom Pool look).
 	if board_view != null:
 		board_view.your_turn = int(rules_state["turn"]) == local_seat

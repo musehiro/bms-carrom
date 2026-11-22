@@ -198,8 +198,16 @@ func _run() -> void:
 			_finish()
 			return
 		await _tap(_center(find_btn))
-		print("INFO: after FIND OPPONENT tap: searching=", _main._searching, " active=", _main._searching_active, " stake=", _main._search_stake)
-		_check("F4: FIND OPPONENT starts the search popup", _main._searching != null and _main._searching_active)
+		# v6: after the stake comes the 2P/4P choice — tap 2 PLAYERS.
+		var two_btn := _find_button(_main, "2 PLAYERS")
+		print("INFO: after FIND OPPONENT tap: 2p choice=", two_btn)
+		_check("F4: stake confirm opens the 2P/4P choice", two_btn != null)
+		if two_btn == null:
+			_finish()
+			return
+		await _tap(_center(two_btn))
+		print("INFO: after 2 PLAYERS tap: searching=", _main._searching, " active=", _main._searching_active, " stake=", _main._search_stake)
+		_check("F4: 2 PLAYERS starts the search popup", _main._searching != null and _main._searching_active)
 		_check("F4: search stake is 100", _main._search_stake == 100)
 		if _main._searching != null:
 			_main._search_elapsed = 11.9

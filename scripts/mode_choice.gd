@@ -15,9 +15,11 @@ extends Control
 ##
 ## Flow: PLAY -> this screen -> SOLO -> difficulty popup (proven) -> match;
 ## ONLINE -> stake picker (proven) -> search with the 12 s BOT fallback.
+## NEARBY -> same-Wi-Fi play (v6): one phone HOSTS, the other JOINS.
 
 signal solo_chosen
 signal online_chosen
+signal nearby_chosen
 signal go_back
 
 func _ready() -> void:
@@ -53,7 +55,11 @@ func _ready() -> void:
 	online.custom_minimum_size = Vector2(0, 96)
 	online.pressed.connect(func() -> void: online_chosen.emit())
 	root.add_child(online)
-	var hint := UiKit.muted_label("Online matches pair you within ±2 levels.\nNo opponent in 12 s? Play vs the computer instead.", 18)
+	var nearby := UiKit.dark_button("NEARBY — same Wi-Fi", 30)
+	nearby.custom_minimum_size = Vector2(0, 96)
+	nearby.pressed.connect(func() -> void: nearby_chosen.emit())
+	root.add_child(nearby)
+	var hint := UiKit.muted_label("Online matches pair you within ±2 levels.\nNearby matches two phones on the same Wi-Fi — one HOSTS, one JOINS.\nNo opponent in 12 s? Play vs the computer instead.", 18)
 	root.add_child(hint)
 	var spacer := Control.new()
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL

@@ -161,10 +161,11 @@ static func popup_window(title: String, size: Vector2) -> Dictionary:
 ## success (the popup is freed here); errors show in the popup itself.
 ## Quick amounts exist so the flow is one tap on a phone (and testable).
 ## Returns {dim, box, close, stake_edit, error_label, confirm}.
-static func stake_picker(balance: int, on_confirm: Callable) -> Dictionary:
+static func stake_picker(balance: int, on_confirm: Callable, note: String = "") -> Dictionary:
 	var pop: Dictionary = popup_window("ONLINE — CHOOSE YOUR STAKE", Vector2(580, 580))
 	var box: VBoxContainer = pop["box"]
-	box.add_child(body_label("Real players worldwide, matched within ±2 levels. You choose your own stake — any amount up to your balance. Winner takes the pot (both stakes).", 20))
+	var intro := note if note != "" else "Real players worldwide, matched within ±2 levels. You choose your own stake — any amount up to your balance. Winner takes the pot (both stakes)."
+	box.add_child(body_label(intro, 20))
 	var bal := body_label("Your coins: ◉ %d" % balance, 22)
 	box.add_child(bal)
 	var edit := LineEdit.new()
