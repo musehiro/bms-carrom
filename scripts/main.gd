@@ -8,7 +8,8 @@ var _home: HomeScreen = null
 var _mode: ModeChoiceScreen = null
 var _match: MatchScreen = null
 var _searching: Control = null
-var _search_table := 0
+var _search_table := 0 # matchmaking band for the current search (Stakes.band_for_stake)
+var _search_stake := 0 # chosen stake for the current search
 var _search_elapsed := 0.0
 var _searching_active := false
 var _search_widened := false
@@ -61,6 +62,7 @@ func _process(delta: float) -> void:
 # ------------------------------------------------------------------- screens
 
 func _clear() -> void:
+	Ads.hide_home_banner()
 	for c in get_children():
 		c.queue_free()
 	_home = null
@@ -80,10 +82,9 @@ func _show_home() -> void:
 	_home.open_howto.connect(_open_howto)
 	_home.open_aim_assist.connect(_open_aim_assist)
 	_home.watch_ad_coins.connect(_on_watch_ad_coins)
+	_home.watch_ad_daily.connect(_on_watch_ad_daily)
 	_home.refresh()
-	var comeback := Save.maybe_comeback_coins()
-	if comeback > 0:
-		_toast("Comeback coins: +%d — never start broke!" % comeback)
+	Ads.show_home_banner()
 
 func _start_solo(difficulty: int) -> void:
 	_clear()
@@ -106,14 +107,14 @@ func _open_mode_choice() -> void:
 	_mode = ModeChoiceScreen.new()
 	add_child(_mode)
 	_mode.solo_chosen.connect(_show_solo_difficulty)
-	_mode.online_chosen.connect(_show_online_tables)
+	_mode.online_chosen.connect(_show_online_stake)
 	_mode.go_back.connect(_show_home)
 
 func _show_solo_difficulty() -> void:
 	var pop: Dictionary = UiKit.popup_window("SOLO — vs AI (offline)", Vector2(560, 460))
 	add_child(pop["dim"])
 	var box: VBoxContainer = pop["box"]
-	box.add_child(UiKit.body_label("No internet needed. Win coins: Easy +50, Medium +100, Hard +200.", 20))
+	box.add_child(UiKit.body_label("No internet needed. Free practice — no coins earned. Win coins in online matches or from ads.", 20))
 	for i in range(3):
 		var names := ["EASY", "MEDIUM", "HARD"]
 		var descs := ["Relaxed — misses often, never chases the queen.", "A fair fight — sometimes chases the queen.", "Sharp — near-perfect aim, chases the queen."]
@@ -127,20 +128,12 @@ func _show_solo_difficulty() -> void:
 			_start_solo(diff))
 	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
 
-func _show_online_tables() -> void:
-	var pop: Dictionary = UiKit.popup_window("ONLINE — pick a table", Vector2(560, 500))
-	add_child(pop["dim"])
-	var box: VBoxContainer = pop["box"]
-	box.add_child(UiKit.body_label("Real players worldwide, matched within ±2 levels. Winner takes the pot (both entries).", 20))
-	var tables := [["LOW", 100, "Entry 100 • Pot 200"], ["MID", 500, "Entry 500 • Pot 1,000"], ["HIGH", 2000, "Entry 2,000 • Pot 4,000"]]
-	for i in range(3):
-		var b := UiKit.dark_button("%s — %s" % [tables[i][0], tables[i][2]], 22)
-		box.add_child(b)
-		var t := i
-		b.pressed.connect(func() -> void:
-			pop["dim"].queue_free()
-			_start_matchmaking(t))
-	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
+## Stake picker (v5): before an online match the player chooses ANY
+## stake up to their balance — no fixed tables any more.
+func _show_online_stake() -> void:
+	var parent: Control = _home if _home else self
+	var pop := UiKit.stake_picker(Save.coins, func(stake: int) -> void: _start_matchmaking(stake))
+	parent.add_child(pop["dim"])
 
 func _open_shop() -> void:
 	_clear()
@@ -178,22 +171,19 @@ func _open_aim_assist() -> void:
 		pop["dim"].queue_free()
 		Ads.show_rewarded("aim_assist"))
 	box.add_child(ads)
-	box.add_child(UiKit.muted_label("Allowed in online matches too — the line is capped at 1 bounce, so it stays fair.", 16))
+	box.add_child(UiKit.body_label("Allowed in online matches too — the line is capped at 1 bounce, so it stays fair.", 16))
 	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
 
 # -------------------------------------------------------------- matchmaking
 
-func _start_matchmaking(table: int) -> void:
-	var entry: int = Save.ONLINE_ENTRY[table]
-	if Save.coins < entry:
-		var comeback := Save.maybe_comeback_coins()
-		if Save.coins < entry:
-			_toast("Not enough coins for this table (need %d)." % entry)
-			return
-		_toast("Comeback coins: +%d" % comeback)
-		if _home:
-			_home.refresh()
-	_search_table = table
+func _start_matchmaking(stake: int) -> void:
+	# The stake was validated in the picker; re-check defensively (the
+	# balance can only have changed via a shop purchase meanwhile).
+	if not Stakes.valid_stake(stake, Save.coins):
+		_toast("Not enough coins for that stake — watch an ad to earn more.")
+		return
+	_search_stake = stake
+	_search_table = Stakes.band_for_stake(stake)
 	_search_elapsed = 0.0
 	_search_widened = false
 	_searching_active = true
@@ -208,8 +198,8 @@ func _start_matchmaking(table: int) -> void:
 	var box: VBoxContainer = pop["box"]
 	_search_status = UiKit.body_label("Searching for an opponent… 0s\nMatched within ±2 levels.", 22)
 	box.add_child(_search_status)
-	var table_label := UiKit.muted_label("Table: %s — entry ◉ %d, pot ◉ %d" % [["LOW", "MID", "HIGH"][table], entry, entry * 2], 18)
-	box.add_child(table_label)
+	var stake_label := UiKit.body_label("Your stake ◉ %d — winner takes the pot (your stake + opponent's stake)." % stake, 18)
+	box.add_child(stake_label)
 	_search_bot_button = UiKit.dark_button("NO OPPONENT? PLAY vs COMPUTER INSTEAD", 20)
 	_search_bot_button.visible = false
 	_search_bot_button.pressed.connect(_on_play_bot_from_search)
@@ -223,13 +213,13 @@ func _start_matchmaking(table: int) -> void:
 	else:
 		add_child(_searching)
 	if Net.is_connected_to_server():
-		Net.queue_up(Save.player_name, Save.level(), table)
+		Net.queue_up(Save.player_name, Save.level(), _search_table, _search_stake)
 	else:
 		Net.connect_to_server(Save.online_host, NetClient.DEFAULT_PORT)
 
 func _on_net_connected() -> void:
 	if _searching_active:
-		Net.queue_up(Save.player_name, Save.level(), _search_table)
+		Net.queue_up(Save.player_name, Save.level(), _search_table, _search_stake)
 
 func _on_matched(data: Dictionary) -> void:
 	if not _searching_active:
@@ -237,22 +227,26 @@ func _on_matched(data: Dictionary) -> void:
 	_searching_active = false
 	var opp_name := String(data.get("opponent", "Player"))
 	var opp_level := int(data.get("opp_level", 1))
+	var opp_stake := int(data.get("opp_stake", 0))
 	var you_break := bool(data.get("you_break", true))
 	_clear()
 	_match = MatchScreen.new()
 	add_child(_match)
-	_match.setup("online", 0, _search_table, opp_name, opp_level, Net, 0 if you_break else 1)
+	_match.setup("online", 0, _search_table, opp_name, opp_level, Net, 0 if you_break else 1, _search_stake, opp_stake)
 	_match.exit_to_home.connect(_show_home)
-	_match.rematch_requested.connect(func() -> void: _start_matchmaking(_search_table))
+	# Rematch goes back to the stake picker — the player chooses a fresh
+	# stake for every online match.
+	_match.rematch_requested.connect(func() -> void: _show_online_stake())
 
 func _on_play_bot_from_search() -> void:
 	# Labelled BOT match — never a fake human (design doc 3.2).
+	# Practice: free, zero coins (solo pays nothing in v5).
 	_searching_active = false
 	Net.disconnect_client()
 	_clear()
 	_match = MatchScreen.new()
 	add_child(_match)
-	_match.setup("solo", 1, 0, "BOT (Practice)", 1, null)
+	_match.setup("solo", 1, 0, "BOT (Practice)", 1, null, -1, 0, 0, true)
 	_match.exit_to_home.connect(_show_home)
 	_match.rematch_requested.connect(func() -> void: _start_solo(1))
 	_toast("Practice vs BOT — clearly labelled, no coins at stake.")
@@ -274,26 +268,77 @@ func _on_queue_failed(message: String) -> void:
 
 # ---------------------------------------------------------------------- ads
 
+## FREE COINS opens the ladder panel: the five tiers with the current one
+## highlighted, today's progress, and the WATCH AD button. (The home
+## strip shows the same ladder at a glance.)
 func _on_watch_ad_coins() -> void:
-	if Save.rewarded_ads_left_today() <= 0:
-		_toast("Daily rewarded-ad limit reached (5/day). Come back tomorrow!")
-		return
-	Ads.show_rewarded("coins")
+	_show_ladder_panel()
 
+func _show_ladder_panel() -> void:
+	var parent: Control = _home if _home else self
+	var pop: Dictionary = UiKit.popup_window("FREE COINS — AD LADDER", Vector2(580, 600))
+	parent.add_child(pop["dim"])
+	var box: VBoxContainer = pop["box"]
+	box.add_child(UiKit.body_label("Every ad pays more than the last. Watch ads to climb the ladder — it resets each day.", 20))
+	var tier_names := ["1st ad", "2nd ad", "3rd ad", "4th ad", "5th ad and beyond"]
+	var current := Save.ad_current_tier()
+	var capped := Save.ad_cap_reached()
+	for i in range(5):
+		var state := ""
+		if capped or i + 1 < current:
+			state = "  ✓ done"
+		elif i + 1 == current:
+			state = "  ◀ YOUR NEXT AD"
+		var row := UiKit.body_label("%s — +%d coins%s" % [tier_names[i], Save.AD_LADDER[i], state], 22)
+		if i + 1 == current and not capped:
+			row.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
+		box.add_child(row)
+	box.add_child(UiKit.muted_label("Today: ◉ %d / %d coins from ads" % [Save.ad_coins_today, Save.DAILY_AD_COIN_CAP], 18))
+	var watch := UiKit.gold_button("WATCH AD  (+%d COINS)" % Save.ad_next_reward() if not capped else "COME BACK TOMORROW", 24)
+	if capped:
+		watch.disabled = true
+	watch.pressed.connect(func() -> void:
+		pop["dim"].queue_free()
+		Ads.show_rewarded("coins"))
+	box.add_child(watch)
+	box.add_child(UiKit.body_label("Ads are the main way to earn coins — solo practice pays none, online matches pay the pot.", 16))
+	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
+
+## Daily bonus: claimable ONLY by watching an ad (v5 — no free coin grant).
+func _on_watch_ad_daily() -> void:
+	if not Save.can_claim_daily():
+		return
+	Ads.show_rewarded("daily_bonus")
+
+## Every rewarded ad pays the current ladder amount and advances the
+## ladder; ads watched for Aim-Assist or the Daily Bonus pay the ladder
+## amount too, on top of unlocking that reward. The daily cap (2,500)
+## is the only limit.
 func _on_rewarded_earned(reason: String, simulated: bool) -> void:
+	var sim := " (test ad simulated)" if simulated else ""
+	var ladder := Save.ad_next_reward()
+	if ladder > 0:
+		Save.add_coins(ladder)
+		Save.record_ad_reward(ladder)
+	else:
+		Save.record_ad_reward(0)
 	if reason == "coins":
-		Save.record_rewarded_ad_watched()
-		Save.add_coins(AdsConfig.REWARDED_COINS)
-		_toast("+%d coins!%s" % [AdsConfig.REWARDED_COINS, " (test ad simulated)" if simulated else ""])
+		_toast("+%d coins from the ad ladder!%s" % [ladder, sim] if ladder > 0 else "Daily ad limit reached — no more ad coins today.%s" % sim)
 	elif reason == "aim_assist":
-		Save.record_rewarded_ad_watched()
 		Save.aim_assist_ads_progress += 1
 		if Save.aim_assist_ads_progress >= AdsConfig.AIM_ASSIST_ADS_NEEDED:
 			Save.aim_assist_ads_progress = 0
 			Save.grant_aim_assist(1.0)
-			_toast("Aim-Assist active for 1 hour!%s" % (" (test ads simulated)" if simulated else ""))
+			_toast("Aim-Assist active for 1 hour!%s%s" % [(" +%d coins" % ladder) if ladder > 0 else "", sim])
 		else:
-			_toast("Ad %d of 2 watched — one more for 1 hour of Aim-Assist." % Save.aim_assist_ads_progress)
+			_toast("Ad %d of 2 watched — one more for 1 hour of Aim-Assist.%s" % [Save.aim_assist_ads_progress, sim])
+		Save.save()
+	elif reason == "daily_bonus":
+		var amount := Save.claim_daily()
+		if amount > 0:
+			_toast("Daily bonus +%d coins!%s%s" % [amount, (" (+%d ad coins)" % ladder) if ladder > 0 else "", sim])
+		else:
+			_toast("Daily bonus already claimed.")
 		Save.save()
 	if _home:
 		_home.refresh()
@@ -366,6 +411,16 @@ func _run_shot_mode() -> void:
 			_start_matchmaking(0)
 			_search_elapsed = 11.5
 			_capture_after(1.2)
+		"ladder":
+			# Home + the free-coins ladder panel (tiers + current highlight).
+			_show_home()
+			_show_ladder_panel()
+			_capture_after(1.0)
+		"stake":
+			# Home + the online stake picker.
+			_show_home()
+			_show_online_stake()
+			_capture_after(1.0)
 		_:
 			_show_home()
 			_capture_after(1.5)

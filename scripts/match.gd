@@ -22,7 +22,10 @@ class Dots:
 
 var mode := "solo" # solo | online
 var difficulty := 1 # 0 Easy, 1 Medium, 2 Hard
-var table := 0 # online entry index: 0 Low 100, 1 Mid 500, 2 High 2000
+var table := 0 # online matchmaking band (from Stakes.band_for_stake): 0 <250, 1 <1000, 2 >=1000
+var your_stake := 0 # online: own stake, locked (deducted) at match start
+var opp_stake := 0 # online: opponent's stake, from the server's matched message
+var practice := false # true for the labelled BOT fallback match (zero coins)
 var opponent_name := "Computer"
 var opponent_level := 1
 var net: NetClient = null
@@ -72,7 +75,7 @@ var _my_panel: PanelContainer
 
 var _breaker_override := -1
 
-func setup(p_mode: String, p_difficulty: int, p_table: int, p_opp_name: String, p_opp_level: int, p_net: NetClient, p_breaker: int = -1) -> void:
+func setup(p_mode: String, p_difficulty: int, p_table: int, p_opp_name: String, p_opp_level: int, p_net: NetClient, p_breaker: int = -1, p_your_stake: int = 0, p_opp_stake: int = 0, p_practice: bool = false) -> void:
 	mode = p_mode
 	difficulty = p_difficulty
 	table = p_table
@@ -80,6 +83,9 @@ func setup(p_mode: String, p_difficulty: int, p_table: int, p_opp_name: String, 
 	opponent_level = p_opp_level
 	net = p_net
 	_breaker_override = p_breaker
+	your_stake = p_your_stake
+	opp_stake = p_opp_stake
+	practice = p_practice
 
 func _ready() -> void:
 	randomize()
@@ -103,8 +109,11 @@ func _ready() -> void:
 	_show_message("Breaker plays WHITE" if breaker == 0 else "Opponent breaks — plays WHITE", 2.5)
 	if mode == "online" and entry_paid == false:
 		entry_paid = true
-		# Entry fee is deducted when the match starts; the winner takes the pot.
-		Save.spend_coins(Save.ONLINE_ENTRY[table])
+		# The stake is LOCKED (deducted) when the match starts — never
+		# during the search, so cancelling costs nothing. The winner takes
+		# the whole pot at the end (see _show_result); a draw refunds it.
+		if your_stake > 0:
+			Save.spend_coins(your_stake)
 	if net:
 		net.shot_received.connect(_on_remote_shot)
 		net.state_received.connect(_on_remote_state)
@@ -488,33 +497,41 @@ func _show_result() -> void:
 	result_shown = true
 	phase = "over"
 	var winner: int = rules_state["winner"]
+	# A draw is winner < 0. The rules engine never produces one yet (every
+	# board has a winner); the refund path below is implemented + tested
+	# so it is ready when a draw outcome exists.
+	var is_draw := winner < 0
 	var won := winner == local_seat
-	Sfx.win() if won else Sfx.foul()
-	# Economy.
+	if won:
+		Sfx.win()
+	elif not is_draw:
+		Sfx.foul()
+	# Economy (v5): solo vs AI is free practice — ZERO coins, win or lose.
+	# Online pays the POT only (stakes locked at match start): the winner
+	# takes both stakes, the loser loses theirs, a draw refunds both. No
+	# queen / no-guide / level-up coin bonuses anywhere — the only coin
+	# sources are the ad ladder and online stakes, so a zero balance can
+	# never be farmed back through matches.
 	var coins_earned := 0
 	var lines: Array = []
 	if mode == "solo":
-		coins_earned = Save.SOLO_WIN_COINS[difficulty] if won else Save.SOLO_LOSS_COINS
-		lines.append("Solo %s: %+d coins" % ["win" if won else "loss", coins_earned])
 		if won:
 			Save.solo_wins += 1
+		lines.append("Practice win — no coins earned. Win coins in online matches!" if won else "Practice loss — no coins lost.")
+	elif is_draw:
+		coins_earned = Stakes.payout(your_stake, opp_stake, "draw")
+		lines.append("Draw — your stake ◉ %d refunded" % your_stake)
+	elif won:
+		coins_earned = Stakes.payout(your_stake, opp_stake, "win")
+		lines.append("Your stake ◉ %d  •  Opponent stake ◉ %d" % [your_stake, opp_stake])
+		lines.append("Online win — pot: +%d coins" % coins_earned)
+		Save.online_wins += 1
 	else:
-		var entry: int = Save.ONLINE_ENTRY[table]
-		if won:
-			coins_earned = entry * 2 # pot: both entries (entry was deducted at start)
-			lines.append("Online win — pot: +%d coins" % coins_earned)
-			Save.online_wins += 1
-		else:
-			coins_earned = 0
-			lines.append("Online loss — entry %d coins" % entry)
-	if won and local_covered_queen:
-		coins_earned += Save.QUEEN_BONUS_COINS
-		lines.append("Queen bonus: +%d coins" % Save.QUEEN_BONUS_COINS)
-	if won and Save.aim_guide == "off":
-		coins_earned += Save.GUIDE_OFF_WIN_BONUS
-		lines.append("No-guide bonus: +%d coins" % Save.GUIDE_OFF_WIN_BONUS)
+		coins_earned = Stakes.payout(your_stake, opp_stake, "loss")
+		lines.append("Your stake ◉ %d  •  Opponent stake ◉ %d" % [your_stake, opp_stake])
+		lines.append("Online loss — you lost your stake ◉ %d" % your_stake)
 	var xp_earned := Save.XP_PER_MATCH + (Save.XP_PER_WIN if won else 0) + (Save.XP_PER_QUEEN if local_covered_queen else 0)
-	var level_bonus := Save.add_xp(xp_earned)
+	var new_level := Save.add_xp(xp_earned)
 	Save.add_coins(coins_earned)
 	Save.matches_played += 1
 	if won:
@@ -522,15 +539,16 @@ func _show_result() -> void:
 	Save.interstitial_counter += 1
 	Save.save()
 	lines.append("XP: +%d" % xp_earned)
-	if level_bonus > 0:
-		lines.append("LEVEL UP! +%d coins (now Lv %d · %s)" % [level_bonus, Save.level(), Save.rank_name()])
-	lines.append("Board score: %d" % CarromRules.board_score(rules_state, winner))
+	if new_level > 0:
+		lines.append("LEVEL UP! Now Lv %d · %s" % [new_level, Save.rank_name()])
+	if winner >= 0:
+		lines.append("Board score: %d" % CarromRules.board_score(rules_state, winner))
 	if rules_state.get("lose_reason", "") != "":
 		lines.append("Reason: %s" % String(rules_state["lose_reason"]).replace("_", " "))
 	# Interstitial policy: only after every 3rd match.
 	var show_ad := Save.interstitial_counter % AdsConfig.INTERSTITIAL_EVERY_N_MATCHES == 0
 	# Build the result popup.
-	var pop: Dictionary = UiKit.popup_window("YOU WIN!" if won else "YOU LOSE", Vector2(560, 560))
+	var pop: Dictionary = UiKit.popup_window("DRAW" if is_draw else ("YOU WIN!" if won else "YOU LOSE"), Vector2(560, 560))
 	_hud.add_child(pop["dim"])
 	var box: VBoxContainer = pop["box"]
 	box.add_child(UiKit.body_label("\n".join(lines), 24))
@@ -584,6 +602,16 @@ func _build_hud() -> void:
 	opp_lv.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
 	opp_top.add_child(opp_lv)
 	opp_box.add_child(opp_top)
+	# Online: show both stakes under the opponent name so the pot is
+	# visible for the whole match.
+	if mode == "online":
+		var stake_l := Label.new()
+		stake_l.name = "StakeLine"
+		stake_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		stake_l.text = "Your stake ◉ %d  •  Opponent stake ◉ %d" % [your_stake, opp_stake]
+		stake_l.add_theme_font_size_override("font_size", 18)
+		stake_l.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
+		opp_box.add_child(stake_l)
 	_opp_dots = Dots.new()
 	_opp_dots.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_opp_dots.color = Color(0.15, 0.15, 0.17)

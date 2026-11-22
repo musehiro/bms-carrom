@@ -15,16 +15,19 @@ cheap and the server easy to run anywhere.
 
 ## How matchmaking works
 
-1. Client sends `{"type":"queue","name","level","table"}`.
-2. Server pairs two players on the **same table** whose levels are within
+1. Client sends `{"type":"queue","name","level","table","stake"}` — `table` is only the matchmaking **band** (from the stake: <250 → 0, <1000 → 1, else 2); `stake` is the player's own virtual-coin stake (0 = friendly match).
+2. Server pairs two players on the **same band** whose levels are within
    **±2**. If either player has waited **30 s**, the window widens to **±4**.
-3. Both get `{"type":"matched","opponent","opp_level","you_break"}`.
-   One of them breaks (random).
+3. Both get `{"type":"matched","opponent","opp_level","you_break","opp_stake"}`.
+   One of them breaks (random). Each side learns the opponent's stake, so
+   both clients can show the pot (your stake + opponent's stake) and pay
+   it out: winner takes the whole pot, a draw refunds both stakes.
 4. During the match the server only relays `shot`, `state` and `forfeit`
    messages between the pair. If a player disconnects, the other gets
    `opponent_left` (and wins).
-5. If no opponent is found in 60 s, the client offers a clearly-labelled
-   **BOT practice match** — never a fake human.
+5. If no opponent is found in 12 s, the client offers a clearly-labelled
+   **BOT practice match** — never a fake human. The practice match is free
+   and pays zero coins (solo pays nothing in v5).
 
 ## Run it locally (testing)
 

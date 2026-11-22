@@ -199,9 +199,9 @@ Simplified version for casual mobile play (what most apps do, and what we do in 
 **Interstitial ads (forced):**
 - Shown **after every match** in Carrom Pool (the single biggest complaint). Often 30–60 s, sometimes unskippable, sometimes chained ("after saying ad break, no one plays it, it's a full ad" — i.e. an ad after the ad).
 - Also appear on returning to the home screen / between menu screens in the worst offenders ("every 2 minutes another ad").
-- **Our policy (design decision, §7):** interstitial ONLY on the match-result screen, only after every **3rd** match (not every match), skippable after 5 s, never chained, never mid-match, never on launch. Rewarded ads are unlimited opt-in (coins, aim-assist, chest speed-up).
+- **Our policy (design decision, §7):** interstitial ONLY on the match-result screen, only after every **3rd** match (not every match), skippable after 5 s, never chained, never mid-match, never on launch — including after solo/bot matches (that is the ad revenue from bot play). Rewarded ads are opt-in on an escalating daily ladder (150 → 200 → 250 → 300 → 400, capped at 2,500 coins/day). A home-screen banner (bottom slot only) was added in v5; never a banner inside the game screen.
 
-**AdMob (for the build):** use AdMob test IDs during development; real AdMob unit IDs only when Buddhika/Nana supply them (Nana holds the AdMob account — same arrangement as Shadow Assassin). Interstitial + Rewarded units only; NO banner ads inside the game screen (banners during play are hated and distract from aiming).
+**AdMob (for the build):** use AdMob test IDs during development; real AdMob unit IDs only when Buddhika/Nana supply them (Nana holds the AdMob account — same arrangement as Shadow Assassin). Interstitial + Rewarded + home banner units; NO banner ads inside the game screen (banners during play are hated and distract from aiming).
 
 ---
 
@@ -235,28 +235,31 @@ Simplified version for casual mobile play (what most apps do, and what we do in 
 | Mode | How it works |
 |---|---|
 | **SOLO (offline vs AI)** | No internet needed. 3 difficulties: **Easy** (aim error ~2°, power error ~16%, misses ~1 in 5, never chases queen — copied from Carrom Clash's bot design, which is honest and works), **Medium** (small error, sometimes chases queen), **Hard** (near-zero error, chases queen, plays cut + bank shots). AI difficulty is implemented as *error on top of a perfect shot*, not as different strategies — this is the standard, fair way to do it. |
-| **ONLINE (random matchmaking, worldwide)** | One tap → matchmaking screen → matched with a real player of similar level (see §6.5). Location doesn't matter. Entry fee in coins (see §6.3); winner takes the pot. Rematch button after a match. Report + block for idle/cheating opponents. **If no opponent is found in 30 s, widen the level range; if still none after 60 s, offer a clearly-labelled BOT match ("Practice vs BOT") — never a fake human.** |
-| **Practice (no coins)** | Free-play vs Easy AI with unlimited undo? No — keep simple: Practice = Solo Easy with no coin reward and no XP. Helps new players learn without risk. (Phase 1.5 — can be folded into Solo.) |
+| **ONLINE (random matchmaking, worldwide)** | One tap → choose your own stake (any amount up to your balance) → matchmaking screen → matched with a real player of similar level (see §6.5). Location doesn't matter. **Virtual-coin staking (v5):** each player stakes what they like; the pot = both stakes; the winner takes the whole pot; a draw refunds both stakes. Stakes come only from coins earned in the game — never real money, no deposits, no cash-out. Rematch goes back to the stake picker. Report + block for idle/cheating opponents. **If no opponent is found after 12 s, offer a clearly-labelled BOT match ("Practice vs BOT") — never a fake human.** |
+| **Practice (no coins)** | Solo vs AI is free practice: no entry, no coins earned or lost, XP as normal. Helps new players learn without risk. (v5: all solo is practice.) |
 | **Later (NOT v1):** Freestyle, Disc Pool, private rooms with friends, 2v2, tournaments, leagues. Do not build these in v1. |
 
-### 6.3 Economy — coins
+### 6.3 Economy — coins (v5)
 
-**One currency only in v1: Coins.** (No gems in v1 — Carrom Pool's two-currency system is a monetisation maze; one currency is friendlier and simpler. Gems can come later if Buddhika wants a premium shop.)
+**One currency only: Coins.** (No gems — Carrom Pool's two-currency system is a monetisation maze; one currency is friendlier and simpler.)
+
+**v5 model (Buddhika 2026-11-22): the ONLY coin sources are the rewarded-ad ladder and online-match stakes. Solo vs AI is free practice and pays ZERO coins, win or lose. There is no free coin grant anywhere — no comeback coins, no level-up coins — and the daily bonus is only claimable by watching an ad. At zero coins the only way back is watching ads (the ladder). No real money anywhere: no deposits, no card payments, no cash-out.**
 
 | Action | Coins |
 |---|---|
-| New player starting balance | **1,000 coins** (enough for 10 low-table matches — never start a player broke) |
-| Solo win (Easy / Medium / Hard) | +50 / +100 / +200 |
-| Solo loss | +10 (consolation, so losing never feels like zero) |
-| Online win — low table (entry 100) | pot **200** (both entries) → net +100 |
-| Online win — mid table (entry 500) | pot **1,000** → net +500 |
-| Online win — high table (entry 2,000) | pot **4,000** → net +2,000 |
-| Online loss | lose entry fee only (no extra penalty) |
-| Daily login bonus | +200 (day 1), growing +50/day up to +500 at day 7 streak, then resets |
-| Rewarded ad (opt-in) | +150 coins (max 5/day — prevents ad farming) |
-| Queen covered in a match | +50 bonus ("Queen bonus") |
+| New player starting balance | **1,000 coins** |
+| Solo vs AI (any difficulty, win or loss) | **0** — free practice, no coins earned or lost |
+| Online win | **the pot** (your stake + opponent's stake; your stake was locked at match start) |
+| Online loss | lose your stake only (no extra penalty) |
+| Online draw | both stakes refunded |
+| Daily login bonus | +200 (day 1), growing +50/day up to +500 at day 7 streak — **claimable only by watching a rewarded ad** |
+| Rewarded ad — ladder (see below) | 1st ad **+150**, 2nd **+200**, 3rd **+250**, 4th **+300**, 5th and beyond **+400** per ad |
+| Level up | rank only — **no coins** (paying coins here would let a zero-balance player farm coins from XP earned in free solo matches) |
+| Queen covered / no-guide win | **no coin bonus** (v5: solo pays zero, online pays the pot only) |
 
-**Anti-broke rule (copy this from good games, avoid Carrom Pool's sting):** if a player's balance falls below the lowest entry fee (100), they get a **free top-up of 500 coins once per day** ("Comeback coins") so they can always play. A player who can never afford a match quits — never let that happen.
+**Ad ladder (v5):** per-ad payout grows with each rewarded ad watched in a day — 150 → 200 → 250 → 300 → 400 (5th ad and beyond). Resets at midnight (local day). Total rewarded-ad coins are capped at **2,500/day** (exactly 8 ads: 150+200+250+300+400×4), so the ladder cannot be farmed without limit. Every rewarded ad pays the current tier and advances the ladder — including ads watched for Aim-Assist (2 ads = 1 hour) or the Daily Bonus, which pay the ladder amount on top of unlocking that reward. The ladder is shown on the home screen (five tier chips, current tier gold) and in the free-coins panel, and the FREE COINS button always shows the next amount. **OUT OF COINS:** at zero coins the home screen shows a clear "OUT OF COINS — watch an ad to earn coins and play again" state; the player cannot stake in online matches (a friendly 0-stake match is still possible) until ads refill the balance.
+
+**No anti-broke free top-up (removed in v5):** the ad ladder IS the way back from zero — watching one ad pays +150 immediately, so a broke player is never stuck.
 
 ### 6.4 Boards & strikers (customisation + shop)
 
@@ -315,9 +318,9 @@ Simplified version for casual mobile play (what most apps do, and what we do in 
 
 ### 6.8 Ads (policy — the competitive advantage)
 
-- **Interstitial:** ONLY on the match-result screen, only after every **3rd** match, skippable after 5 s, never chained, never mid-match, never on launch, never in Solo Practice. State this in the store listing ("Fewer ads than other carrom games — no ads during play, ever").
-- **Rewarded (opt-in only):** +150 coins (max 5/day); 2 ads = 1 hour aim-assist; speed up nothing else in v1 (no chest timers in v1).
-- **No banner ads** anywhere.
+- **Interstitial:** ONLY on the match-result screen, only after every **3rd** match, skippable after 5 s, never chained, never mid-match, never on launch — including after solo/bot matches (v5: that is the ad revenue from bot play). State this in the store listing ("Fewer ads than other carrom games — no ads during play, ever").
+- **Rewarded (opt-in only):** the ad ladder — 1st ad +150, 2nd +200, 3rd +250, 4th +300, 5th and beyond +400 coins, capped at 2,500/day; 2 ads = 1 hour aim-assist; speed up nothing else in v1 (no chest timers in v1).
+- **Banner:** home screen only, bottom slot (v5). No banner inside the game screen, ever.
 - AdMob: test IDs in development; real IDs only when Buddhika/Nana supply them. Nana holds the AdMob account.
 
 ---
@@ -332,7 +335,7 @@ Simplified version for casual mobile play (what most apps do, and what we do in 
 - **UI colours:** dark navy-charcoal panels (#14181F), **gold (#D4AF37 / #E8C766)** for primary buttons, coins and highlights, white text, muted grey secondary text. Gold = BMS brand colour throughout.
 - **Fonts:** a bold rounded sans for headings/buttons (like Montserrat Bold / Poppins Bold — free Google Fonts), regular weight for body. Numbers (coins, level) in the bold face, tabular.
 - **Buttons:** big rounded rectangles, gold fill + dark text for primary (PLAY), dark fill + gold outline for secondary. Minimum touch target 48 dp.
-- **Branding:** **big gold "BMS" splash at launch** (gold BMS letters on black, 1.2 s, then home). **No Godot logo anywhere** (same rule as Shadow Assassin). Small gold "BMS" watermark engraved on the BMS Signature board and the BMS Gold striker only — nowhere else; keep the board clean.
+- **Branding:** the logo is JUST a carrom board — no text, no "BMS", no name (Buddhika 2026-11-22): the app icon and the boot splash are renders of the board itself. **No Godot logo anywhere** (same rule as Shadow Assassin). Small gold "BMS" watermark engraved on the BMS Signature board and the BMS Gold striker only — nowhere else; keep the board clean.
 - **Animations:** coins slide with a tiny scale "settle" bounce on stop; pocketing = coin shrinks into the pocket with a gold particle puff + chime; turn change = a soft gold arrow/indicator slides to the active player's side; win = gold confetti burst + "YOU WIN" panel. Keep animations under 300 ms — never make the player wait.
 - **Layout rule:** board is the largest element, centred, square; controls (power meter, aim toggle) sit at the bottom in the thumb zone; opponent info top, your info bottom. Never cover the board with pop-ups mid-match.
 
@@ -395,7 +398,7 @@ Play real carrom online or offline. Real physics, fair matches, fewer ads.
 - **Online (v1 scope decision — FLAG FOR BUDDHIKA):** real worldwide online multiplayer needs a server (matchmaking, relay, anti-cheat). Options: (a) Godot + a small authoritative server (e.g. Nakama — free/open-source, self-hostable); (b) peer-to-peer with a lobby service. **Recommendation: build Solo + full local game first, ship that; add Online in Phase 2 with Nakama.** If Buddhika wants Online in v1, the build agent must say so and cost it (server hosting is NOT free — flag it, do not silently pick a paid host). **Do not fake online with bots labelled as humans — ever.**
 - **AI:** error-based (§6.2). AI picks the best shot by simulation (try candidate target coin + pocket pairs, pick the highest-probability one), then adds Gaussian aim/power error per difficulty.
 - **Persistence:** local save (coins, XP, level, owned items, settings, daily streak) in Godot user:// ; cloud save later.
-- **Ads:** AdMob plugin, test IDs in dev. Interstitial + Rewarded only.
+- **Ads:** AdMob plugin, test IDs in dev. Interstitial + Rewarded + home banner.
 - **No Godot splash/logo. Big gold BMS splash instead (§7).**
 - **Do NOT touch:** the Nana shared file (Muse-Hiro-messages.txt), Bus Sort Escape, the Shadow Assassin repo, or any Play Console work. This game lives in its own repo/folder under `game-carrom/` when the build starts.
 

@@ -15,7 +15,7 @@ extends Node
 const DEFAULT_PORT := 8910
 
 var _peer: ENetMultiplayerPeer = null
-var _queue: Array = [] # {id, name, level, table, at}
+var _queue: Array = [] # {id, name, level, table, stake, at}
 var _matches := {} # peer_id -> partner peer_id
 var _names := {} # peer_id -> display name
 
@@ -70,8 +70,9 @@ func _relay(payload: String) -> void:
 			_remove_from_queue(sender)
 			_queue.append({"id": sender, "name": String(data.get("name", "Player")),
 				"level": int(data.get("level", 1)), "table": int(data.get("table", 0)),
+				"stake": maxi(0, int(data.get("stake", 0))),
 				"at": Time.get_unix_time_from_system()})
-			print("[Server] %s (Lv %d) queued for table %d" % [data.get("name"), int(data.get("level", 1)), int(data.get("table", 0))])
+			print("[Server] %s (Lv %d) queued for table %d, stake %d" % [data.get("name"), int(data.get("level", 1)), int(data.get("table", 0)), int(data.get("stake", 0))])
 			_try_match()
 		"shot", "state":
 			var partner: int = int(_matches.get(sender, -1))
@@ -112,13 +113,26 @@ func _start_match(a: Dictionary, b: Dictionary) -> void:
 	var a_breaks := randi() % 2 == 0
 	_matches[int(a["id"])] = int(b["id"])
 	_matches[int(b["id"])] = int(a["id"])
-	_send_to(int(a["id"]), {"type": "matched", "opponent": String(b["name"]),
-		"opp_level": int(b["level"]), "you_break": a_breaks})
-	_send_to(int(b["id"]), {"type": "matched", "opponent": String(a["name"]),
-		"opp_level": int(a["level"]), "you_break": not a_breaks})
-	print("[Server] Match: %s (Lv %d) vs %s (Lv %d), table %d — %s breaks" % [
-		a["name"], int(a["level"]), b["name"], int(b["level"]), int(a["table"]),
+	var payloads := matched_payloads(a, b, a_breaks)
+	_send_to(int(a["id"]), payloads["a"])
+	_send_to(int(b["id"]), payloads["b"])
+	print("[Server] Match: %s (Lv %d, stake %d) vs %s (Lv %d, stake %d), table %d — %s breaks" % [
+		a["name"], int(a["level"]), int(a.get("stake", 0)),
+		b["name"], int(b["level"]), int(b.get("stake", 0)), int(a["table"]),
 		a["name"] if a_breaks else b["name"]])
+
+## The two "matched" payloads (pure function, unit-tested): each side gets
+## the opponent's name, level and STAKE, so both clients can show the pot
+## and pay it out. Stakes default to 0 when absent (old clients / tests).
+static func matched_payloads(a: Dictionary, b: Dictionary, a_breaks: bool) -> Dictionary:
+	return {
+		"a": {"type": "matched", "opponent": String(b["name"]),
+			"opp_level": int(b["level"]), "you_break": a_breaks,
+			"opp_stake": int(b.get("stake", 0))},
+		"b": {"type": "matched", "opponent": String(a["name"]),
+			"opp_level": int(a["level"]), "you_break": not a_breaks,
+			"opp_stake": int(a.get("stake", 0))},
+	}
 
 func _send_to(peer_id: int, data: Dictionary) -> void:
 	rpc_id(peer_id, "_relay", JSON.stringify(data))

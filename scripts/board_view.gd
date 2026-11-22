@@ -11,6 +11,49 @@ var striker_id := "classic"
 # mini board must NOT draw it: it is scaled/offset and would paint over the
 # title and top bar drawn before it.
 var draw_backdrop := true
+# Labelled diagram (home only): English part names with leader lines so new
+# players learn the board — Striker, White coin, Black coin, Queen, Pocket,
+# Base line, Centre circle, Diagonal (Buddhika, 2026-11-22).
+var show_labels := false
+
+# Base-lane geometry (ICF Laws, 74 cm board, 612 px = 74 cm -> 8.2703 px/cm):
+# outer line 10.15 cm from the frame edge; the two parallel lines 3.18 cm
+# apart; base circles 3.18 cm diameter, centred between the lines, closing
+# each lane end — exactly 2 per corner, 8 total, with a clear gap between
+# the pair at a corner (~1.27 cm between the circles, ICF). v4 drew the
+# circles at the line ends (±194 px) with the lines 34 px apart, so the
+# pair nearly touched and looked cut in half; v5 uses the real geometry.
+const BASE_LANE_OUTER_PX := 84.0 # 10.15 cm from the frame edge
+const BASE_LANE_GAP_PX := 26.3 # 3.18 cm between the two parallel lines
+const BASE_CIRCLE_R := 13.0 # 3.18 cm diameter -> 13.0 px radius
+const BASE_LANE_HALF_LEN := 194.0 # half the 47 cm lane
+
+## ICF base-lane geometry in board-local coords: o1 (outer line offset),
+## o2 (inner line offset), oc (lane centreline), end_off (circle centre
+## distance from the lane middle along the lane).
+static func base_lane_geometry() -> Dictionary:
+	var half := CarromPhysics.SURFACE_HALF
+	var o1 := half - BASE_LANE_OUTER_PX
+	var o2 := o1 - BASE_LANE_GAP_PX
+	var oc := (o1 + o2) / 2.0
+	var end_off := o2 - BASE_CIRCLE_R
+	return {"o1": o1, "o2": o2, "oc": oc, "end_off": end_off}
+
+## The 8 base-circle centres (board-local), 2 per corner — used by the
+## geometry test (count + pair gap) and shared with the renderer so the
+## test and the drawing can never drift apart.
+static func base_circle_centers() -> Array:
+	var c := CarromPhysics.BOARD_CENTER
+	var g := base_lane_geometry()
+	var oc: float = g["oc"]
+	var end_off: float = g["end_off"]
+	var out: Array = []
+	for side in range(4):
+		var rot: float = [0.0, PI, PI / 2.0, -PI / 2.0][side]
+		var xform := Transform2D(rot, c)
+		for px in [-end_off, end_off]:
+			out.append(xform * Vector2(px, oc))
+	return out
 
 # Aim guide state (set by the match controller each frame while aiming).
 var aim_visible := false
@@ -94,6 +137,9 @@ func _draw() -> void:
 		var base_col: Color = surf2 if i % 2 == 0 else surf
 		var t: float = tones[i]
 		draw_rect(Rect2(x0, c.y - half, 2.0 * half / 6.0, 2.0 * half), Color(base_col.r * t, base_col.g * t, base_col.b * t))
+		# Thin separator between planks (v5 polish: reads as real boards).
+		if i > 0:
+			draw_line(Vector2(x0, c.y - half), Vector2(x0, c.y + half), Color(0, 0, 0, 0.10), 1.5)
 	# Warm centre glow (soft light on the middle of the board).
 	draw_circle(c, 210.0, Color(1.0, 0.85, 0.5, 0.05))
 	draw_circle(c, 130.0, Color(1.0, 0.9, 0.6, 0.05))
@@ -168,12 +214,21 @@ func _draw() -> void:
 		var k := float(puff["life"]) / float(puff["max"])
 		draw_circle(puff["pos"], (1.0 - k) * 26.0 + 6.0, Color(puff["color"], k * 0.7))
 		draw_circle(puff["pos"], (1.0 - k) * 14.0 + 3.0, Color(1, 1, 1, k * 0.5))
+	# Labelled diagram (home only, drawn last so pills sit on top).
+	if show_labels:
+		_draw_labels()
 
 func _draw_side_markings(c: Vector2, half: float, line_c: Color, accent: Color, side: int) -> void:
-	# side: 0 bottom, 1 top, 2 left, 3 right. Lines at 84 and 118 px from edge.
-	var len2 := 194.0
-	var o1 := half - 84.0
-	var o2 := half - 118.0
+	# side: 0 bottom, 1 top, 2 left, 3 right. ICF geometry from
+	# base_lane_geometry(): outer line 10.15 cm from the edge, inner line
+	# 3.18 cm above it, circles centred on the lane centreline at each
+	# lane end — exactly 2 per corner with a clear gap between the pair.
+	var g := base_lane_geometry()
+	var len2 := BASE_LANE_HALF_LEN
+	var o1: float = g["o1"]
+	var o2: float = g["o2"]
+	var oc: float = g["oc"]
+	var end_off: float = g["end_off"]
 	var rot: float = [0.0, PI, PI / 2.0, -PI / 2.0][side]
 	var xform := Transform2D(rot, c)
 	var p1a: Vector2 = xform * Vector2(-len2, o1)
@@ -182,27 +237,28 @@ func _draw_side_markings(c: Vector2, half: float, line_c: Color, accent: Color, 
 	var p2b: Vector2 = xform * Vector2(len2, o2)
 	# Base lines: a soft warm underlay then the thin muted line on top —
 	# thin, muted dark-red/brown, NEVER heavy black (Carrom Pool look).
-	# ICF: 47 cm long, outer line 10.15 cm from the frame, lines 3.8 cm
+	# ICF: 47 cm long, outer line 10.15 cm from the frame, lines 3.18 cm
 	# apart — the striker touches both.
 	draw_line(p1a, p1b, Color(0.35, 0.18, 0.10, 0.25), 5.0)
 	draw_line(p1a, p1b, line_c, 3.0)
 	draw_line(p2a, p2b, Color(0.35, 0.18, 0.10, 0.25), 5.0)
 	draw_line(p2a, p2b, line_c, 3.0)
-	# Red base circles: ONE per lane end, centred between the two
-	# parallel lines (ICF: 3.18 cm diameter) — exactly 2 per corner,
-	# 8 total. (v3 drew one at the end of EACH line = 4 per side, so
-	# 3 clustered at each corner; fixed in v4 per Buddhika.)
-	var oc := (o1 + o2) / 2.0
-	for px in [-len2, len2]:
+	# Red base circles: ONE per lane end, centred on the lane centreline
+	# (ICF: 3.18 cm diameter) — exactly 2 per corner, 8 total, with a
+	# clear gap between the pair at each corner. (v3 drew one at the end
+	# of EACH line = 4 per side, so 3 clustered at each corner; v4 moved
+	# them to the centreline but kept the wrong line spacing, so the pair
+	# still nearly touched; v5 uses the real ICF spacing.)
+	for px in [-end_off, end_off]:
 		var p: Vector2 = xform * Vector2(px, oc)
-		draw_circle(p, 13.0, accent)
-		draw_arc(p, 13.0, 0, TAU, 24, Color(0.96, 0.94, 0.88, 0.95), 2.0)
+		draw_circle(p, BASE_CIRCLE_R, accent)
+		draw_arc(p, BASE_CIRCLE_R, 0, TAU, 24, Color(0.96, 0.94, 0.88, 0.95), 2.0)
 	# Diagonal arrow from this side's base circle toward the NEAREST pocket
 	# (one per corner, like a real board). v2 pointed sides 1 and 3 at the
 	# far pocket; fixed here (side 0 -> BL, 1 -> TR, 2 -> TL, 3 -> BR).
 	var pockets := CarromPhysics.pocket_centers()
 	var target: Vector2 = pockets[2] if side == 0 else (pockets[1] if side == 1 else (pockets[0] if side == 2 else pockets[3]))
-	var base_c: Vector2 = xform * Vector2(-len2, oc)
+	var base_c: Vector2 = xform * Vector2(-end_off, oc)
 	var dir := (target - base_c).normalized()
 	var start := base_c + dir * 16.0
 	var arrow_len := base_c.distance_to(target) - 40.0
@@ -210,6 +266,46 @@ func _draw_side_markings(c: Vector2, half: float, line_c: Color, accent: Color, 
 	draw_line(start, end, accent, 4.0)
 	draw_line(end, end - dir.rotated(0.5) * 16.0, accent, 4.0)
 	draw_line(end, end - dir.rotated(-0.5) * 16.0, accent, 4.0)
+
+## Labelled diagram (home only): dark pill + gold border + white text, with
+## a thin gold leader line to the part. Pill positions are board-local and
+## tuned for the home diagram pieces (queen centre, one white coin, one
+## black coin, striker on the bottom baseline); they are drawn on top of
+## the empty board areas so they never cover a labelled piece.
+func _draw_labels() -> void:
+	if _font == null:
+		return
+	var pill_style := StyleBoxFlat.new()
+	pill_style.bg_color = Color(0.06, 0.07, 0.10, 0.92)
+	pill_style.border_color = Color(0.83, 0.69, 0.22)
+	pill_style.set_border_width_all(2)
+	pill_style.set_corner_radius_all(14)
+	pill_style.content_margin_left = 12
+	pill_style.content_margin_right = 12
+	pill_style.content_margin_top = 5
+	pill_style.content_margin_bottom = 5
+	# [text, pill top-left, leader target]
+	var labels := [
+		["Pocket", Vector2(468, 288), Vector2(628, 306)],
+		["Base line", Vector2(498, 856), Vector2(556, 800)],
+		["Diagonal", Vector2(148, 688), Vector2(205, 742)],
+		["Centre circle", Vector2(498, 476), Vector2(428, 560)],
+		["Queen", Vector2(148, 554), Vector2(344, 584)],
+		["White coin", Vector2(108, 396), Vector2(224, 444)],
+		["Black coin", Vector2(556, 738), Vector2(498, 726)],
+		["Striker", Vector2(148, 866), Vector2(338, 800)],
+	]
+	for entry in labels:
+		var text: String = entry[0]
+		var pill_pos: Vector2 = entry[1]
+		var target: Vector2 = entry[2]
+		var tw := _font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, 18).x
+		var rect := Rect2(pill_pos, Vector2(tw + 24, 30))
+		# Leader first (under the pill), then the pill, then the text.
+		draw_line(rect.get_center(), target, Color(0.83, 0.69, 0.22, 0.9), 2.0)
+		draw_circle(target, 4.0, Color(0.83, 0.69, 0.22))
+		draw_style_box(pill_style, rect)
+		draw_string(_font, rect.position + Vector2(12, 22), text, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.96, 0.95, 0.92))
 
 func _draw_piece(p: Dictionary) -> void:
 	var pos: Vector2 = p["pos"]
@@ -246,8 +342,8 @@ func _draw_piece(p: Dictionary) -> void:
 		draw_circle(pos, r * 0.52, center_col)
 		draw_arc(pos, r * 0.52, 0, TAU, 24, rim, 1.5)
 	# Gloss highlight + bright specular dot (coins look glossy, not flat).
-	draw_circle(pos + Vector2(-r * 0.3, -r * 0.35), r * 0.38, Color(1, 1, 1, 0.45))
-	draw_circle(pos + Vector2(-r * 0.38, -r * 0.42), r * 0.14, Color(1, 1, 1, 0.75))
+	draw_circle(pos + Vector2(-r * 0.3, -r * 0.35), r * 0.38, Color(1, 1, 1, 0.5))
+	draw_circle(pos + Vector2(-r * 0.38, -r * 0.42), r * 0.14, Color(1, 1, 1, 0.85))
 	# Bottom inner shadow for depth.
 	draw_arc(pos, r - 3.0, PI * 0.15, PI * 0.85, 16, Color(0, 0, 0, 0.28), 2.0)
 	if kind == "striker":

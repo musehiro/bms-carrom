@@ -153,3 +153,60 @@ static func popup_window(title: String, size: Vector2) -> Dictionary:
 	vb.add_child(top)
 	dim.add_child(win)
 	return {"dim": dim, "win": win, "box": vb, "close": x}
+
+## Stake picker popup (v5, virtual-coin staking): before an online match
+## the player chooses ANY stake from 0 up to their balance — no fixed
+## amount, no forced match of the opponent's stake. The confirm button
+## validates with Stakes.valid_stake and calls on_confirm(stake) only on
+## success (the popup is freed here); errors show in the popup itself.
+## Quick amounts exist so the flow is one tap on a phone (and testable).
+## Returns {dim, box, close, stake_edit, error_label, confirm}.
+static func stake_picker(balance: int, on_confirm: Callable) -> Dictionary:
+	var pop: Dictionary = popup_window("ONLINE — CHOOSE YOUR STAKE", Vector2(580, 580))
+	var box: VBoxContainer = pop["box"]
+	box.add_child(body_label("Real players worldwide, matched within ±2 levels. You choose your own stake — any amount up to your balance. Winner takes the pot (both stakes).", 20))
+	var bal := body_label("Your coins: ◉ %d" % balance, 22)
+	box.add_child(bal)
+	var edit := LineEdit.new()
+	edit.name = "StakeEdit"
+	edit.text = "0"
+	edit.placeholder_text = "Enter your stake"
+	edit.add_theme_font_size_override("font_size", 26)
+	edit.custom_minimum_size = Vector2(0, 60)
+	box.add_child(edit)
+	var quick := HBoxContainer.new()
+	quick.add_theme_constant_override("separation", 8)
+	box.add_child(quick)
+	for amount in ["0", "50", "100", "500", "ALL IN"]:
+		var q := dark_button(amount, 22)
+		q.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var val: String = amount
+		q.pressed.connect(func() -> void:
+			edit.text = str(balance) if val == "ALL IN" else val)
+		quick.add_child(q)
+	var err := Label.new()
+	err.name = "StakeError"
+	err.add_theme_font_size_override("font_size", 18)
+	err.add_theme_color_override("font_color", RED)
+	err.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(err)
+	if balance == 0:
+		box.add_child(UiKit.body_label("Out of coins — play a friendly 0-stake match, or watch an ad to earn coins to stake.", 17))
+	else:
+		box.add_child(muted_label("Stake 0 = friendly match, no coins won or lost.", 17))
+	var confirm := gold_button("FIND OPPONENT", 26)
+	box.add_child(confirm)
+	confirm.pressed.connect(func() -> void:
+		var raw := edit.text.strip_edges()
+		if raw == "" or raw.length() > 9 or not raw.is_valid_int():
+			err.text = "Enter a whole number of coins."
+			return
+		var stake := int(raw)
+		if not Stakes.valid_stake(stake, balance):
+			err.text = "Stake must be 0 to %d coins (your balance)." % balance
+			return
+		pop["dim"].queue_free()
+		on_confirm.call(stake))
+	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
+	return {"dim": pop["dim"], "box": box, "close": pop["close"],
+		"stake_edit": edit, "error_label": err, "confirm": confirm}

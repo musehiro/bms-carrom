@@ -14,7 +14,7 @@ extends Control
 ## proven to work on his phone: no popup window, no dim overlay.
 ##
 ## Flow: PLAY -> this screen -> SOLO -> difficulty popup (proven) -> match;
-## ONLINE -> table popup (proven) -> search with the 12 s BOT fallback.
+## ONLINE -> stake picker (proven) -> search with the 12 s BOT fallback.
 
 signal solo_chosen
 signal online_chosen

@@ -49,6 +49,18 @@ func _initialize() -> void:
 	#    notification goes over the network, so here we check the queue).
 	server._remove_from_queue(11)
 	_check("server: disconnect removes from queue", (server._queue as Array).size() == 1)
+	# 7. Matched payloads exchange stakes (v5 staking): each side learns
+	#    the opponent's stake so both clients can show and pay the pot.
+	var payloads: Dictionary = script.matched_payloads(
+		{"name": "Alice", "level": 5, "stake": 200},
+		{"name": "Bob", "level": 6, "stake": 350}, true)
+	_check("server: A learns Bob's stake (350)", int(payloads["a"]["opp_stake"]) == 350 and String(payloads["a"]["opponent"]) == "Bob")
+	_check("server: B learns Alice's stake (200)", int(payloads["b"]["opp_stake"]) == 200 and String(payloads["b"]["opponent"]) == "Alice")
+	_check("server: breaker flags are opposite", bool(payloads["a"]["you_break"]) != bool(payloads["b"]["you_break"]))
+	# 8. Missing stakes default to 0 (old clients / direct queue entries).
+	var old_payloads: Dictionary = script.matched_payloads(
+		{"name": "Alice", "level": 5}, {"name": "Bob", "level": 6}, false)
+	_check("server: missing stake defaults to 0", int(old_payloads["a"]["opp_stake"]) == 0 and int(old_payloads["b"]["opp_stake"]) == 0)
 	print("=== %d passed, %d failed ===" % [_passed, _failed])
 	quit(0 if _failed == 0 else 1)
 

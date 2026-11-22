@@ -18,6 +18,9 @@ signal interstitial_failed()
 
 var _rewarded_ad: RewardedAd = null
 var _interstitial_ad: InterstitialAd = null
+var _banner_view: AdView = null
+var _banner_listener := AdListener.new()
+var _banner_shown := false
 var _rewarded_reason := ""
 var _rewarded_load_cb := RewardedAdLoadCallback.new()
 var _rewarded_listener := OnUserEarnedRewardListener.new()
@@ -39,6 +42,8 @@ func _ready() -> void:
 	_interstitial_load_cb.on_ad_failed_to_load = _on_interstitial_failed_to_load
 	_interstitial_content_cb.on_ad_dismissed_full_screen_content = _on_interstitial_dismissed
 	_interstitial_content_cb.on_ad_failed_to_show_full_screen_content = _on_interstitial_show_failed
+	_banner_listener.on_ad_loaded = func() -> void: print("[Ads] Home banner loaded.")
+	_banner_listener.on_ad_failed_to_load = func(err: LoadAdError) -> void: print("[Ads] Home banner failed to load: ", err.message)
 	if OS.has_feature("android"):
 		MobileAds.initialize()
 		_preload_interstitial()
@@ -48,6 +53,31 @@ func _ready() -> void:
 func _is_plugin_live() -> bool:
 	# The native singleton only exists inside a real Android export.
 	return OS.has_feature("android")
+
+# ------------------------------------------------------------------ banner
+## Home-page banner (v5, Buddhika 2026-11-22): an anchored adaptive banner
+## pinned to the very bottom of the home screen only. TEST unit ID for now;
+## the real banner ID comes from Nana later, like the interstitials. The
+## home screen reserves a ~96 px slot at the bottom with a subtle "AD"
+## placeholder, so the layout is identical with or without a live banner.
+## On non-Android builds this is a no-op (the placeholder proves the slot).
+
+func show_home_banner() -> void:
+	if not _is_plugin_live():
+		print("[Ads] Home banner: non-Android, placeholder slot only.")
+		return
+	if _banner_view == null:
+		var ad_size := AdSize.get_current_orientation_anchored_adaptive_banner_ad_size(AdSize.FULL_WIDTH)
+		_banner_view = AdView.new(AdsConfig.BANNER_UNIT_ID, ad_size, AdPosition.Values.BOTTOM)
+		_banner_view.ad_listener = _banner_listener
+		_banner_view.load_ad(AdRequest.new())
+	_banner_view.show()
+	_banner_shown = true
+
+func hide_home_banner() -> void:
+	if _banner_view != null:
+		_banner_view.hide()
+	_banner_shown = false
 
 # ---------------------------------------------------------------- rewarded
 

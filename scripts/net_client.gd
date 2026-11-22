@@ -12,14 +12,17 @@ extends Node
 ## shot inputs, with a full state snapshot after every shot to resync.
 ##
 ## Protocol (JSON strings sent via the _relay RPC):
-##   C->S {"type":"queue","name":str,"level":int,"table":int}
-##   S->C {"type":"matched","opponent":str,"opp_level":int,"you_break":bool}
+##   C->S {"type":"queue","name":str,"level":int,"table":int,"stake":int}
+##   S->C {"type":"matched","opponent":str,"opp_level":int,"you_break":bool,"opp_stake":int}
 ##   C->S {"type":"shot","sx":float,"dx":float,"dy":float,"power":float}
 ##   S->C {"type":"shot", ...same...}            (relayed to the opponent)
 ##   C->S {"type":"state", ...}                  (snapshot after settling)
 ##   S->C {"type":"state", ...}                  (relayed)
 ##   C->S {"type":"forfeit"}  /  S->C {"type":"opponent_left"}
 ##   S->C {"type":"error","message":str}
+## "table" is only the matchmaking BAND (from Stakes.band_for_stake) — the
+## pot uses each player's own "stake", which the server exchanges in the
+## matched message. Missing stake fields default to 0 (friendly match).
 
 signal matched(opponent: Dictionary)
 signal shot_received(data: Dictionary)
@@ -65,11 +68,11 @@ func _on_server_disconnected() -> void:
 	_connected = false
 	opponent_left.emit()
 
-func queue_up(player_name: String, level: int, table: int) -> void:
+func queue_up(player_name: String, level: int, table: int, stake: int = 0) -> void:
 	if not _connected:
 		queue_failed.emit("Not connected to the server yet.")
 		return
-	_send({"type": "queue", "name": player_name, "level": level, "table": table})
+	_send({"type": "queue", "name": player_name, "level": level, "table": table, "stake": stake})
 
 func send_shot(data: Dictionary) -> void:
 	data["type"] = "shot"

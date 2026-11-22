@@ -34,6 +34,9 @@ func _initialize() -> void:
 	_test_ray_circle()
 	_test_full_break_simulation()
 	_test_full_match_ai_vs_ai()
+	_test_base_circle_geometry()
+	_test_stakes()
+	_test_economy_v5_consts()
 	print("=== %d passed, %d failed ===" % [_passed, _failed])
 	for f in _failures:
 		print("FAIL: ", f)
@@ -367,3 +370,63 @@ func _reactivate_test(pieces: Array, kind: String, near: Vector2) -> void:
 			p["vel"] = Vector2.ZERO
 			p["pos"] = near + Vector2(30, 0)
 			return
+
+# ------------------------------------------------------------- v5: geometry
+## ICF base circles: exactly 8 centres, 2 per corner, the pair clearly
+## separated (centre distance ~37 px, gap ~11 px), all on the lane
+## centreline (same radius from the board centre), and the bottom side's
+## right centre exactly where the geometry says it must be.
+func _test_base_circle_geometry() -> void:
+	var centers: Array = BoardView.base_circle_centers()
+	_check("geo: 8 base circles", centers.size() == 8, str(centers.size()))
+	var c := CarromPhysics.BOARD_CENTER
+	var min_pair := 1e9
+	var max_pair := 0.0
+	var all_on_lane := true
+	for i in range(centers.size()):
+		var r := (centers[i] as Vector2).distance_to(c)
+		if not _approx(r, 277.4, 1.0):
+			all_on_lane = false
+		for j in range(i + 1, centers.size()):
+			var d := (centers[i] as Vector2).distance_to(centers[j] as Vector2)
+			min_pair = minf(min_pair, d)
+			max_pair = maxf(max_pair, d)
+	_check("geo: all centres on the lane centreline (r ~277.4)", all_on_lane)
+	_check("geo: closest pair ~37 px apart (gap ~11 px)", min_pair > 30.0 and min_pair < 45.0, str(min_pair))
+	_check("geo: opposite corners far apart", max_pair > 300.0, str(max_pair))
+	var found_br := false
+	var found_bl := false
+	for p in centers:
+		if (p as Vector2).distance_to(Vector2(542.7, 798.85)) < 1.5:
+			found_br = true
+		if (p as Vector2).distance_to(Vector2(177.3, 798.85)) < 1.5:
+			found_bl = true
+	_check("geo: bottom-right base circle at (542.7, 798.85)", found_br)
+	_check("geo: bottom-left base circle at (177.3, 798.85)", found_bl)
+	# Striker centres on the corrected lane (306 - 208.85 = 97.15).
+	_check("geo: baseline_y(0) centres striker on the lane", _approx(CarromPhysics.baseline_y(0), 798.85, 1.0), str(CarromPhysics.baseline_y(0)))
+
+# -------------------------------------------------------------- v5: staking
+func _test_stakes() -> void:
+	_check("stakes: band 0 below 250", Stakes.band_for_stake(0) == 0 and Stakes.band_for_stake(249) == 0)
+	_check("stakes: band 1 from 250", Stakes.band_for_stake(250) == 1 and Stakes.band_for_stake(999) == 1)
+	_check("stakes: band 2 from 1000", Stakes.band_for_stake(1000) == 2 and Stakes.band_for_stake(50000) == 2)
+	_check("stakes: 0 and full balance are valid", Stakes.valid_stake(0, 1000) and Stakes.valid_stake(1000, 1000))
+	_check("stakes: over balance is invalid", not Stakes.valid_stake(1001, 1000))
+	_check("stakes: negative is invalid", not Stakes.valid_stake(-1, 1000))
+	_check("stakes: pot is both stakes", Stakes.pot(200, 350) == 550)
+	_check("stakes: win takes the whole pot", Stakes.payout(200, 350, "win") == 550)
+	_check("stakes: loss takes nothing", Stakes.payout(200, 350, "loss") == 0)
+	_check("stakes: draw refunds own stake", Stakes.payout(200, 350, "draw") == 200)
+	_check("stakes: win with zero stakes pays zero", Stakes.payout(0, 0, "win") == 0)
+	_check("stakes: draw with zero stakes refunds zero", Stakes.payout(0, 0, "draw") == 0)
+
+# -------------------------------------------------------------- v5: economy
+## Constants only (no Save instance): the v5 coin model — ad ladder +
+## online stakes are the only sources; solo pays zero; no free grants.
+func _test_economy_v5_consts() -> void:
+	var SaveScript: GDScript = load("res://scripts/save_data.gd")
+	_check("econ: ladder tiers 150/200/250/300/400", SaveScript.AD_LADDER == [150, 200, 250, 300, 400])
+	_check("econ: daily ad cap 2500", SaveScript.DAILY_AD_COIN_CAP == 2500)
+	_check("econ: cap is exactly 8 ads (150+200+250+300+400x4)", 150 + 200 + 250 + 300 + 400 * 4 == SaveScript.DAILY_AD_COIN_CAP)
+	_check("econ: starting balance stays 1000", SaveScript.STARTING_COINS == 1000)

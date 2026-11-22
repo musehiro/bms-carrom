@@ -12,7 +12,9 @@ const COIN_R := 13.0
 const STRIKER_R := 17.0
 const POCKET_R := 19.0
 const POCKET_CAPTURE := 21.0 # centre within this of a pocket centre = pocketed
-const BASELINE_OFFSET := 101.0 # striker centre line from the surface edge
+const BASELINE_OFFSET := 97.0 # striker centre line from the surface edge
+# v5: 97 centres the striker on the corrected base lane (ICF: lane
+# centreline 208.85 px from the surface centre; 306 - 208.85 = 97.15).
 const BASELINE_HALF_LEN := 194.0
 const FRICTION := 420.0 # px/s^2 linear decel (powdered board: low friction)
 const REST_COIN := 0.92
