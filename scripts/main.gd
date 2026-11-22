@@ -18,6 +18,12 @@ var _shot_mode := ""
 var _shot_out := ""
 
 func _ready() -> void:
+	# Root Control must NOT swallow input: it covers the whole screen and
+	# its default mouse_filter (STOP) used to eat every touch before the
+	# match screen's _unhandled_input ever saw it (v1: drag did nothing).
+	# IGNORE lets unhandled events fall through; Buttons/popups still get
+	# their own input as children.
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	Sfx.set_enabled(Save.sound_on)
 	Ads.rewarded_earned.connect(_on_rewarded_earned)
 	Ads.rewarded_failed.connect(_on_rewarded_failed)
@@ -38,13 +44,18 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if _searching_active:
 		_search_elapsed += delta
-		if _search_status:
-			_search_status.text = "Searching for an opponent… %ds\nMatched within ±2 levels." % int(_search_elapsed)
-			if _search_elapsed >= 30.0 and not _search_widened:
-				_search_widened = true
+		if _search_elapsed >= 30.0 and not _search_widened:
+			_search_widened = true
+			if _search_status:
 				_search_status.text = "Searching… %ds\nNo match yet — widened to ±4 levels." % int(_search_elapsed)
-		if _search_elapsed >= 60.0 and _search_bot_button:
+		if _search_elapsed >= 12.0 and _search_bot_button:
+			# Timeout fallback (v2): never a dead-end popup with only Cancel.
 			_search_bot_button.visible = true
+		if _search_status and not _search_widened:
+			if _search_elapsed >= 12.0:
+				_search_status.text = "Searching… %ds\nNo opponent yet — play vs the computer instead." % int(_search_elapsed)
+			else:
+				_search_status.text = "Searching for an opponent… %ds\nMatched within ±2 levels." % int(_search_elapsed)
 
 # ------------------------------------------------------------------- screens
 
@@ -148,7 +159,7 @@ func _start_matchmaking(table: int) -> void:
 	box.add_child(_search_status)
 	var table_label := UiKit.muted_label("Table: %s — entry ◉ %d, pot ◉ %d" % [["LOW", "MID", "HIGH"][table], entry, entry * 2], 18)
 	box.add_child(table_label)
-	_search_bot_button = UiKit.dark_button("NO OPPONENT? PLAY A LABELLED BOT (PRACTICE)", 20)
+	_search_bot_button = UiKit.dark_button("NO OPPONENT? PLAY vs COMPUTER INSTEAD", 20)
 	_search_bot_button.visible = false
 	_search_bot_button.pressed.connect(_on_play_bot_from_search)
 	box.add_child(_search_bot_button)
@@ -285,6 +296,19 @@ func _run_shot_mode() -> void:
 		"match":
 			_start_solo(1)
 			_demo_shot_and_capture()
+		"playchoice":
+			_show_home()
+			_home._on_play_pressed()
+			_capture_after(1.0)
+		"search":
+			# Search with the queue-failed handler disconnected so the popup
+			# stays up (no server here); jump near the 12 s timeout so the
+			# labelled-BOT fallback button is visible in the capture.
+			_show_home()
+			Net.queue_failed.disconnect(_on_queue_failed)
+			_start_matchmaking(0)
+			_search_elapsed = 11.5
+			_capture_after(1.2)
 		_:
 			_show_home()
 			_capture_after(1.5)
