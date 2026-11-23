@@ -6,7 +6,7 @@ extends Control
 
 var _home: HomeScreen = null
 var _mode: ModeChoiceScreen = null
-var _tour: TourRosterScreen = null
+var _loading: LoadingScreen = null
 var _nearby: NearbyScreen = null
 var _match: MatchScreen = null
 var _auth: AuthScreen = null
@@ -20,6 +20,7 @@ var _search_widened := false
 var _search_mode := "" # "internet" | "host" | "join" | "invite" — which search is running
 var _invite_group_id := "" # the Supabase invite group being joined
 var _invite_is_inviter := false # I sent this invite (seat 0)
+var _last_tour_stake := 0 # the stake of the last World Tour match (rematch reuses it)
 var _search_bot_button: Button = null
 var _search_status: Label = null
 var _lan_hosts_box: VBoxContainer = null # join popup: found-host buttons
@@ -113,7 +114,7 @@ func _clear() -> void:
 		c.queue_free()
 	_home = null
 	_mode = null
-	_tour = null
+	_loading = null
 	_nearby = null
 	_match = null
 	_auth = null
@@ -140,7 +141,7 @@ func _show_home() -> void:
 	_clear()
 	_home = HomeScreen.new()
 	add_child(_home)
-	_home.play_solo.connect(_start_solo)
+	_home.play_solo_direct.connect(_start_solo_direct)
 	_home.play_online.connect(_start_matchmaking)
 	_home.open_mode_choice.connect(_open_mode_choice)
 	_home.open_shop.connect(_open_shop)
@@ -253,6 +254,64 @@ func _join_invite_room(group_id: String, mode: String, stake: int, is_inviter: b
 	else:
 		Net.connect_to_server(Save.online_host, NetClient.DEFAULT_PORT)
 
+## Short loading screen (v10 direct play): tap -> this -> board.
+## One big label, one sub-line, animated dots. No buttons, no choices —
+## the player understands it at a glance (clean-UI rule).
+class LoadingScreen:
+	extends Control
+	var _dots_label: Label
+	var _dots := 0
+	var _accum := 0.0
+
+	func _init(title_text: String, sub_text: String) -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		UiKit.full_rect(self)
+		var bg := ColorRect.new()
+		bg.color = Color(0.04, 0.45, 0.42)
+		bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		UiKit.full_rect(bg)
+		add_child(bg)
+		var center := CenterContainer.new()
+		center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		UiKit.full_rect(center)
+		add_child(center)
+		var vb := VBoxContainer.new()
+		vb.add_theme_constant_override("separation", 14)
+		center.add_child(vb)
+		var title := UiKit.title_label(title_text, 40)
+		vb.add_child(title)
+		var sub := UiKit.muted_label(sub_text, 20)
+		sub.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		vb.add_child(sub)
+		_dots_label = UiKit.title_label("", 40)
+		vb.add_child(_dots_label)
+
+	func _process(delta: float) -> void:
+		_accum += delta
+		if _accum >= 0.4:
+			_accum = 0.0
+			_dots = (_dots + 1) % 4
+			_dots_label.text = ".".repeat(_dots)
+
+## Show the loading screen (no timer — the caller drives what happens
+## next). The screenshot mode uses this to capture the screen itself.
+func _show_loading(title_text: String, sub_text: String) -> void:
+	_clear()
+	_loading = LoadingScreen.new(title_text, sub_text)
+	add_child(_loading)
+
+## Show the loading screen, wait ~1.2 s, then run `then`. Tap ->
+## loading -> board: a short pause, not a choice.
+func _show_loading_then(title_text: String, sub_text: String, then: Callable) -> void:
+	_show_loading(title_text, sub_text)
+	var token := _loading
+	await get_tree().create_timer(1.2).timeout
+	if _loading != token or not is_instance_valid(token):
+		return # the screen went away meanwhile — do not start the match
+	_loading = null
+	then.call()
+
 func _start_solo(difficulty: int) -> void:
 	_clear()
 	_match = MatchScreen.new()
@@ -260,9 +319,15 @@ func _start_solo(difficulty: int) -> void:
 	var names := ["Easy Bot", "Medium Bot", "Hard Bot"]
 	_match.setup("solo", difficulty, 0, names[difficulty], difficulty + 1, null)
 	_match.exit_to_home.connect(_show_home)
-	_match.rematch_requested.connect(func() -> void: _start_solo(difficulty))
+	_match.rematch_requested.connect(_start_solo_direct)
 
-# ---------------------------------------------------------- mode choice (v3)
+## v10 direct Solo: no difficulty choice — a random bot (Easy / Medium /
+## Hard), free, no coins, as before. Tap -> loading -> board.
+func _start_solo_direct() -> void:
+	_show_loading_then("GETTING READY", "Solo — free practice vs a random bot.", func() -> void:
+		_start_solo(randi_range(0, 2)))
+
+# ---------------------------------------------------------- mode choice (v3, v10 direct play)
 
 func _open_mode_choice() -> void:
 	# Full-screen mode screen (like Shop), NOT a popup: the v2 PLAY popup's
@@ -273,56 +338,39 @@ func _open_mode_choice() -> void:
 	_clear()
 	_mode = ModeChoiceScreen.new()
 	add_child(_mode)
-	_mode.solo_chosen.connect(_show_solo_difficulty)
-	_mode.tour_chosen.connect(_show_tour_roster)
+	_mode.solo_chosen.connect(_start_solo_direct)
+	_mode.tour_chosen.connect(func() -> void:
+		_show_stake_picker(func(stake: int) -> void: _start_tour_random(stake),
+			"World Tour — a random advanced computer champion (BOT), near your level. Your stake is mirrored by the bot — winner takes the pot (both stakes).",
+			"WORLD TOUR — CHOOSE YOUR STAKE"))
 	_mode.online_chosen.connect(_show_online_stake)
 	_mode.nearby_chosen.connect(_open_nearby)
 	_mode.go_back.connect(_show_home)
 
-func _show_solo_difficulty() -> void:
-	var pop: Dictionary = UiKit.popup_window("SOLO — vs AI (offline)", Vector2(560, 460))
-	add_child(pop["dim"])
-	var box: VBoxContainer = pop["box"]
-	box.add_child(UiKit.body_label("No internet needed. Free practice — no coins earned. Win coins in online matches or from ads.", 20))
-	for i in range(3):
-		var names := ["EASY", "MEDIUM", "HARD"]
-		var descs := ["Relaxed — misses often, never chases the queen.", "A fair fight — sometimes chases the queen.", "Sharp — near-perfect aim, chases the queen."]
-		var b := UiKit.gold_button(names[i], 26) if i == 1 else UiKit.dark_button(names[i], 26)
-		box.add_child(b)
-		var d := UiKit.muted_label(descs[i], 17)
-		box.add_child(d)
-		var diff := i
-		b.pressed.connect(func() -> void:
-			pop["dim"].queue_free()
-			_start_solo(diff))
-	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
-
-## World Tour (v8): pick an advanced computer opponent from the
-## roster, choose your stake (the bot mirrors it — pot = 2x stake),
-## and play a staked match against the AI. The roster and the match
-## both say BOT — never a fake human (design doc 3.2).
-func _show_tour_roster() -> void:
-	_clear()
-	_tour = TourRosterScreen.new()
-	add_child(_tour)
-	_tour.bot_chosen.connect(func(bot: Dictionary) -> void:
-		_show_stake_picker(func(stake: int) -> void: _start_tour_match(bot, stake),
-			"World Tour — vs %s (BOT • Computer opponent, %s). Your stake is mirrored by the bot — winner takes the pot (both stakes)." % [String(bot.get("name", "?")), String(bot.get("country", "?"))],
-			"WORLD TOUR — CHOOSE YOUR STAKE"))
-	_tour.go_back.connect(_open_mode_choice)
+## v10 direct World Tour: no bot list — a random advanced bot, weighted
+## near the player's level. Stake picker first (unchanged), then
+## loading, then the board. The bot is named in the match HUD (BOT).
+func _start_tour_random(stake: int) -> void:
+	if not Stakes.valid_stake(stake, Save.coins):
+		_toast("Not enough coins for that stake — watch an ad to earn more.")
+		return
+	_last_tour_stake = stake
+	_show_loading_then("FINDING A CHAMPION", "World Tour — a random computer champion, near your level.", func() -> void:
+		_start_tour_match(WorldTour.random_bot_near_level(Save.level()), stake))
 
 func _start_tour_match(bot: Dictionary, stake: int) -> void:
 	if not Stakes.valid_stake(stake, Save.coins):
 		_toast("Not enough coins for that stake — watch an ad to earn more.")
 		return
+	_last_tour_stake = stake
 	_clear()
 	_match = MatchScreen.new()
 	add_child(_match)
 	var opp_stake := WorldTour.mirror_stake(stake)
 	_match.setup("tour", int(bot.get("skill", 3)), 0, "%s (BOT)" % String(bot.get("name", "?")), int(bot.get("level", 1)), null, -1, stake, opp_stake, false)
 	_match.exit_to_home.connect(_show_home)
-	# Rematch goes back to the roster — pick a bot and a fresh stake.
-	_match.rematch_requested.connect(_show_tour_roster)
+	# Rematch: same stake, a NEW random bot — no roster, no picker.
+	_match.rematch_requested.connect(func() -> void: _start_tour_random(_last_tour_stake))
 
 ## Stake picker (v5): before an online match the player chooses ANY
 ## stake up to their balance — no fixed tables any more. Then (v6) they
@@ -607,7 +655,7 @@ func _on_play_bot_from_search() -> void:
 	add_child(_match)
 	_match.setup("solo", 1, 0, "BOT (Practice)", 1, null, -1, 0, 0, true)
 	_match.exit_to_home.connect(_show_home)
-	_match.rematch_requested.connect(func() -> void: _start_solo(1))
+	_match.rematch_requested.connect(_start_solo_direct)
 	_toast("Practice vs BOT — clearly labelled, no coins at stake.")
 
 func _cancel_search() -> void:
@@ -844,8 +892,24 @@ func _run_shot_mode() -> void:
 			_demo_invite_box_4p()
 			_capture_after(1.2)
 		"tour":
-			# v8: the World Tour roster — bot cards with BOT tags.
-			_show_tour_roster()
+			# v10: the roster is gone — the loading screen instead.
+			_show_loading("FINDING A CHAMPION", "World Tour — a random computer champion, near your level.")
+			_capture_after(1.0)
+		"loading":
+			# v10: the solo loading screen (tap SOLO -> this -> board).
+			_show_loading("GETTING READY", "Solo — free practice vs a random bot.")
+			_capture_after(1.0)
+		"tourwin0":
+			# v10: a World Tour win with stake 0 — the earn offer, never ◉ 0.
+			Save.coins = 1000
+			_start_tour_match(WorldTour.BOTS[0], 0)
+			_demo_tour_win_and_capture()
+		"googlepending":
+			# v10: the register screen with a Google sign-in pending over
+			# 60 s — RETRY + the prominent paste-code row.
+			Accounts.debug_begin_pending_return("google")
+			_show_auth()
+			_auth.show_recovery_ui()
 			_capture_after(1.0)
 		"tourmatch":
 			# v8: a World Tour match in progress (Arjun, stake 100).

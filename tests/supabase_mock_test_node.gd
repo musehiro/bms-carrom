@@ -119,6 +119,11 @@ func _run() -> void:
 	_check("mock: wrong code rejected", not bool(wrong.get("ok", false)))
 	var right := await Accounts.verify_code_and_login("test.player@gmail.com", "123456", true)
 	_check("mock: right code verifies and creates the cloud profile", bool(right.get("ok", false)) and Accounts.is_verified())
+	# v10 regression: verifying the code ends the OTP-link pending
+	# return (loopback listener) — otherwise a later Google sign-in
+	# is told one is "already in flight" and its callback completes
+	# as an OTP-link return (wrong signal, wrong PKCE verifier).
+	_check("mock: OTP verify ends the pending return", not Accounts.is_return_pending())
 	_check("mock: account id is now the Supabase user id", Save.account_id == Supabase.user_id and Save.account_id != "")
 	# --- Profile fetch by Gmail (restore path) ---
 	var got := await Supabase.get_profile_by_gmail("test.player@gmail.com")

@@ -13,9 +13,12 @@ extends Control
 ## same plain full-screen button layout as the home screen and Shop, both
 ## proven to work on his phone: no popup window, no dim overlay.
 ##
-## Flow: PLAY -> this screen -> SOLO -> difficulty popup (proven) -> match;
-## ONLINE -> stake picker (proven) -> search with the 12 s BOT fallback.
-## NEARBY -> same-Wi-Fi play (v6): one phone HOSTS, the other JOINS.
+## Flow (v10): PLAY -> this screen -> SOLO -> loading -> board vs a
+## random bot (no difficulty choice, no bot list); WORLD TOUR -> stake
+## picker -> loading -> board vs a random advanced bot (weighted near
+## the player's level); ONLINE -> stake picker (proven) -> search with
+## the 12 s BOT fallback. NEARBY -> same-Wi-Fi play (v6): one phone
+## HOSTS, the other JOINS.
 
 signal solo_chosen
 signal tour_chosen
@@ -27,7 +30,7 @@ func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	UiKit.full_rect(self)
 	var bg := ColorRect.new()
-	bg.color = Color(0.09, 0.07, 0.05)
+	bg.color = Color(0.04, 0.45, 0.42) # v10: vivid teal, not near-black
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	UiKit.full_rect(bg)
 	add_child(bg)
@@ -48,21 +51,23 @@ func _ready() -> void:
 	divider.custom_minimum_size = Vector2(0, 3)
 	divider.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(divider)
-	var solo := UiKit.gold_button("SOLO — vs AI (offline)", 30)
+	# v10: big chunky 3D tiles (Nana's pairs) — one tap, no bot list:
+	# SOLO and WORLD TOUR go straight to the board vs a random bot.
+	var solo := UiKit.tile_button("SOLO — vs AI (offline)", 30, UiKit.TILE_PHONICS)
 	solo.custom_minimum_size = Vector2(0, 96)
 	solo.pressed.connect(func() -> void: solo_chosen.emit())
 	root.add_child(solo)
 	# v8 World Tour: advanced computer opponents with stakes. The button
-	# and the roster both say BOT — never a fake human (design doc 3.2).
-	var tour := UiKit.gold_button("WORLD TOUR — vs computer champions", 30)
+	# and the match both say BOT — never a fake human (design doc 3.2).
+	var tour := UiKit.tile_button("WORLD TOUR — vs computer champions", 30, UiKit.TILE_QUIZ)
 	tour.custom_minimum_size = Vector2(0, 96)
 	tour.pressed.connect(func() -> void: tour_chosen.emit())
 	root.add_child(tour)
-	var online := UiKit.dark_button("ONLINE — vs real players", 30)
+	var online := UiKit.tile_button("ONLINE — vs real players", 30, UiKit.TILE_SPELLING)
 	online.custom_minimum_size = Vector2(0, 96)
 	online.pressed.connect(func() -> void: online_chosen.emit())
 	root.add_child(online)
-	var nearby := UiKit.dark_button("NEARBY — same Wi-Fi", 30)
+	var nearby := UiKit.tile_button("NEARBY — same Wi-Fi", 30, UiKit.TILE_ALPHABET)
 	nearby.custom_minimum_size = Vector2(0, 96)
 	nearby.pressed.connect(func() -> void: nearby_chosen.emit())
 	root.add_child(nearby)

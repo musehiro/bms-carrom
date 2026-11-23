@@ -5,11 +5,14 @@ extends Node
 ## a phone uses). v3 flow: PLAY opens the FULL-SCREEN mode-choice screen
 ## (the v2 popup's SOLO/ONLINE buttons were dead on Buddhika's phone);
 ## difficulty/table popups still open on Main, proven to work on his phone.
+## v10 flow: SOLO goes DIRECT to the board (short loading screen, random
+## bot) — the difficulty popup (EASY/MEDIUM/HARD) is DELETED, and the
+## World Tour roster is DELETED too (no choosing which bot, anywhere).
 ## Verifies:
 ##   F1: real tap on PLAY opens the mode-choice screen (SOLO + ONLINE)
 ##   F1b: real tap on BACK returns to the home screen
-##   F2: real tap on SOLO opens the difficulty popup (EASY + MEDIUM)
-##   F3: real tap on EASY starts a solo match
+##   F2: real tap on SOLO shows the loading screen (no difficulty popup)
+##   F3: after the loading screen a solo match starts vs a random bot
 ##   F4: real tap on ONLINE opens the stake picker; quick 100 + FIND
 ##      OPPONENT starts the search popup (with the 12 s BOT fallback
 ##      visible after fast-forward)
@@ -163,24 +166,29 @@ func _run() -> void:
 		if solo_btn == null:
 			_finish()
 			return
-	# --- F2: real tap on SOLO opens the difficulty popup ---
+	# --- F2 (v10): real tap on SOLO shows the loading screen — NO
+	# difficulty popup, no bot choice. Straight to the board. ---
 	await _tap(_center(solo_btn))
 	var easy_btn := _find_button(_main, "EASY")
 	var med_btn := _find_button(_main, "MEDIUM")
-	print("INFO: after SOLO tap: easy=", easy_btn, " medium=", med_btn, " mode screen still there=", _main._mode != null)
-	_check("F2: SOLO opens difficulty popup (EASY)", easy_btn != null)
-	_check("F2: SOLO opens difficulty popup (MEDIUM)", med_btn != null)
-	if easy_btn == null:
+	print("INFO: after SOLO tap: loading=", _main._loading, " easy=", easy_btn, " medium=", med_btn, " mode screen still there=", _main._mode != null)
+	_check("F2: SOLO shows the loading screen", _main._loading != null and is_instance_valid(_main._loading) and _main._loading.visible)
+	_check("F2: no difficulty popup (EASY gone)", easy_btn == null)
+	_check("F2: no difficulty popup (MEDIUM gone)", med_btn == null)
+	if _main._loading == null:
 		print("INFO: main subtree after SOLO tap:")
 		_dump(_main, "")
 		_finish()
 		return
-	# --- F3: real tap on EASY starts a solo match ---
-	print("INFO: EASY rect=", easy_btn.get_global_rect())
-	await _hover_at(_center(easy_btn))
-	await _tap(_center(easy_btn))
-	print("INFO: after EASY tap: match=", _main._match)
-	_check("F3: EASY starts a solo match", _main._match != null)
+	# --- F3 (v10): after the loading screen a solo match starts ---
+	for i in range(40):
+		await _frames(3)
+		if _main._match != null:
+			break
+	print("INFO: after loading: match=", _main._match)
+	_check("F3: loading finishes and a solo match starts", _main._match != null)
+	if _main._match != null:
+		_check("F3: solo match is free (no stake)", _main._match.your_stake == 0 and _main._match.mode == "solo")
 	# --- F4: ONLINE path — stake picker, then search popup ---
 	_main._show_home()
 	await _frames(5)

@@ -57,6 +57,13 @@ var google_pkce_verifier: String = "" # PKCE verifier of the pending Google
 # sign-in — persisted so the exchange can still complete if the app is
 # killed while the browser is open (deep-link cold start).
 var google_pkce_deadline: int = 0 # unix time; 0 = no Google sign-in pending
+# v10: ONE pending browser return, Google or OTP magic link (the unified
+# return slot — see Accounts). google_pkce_* above is the v9 legacy
+# slot, still read on resume for installs that started a Google
+# sign-in under v9.
+var pending_return_verifier: String = "" # PKCE verifier of the pending return
+var pending_return_deadline: int = 0 # unix time; 0 = no return pending
+var pending_return_kind: String = "" # "google" | "otp_link"
 
 # Account (v7, mandatory registration — NO guest mode). A player cannot
 # play without registering (display name + Gmail). The account id is the
@@ -124,6 +131,9 @@ func load_save() -> void:
 	account_synced_at = int(_cfg.get_value("account", "synced_at", 0))
 	google_pkce_verifier = String(_cfg.get_value("account", "google_pkce_verifier", ""))
 	google_pkce_deadline = int(_cfg.get_value("account", "google_pkce_deadline", 0))
+	pending_return_verifier = String(_cfg.get_value("account", "pending_return_verifier", ""))
+	pending_return_deadline = int(_cfg.get_value("account", "pending_return_deadline", 0))
+	pending_return_kind = String(_cfg.get_value("account", "pending_return_kind", ""))
 
 func save() -> void:
 	_cfg.set_value("player", "coins", coins)
@@ -158,6 +168,9 @@ func save() -> void:
 	_cfg.set_value("account", "synced_at", account_synced_at)
 	_cfg.set_value("account", "google_pkce_verifier", google_pkce_verifier)
 	_cfg.set_value("account", "google_pkce_deadline", google_pkce_deadline)
+	_cfg.set_value("account", "pending_return_verifier", pending_return_verifier)
+	_cfg.set_value("account", "pending_return_deadline", pending_return_deadline)
+	_cfg.set_value("account", "pending_return_kind", pending_return_kind)
 	_cfg.save(SAVE_PATH)
 
 func level() -> int:
@@ -243,7 +256,13 @@ func ad_next_reward() -> int:
 	_ad_reset_if_new_day()
 	if ad_coins_today >= DAILY_AD_COIN_CAP:
 		return 0
-	return AD_LADDER[mini(ad_count_today, AD_LADDER.size() - 1)]
+	return ad_reward_at(ad_count_today)
+
+## The ladder amount for the Nth ad watched today (0-based count).
+## Pure — lets a caller price two ads ahead (the win screen's
+## "WATCH 2 ADS -> EARN" offer) without advancing the ladder.
+func ad_reward_at(count: int) -> int:
+	return AD_LADDER[mini(maxi(count, 0), AD_LADDER.size() - 1)]
 
 func ad_cap_reached() -> bool:
 	_ad_reset_if_new_day()

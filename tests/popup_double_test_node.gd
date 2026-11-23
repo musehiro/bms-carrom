@@ -7,8 +7,10 @@ extends Node
 ## If the PLAY flow buttons only fail under this sequence, the emulated
 ## mouse event is interfering with the Button press state.
 ## v3 flow: PLAY -> full-screen mode screen -> SOLO -> difficulty popup
-## -> EASY -> match. (The v2 popup is gone; the mode screen is a plain
-## full-screen layout like the home screen.)
+## -> EASY -> match. v10 flow: PLAY -> mode screen -> SOLO -> loading
+## screen -> match (the difficulty popup is deleted; SOLO goes direct).
+## (The v2 popup is gone; the mode screen is a plain full-screen layout
+## like the home screen.)
 ## Run: xvfb-run -a -s "-screen 0 720x1640x24" godot --resolution 720x1640
 ##      --path . res://tests/popup_double_test.tscn
 ## Exit 0 = all pass, 1 = any fail.
@@ -121,18 +123,22 @@ func _run() -> void:
 	if solo_btn == null:
 		_finish()
 		return
-	# Android-style tap on SOLO.
+	# Android-style tap on SOLO (v10: direct play — loading, then board).
 	await _tap_android(_center(solo_btn))
 	var easy_btn := _find_button(_main, "EASY")
-	print("INFO: after SOLO android-tap: easy=", easy_btn, " mode screen valid=", is_instance_valid(solo_btn))
-	_check("SOLO opens difficulty popup (android tap)", easy_btn != null)
-	if easy_btn == null:
+	print("INFO: after SOLO android-tap: loading=", _main._loading, " easy=", easy_btn, " mode screen valid=", is_instance_valid(solo_btn))
+	_check("SOLO shows the loading screen (android tap)", _main._loading != null and is_instance_valid(_main._loading))
+	_check("SOLO has no difficulty popup (android tap)", easy_btn == null)
+	if _main._loading == null:
 		_finish()
 		return
-	# Android-style tap on EASY.
-	await _tap_android(_center(easy_btn))
-	print("INFO: after EASY android-tap: match=", _main._match)
-	_check("EASY starts a match (android tap)", _main._match != null)
+	# The loading screen hands over to the board after ~1.2 s.
+	for i in range(40):
+		await _frames(3)
+		if _main._match != null:
+			break
+	print("INFO: after loading (android tap): match=", _main._match)
+	_check("loading starts a match (android tap)", _main._match != null)
 	_finish()
 
 func _finish() -> void:

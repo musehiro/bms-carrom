@@ -100,12 +100,12 @@ func _draw() -> void:
 	var line_c: Color = board["line"]
 	var accent: Color = board["accent"]
 
-	# Full-screen dark gradient backdrop (Carrom Pool look: deep blue-violet
-	# with a magenta glow behind the board). Match only (see draw_backdrop).
+	# Full-screen BRIGHT backdrop (v10: vivid teal -> emerald, NOT
+	# near-black — the whole game interior is brighter now).
 	if draw_backdrop:
 		var bg_rect := Rect2(Vector2(-200, -200), Vector2(1120, 2100))
-		var top_col := Color(0.04, 0.05, 0.15)
-		var bot_col := Color(0.14, 0.05, 0.20)
+		var top_col := Color(0.02, 0.55, 0.62)
+		var bot_col := Color(0.02, 0.62, 0.38)
 		var strips := 28
 		for i in range(strips):
 			var t := float(i) / float(strips - 1)
@@ -113,11 +113,11 @@ func _draw() -> void:
 			draw_rect(strip, top_col.lerp(bot_col, t))
 		# Coloured glow behind the board: magenta + blue, plus a faint gold.
 		for i in range(3):
-			draw_circle(c, half + frame + 180.0 - float(i) * 35.0, Color(0.85, 0.25, 0.60, 0.028))
+			draw_circle(c, half + frame + 180.0 - float(i) * 35.0, Color(0.85, 0.25, 0.60, 0.05))
 		for i in range(3):
-			draw_circle(c, half + frame + 150.0 - float(i) * 35.0, Color(0.30, 0.45, 0.95, 0.022))
+			draw_circle(c, half + frame + 150.0 - float(i) * 35.0, Color(0.30, 0.45, 0.95, 0.045))
 		for i in range(2):
-			draw_circle(c, half + frame + 110.0 - float(i) * 30.0, Color(0.9, 0.7, 0.3, 0.02))
+			draw_circle(c, half + frame + 110.0 - float(i) * 30.0, Color(0.9, 0.7, 0.3, 0.04))
 	# Frame (rosewood) with a soft drop shadow under the whole board.
 	var frame_rect := Rect2(c - Vector2(half + frame, half + frame), Vector2(2.0 * (half + frame), 2.0 * (half + frame)))
 	var shadow_far := frame_rect.grow(16.0)

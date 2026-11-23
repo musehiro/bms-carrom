@@ -53,3 +53,26 @@ static func bot_by_id(bot_id: String) -> Dictionary:
 
 static func skill_name(skill: int) -> String:
 	return String(SKILL_NAMES.get(int(skill), "ADVANCED"))
+
+## Pick a random World Tour bot, weighted toward the player's level
+## (v10 — no bot list any more: tap WORLD TOUR -> loading -> board).
+## Weight falls with the level gap, so a Rookie usually meets Arjun or
+## Kasun and rarely Emma; every bot stays reachable. Pure apart from
+## the RNG — unit-tested with a seeded RandomNumberGenerator.
+static func random_bot_near_level(player_level: int, rng: RandomNumberGenerator = null) -> Dictionary:
+	var r := rng if rng != null else RandomNumberGenerator.new()
+	if rng == null:
+		r.randomize()
+	var total := 0.0
+	var weights: Array = []
+	for b in BOTS:
+		var gap := absi(int(b.get("level", 1)) - player_level)
+		var w := 1.0 / (1.0 + float(gap) * 0.35)
+		weights.append(w)
+		total += w
+	var roll := r.randf() * total
+	for i in range(BOTS.size()):
+		roll -= float(weights[i])
+		if roll <= 0.0:
+			return BOTS[i]
+	return BOTS[BOTS.size() - 1]

@@ -9,7 +9,7 @@ extends Control
 ## AIM-ASSIST row, ad-ladder strip, daily bonus + free coins, level bar,
 ## version, and a banner-ad slot at the very bottom.
 
-signal play_solo(difficulty: int)
+signal play_solo_direct
 signal play_online(stake: int)
 signal open_mode_choice
 signal open_shop
@@ -46,7 +46,7 @@ var _selected_4p: Dictionary = {} # player id -> {id, name, level}
 func _ready() -> void:
 	UiKit.full_rect(self)
 	var bg := ColorRect.new()
-	bg.color = Color(0.15, 0.11, 0.07)
+	bg.color = Color(0.04, 0.45, 0.42) # v10: vivid teal, not dark brown
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	UiKit.full_rect(bg)
 	add_child(bg)
@@ -108,7 +108,7 @@ func _ready() -> void:
 	# deletes the app now, there is nothing to restore. The banner
 	# stays until verification so the protection is not forgotten.
 	_verify_box = PanelContainer.new()
-	_verify_box.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.25, 0.18, 0.05, 0.97), UiKit.GOLD, 14, 2))
+	_verify_box.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.38, 0.26, 0.06, 0.97), UiKit.GOLD, 14, 2))
 	root.add_child(_verify_box)
 	var ver_v := VBoxContainer.new()
 	ver_v.add_theme_constant_override("separation", 4)
@@ -125,7 +125,7 @@ func _ready() -> void:
 	ver_v.add_child(ver_btn)
 	# ---- OUT OF COINS banner (only at zero — points at the ad ladder) ----
 	_out_box = PanelContainer.new()
-	_out_box.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.25, 0.08, 0.08, 0.97), Color(0.95, 0.35, 0.25), 16, 2))
+	_out_box.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.45, 0.14, 0.12, 0.97), Color(0.95, 0.35, 0.25), 16, 2))
 	root.add_child(_out_box)
 	var out_v := VBoxContainer.new()
 	out_v.add_theme_constant_override("separation", 4)
@@ -187,16 +187,16 @@ func _ready() -> void:
 	# button layout, which works on his phone. No popup overlay here.
 	play.pressed.connect(func() -> void: open_mode_choice.emit())
 	root.add_child(play)
-	# ---- SOLO / ONLINE ----
+	# ---- SOLO / ONLINE — big chunky 3D tiles (v10, Nana's pairs) ----
 	var modes := HBoxContainer.new()
 	modes.add_theme_constant_override("separation", 12)
 	root.add_child(modes)
-	var solo := UiKit.dark_button("SOLO\nvs AI — offline", 24)
+	var solo := UiKit.tile_button("SOLO\nvs AI — offline", 24, UiKit.TILE_PHONICS)
 	solo.custom_minimum_size = Vector2(0, 84)
 	solo.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	solo.pressed.connect(_on_solo_pressed)
 	modes.add_child(solo)
-	var online := UiKit.dark_button("ONLINE\nvs real players", 24)
+	var online := UiKit.tile_button("ONLINE\nvs real players", 24, UiKit.TILE_SPELLING)
 	online.custom_minimum_size = Vector2(0, 84)
 	online.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	online.pressed.connect(_on_online_pressed)
@@ -222,7 +222,7 @@ func _ready() -> void:
 	row.add_child(_assist_button)
 	# ---- Ad-ladder strip (visible tiers, current one highlighted) ----
 	var ladder_panel := PanelContainer.new()
-	ladder_panel.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.08, 0.09, 0.12, 0.97), Color(0.83, 0.69, 0.22, 0.35), 14, 1))
+	ladder_panel.add_theme_stylebox_override("panel", UiKit.panel_style(UiKit.PANEL, Color(0.83, 0.69, 0.22, 0.35), 14, 1))
 	root.add_child(ladder_panel)
 	_ladder_box = VBoxContainer.new()
 	_ladder_box.add_theme_constant_override("separation", 6)
@@ -243,7 +243,7 @@ func _ready() -> void:
 	_xp_bar.show_percentage = false
 	_xp_bar.custom_minimum_size = Vector2(0, 14)
 	var bg_style := StyleBoxFlat.new()
-	bg_style.bg_color = Color(0, 0, 0, 0.5)
+	bg_style.bg_color = Color(0.03, 0.22, 0.24, 0.9)
 	bg_style.set_corner_radius_all(7)
 	_xp_bar.add_theme_stylebox_override("background", bg_style)
 	var fill := StyleBoxFlat.new()
@@ -251,11 +251,11 @@ func _ready() -> void:
 	fill.set_corner_radius_all(7)
 	_xp_bar.add_theme_stylebox_override("fill", fill)
 	root.add_child(_xp_bar)
-	var ver := UiKit.muted_label("BMS Carrom v9.0  •  Account required  •  Free to play", 15)
+	var ver := UiKit.muted_label("BMS Carrom v10.0  •  Account required  •  Free to play", 15)
 	root.add_child(ver)
 	# ---- Banner-ad slot (bottom; the native banner covers it on Android) ----
 	var banner_slot := PanelContainer.new()
-	banner_slot.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.05, 0.05, 0.07, 0.97), Color(0.62, 0.60, 0.55, 0.4), 10, 1))
+	banner_slot.add_theme_stylebox_override("panel", UiKit.panel_style(UiKit.PANEL, Color(0.80, 0.86, 0.84, 0.4), 10, 1))
 	banner_slot.custom_minimum_size = Vector2(0, 96)
 	banner_slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(banner_slot)
@@ -377,7 +377,7 @@ func _toggle_invite_box() -> void:
 			_toggle_invite_box())
 	add_child(_invite_dim)
 	_invite_panel = PanelContainer.new()
-	_invite_panel.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.10, 0.10, 0.13, 1.0), UiKit.GOLD, 18, 2))
+	_invite_panel.add_theme_stylebox_override("panel", UiKit.panel_style(UiKit.PANEL, UiKit.GOLD, 18, 2))
 	_invite_panel.anchor_left = 1.0
 	_invite_panel.anchor_top = 0.0
 	_invite_panel.anchor_right = 1.0
@@ -435,7 +435,7 @@ func _refresh_invite_box() -> void:
 	else:
 		for inv in incoming:
 			var card := PanelContainer.new()
-			card.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.16, 0.17, 0.20), UiKit.GOLD, 12, 1))
+			card.add_theme_stylebox_override("panel", UiKit.panel_style(UiKit.PANEL, UiKit.GOLD, 12, 1))
 			body.add_child(card)
 			var vb := VBoxContainer.new()
 			vb.add_theme_constant_override("separation", 6)
@@ -484,7 +484,7 @@ func _refresh_invite_box() -> void:
 	srow.add_child(search_btn)
 	for player in _search_results:
 		var pcard := PanelContainer.new()
-		pcard.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.16, 0.17, 0.20), Color(0.83, 0.69, 0.22, 0.35), 12, 1))
+		pcard.add_theme_stylebox_override("panel", UiKit.panel_style(UiKit.PANEL, Color(0.83, 0.69, 0.22, 0.35), 12, 1))
 		body.add_child(pcard)
 		var prow := HBoxContainer.new()
 		prow.add_theme_constant_override("separation", 10)
@@ -572,7 +572,7 @@ func _build_ladder() -> void:
 		label.add_theme_font_size_override("font_size", 16)
 		if capped or i + 1 < current:
 			# Done: dimmed, ticked.
-			style.bg_color = Color(0.10, 0.11, 0.13)
+			style.bg_color = Color(0.10, 0.28, 0.30)
 			style.border_color = Color(0.83, 0.69, 0.22, 0.25)
 			style.set_border_width_all(1)
 			label.text = "✓ %s +%d" % [tier_names[i], Save.AD_LADDER[i]]
@@ -585,7 +585,7 @@ func _build_ladder() -> void:
 			label.text = "%s +%d" % [tier_names[i], Save.AD_LADDER[i]]
 			label.add_theme_color_override("font_color", UiKit.DARK_TEXT)
 		else:
-			style.bg_color = Color(0.16, 0.17, 0.20)
+			style.bg_color = Color(0.08, 0.38, 0.40)
 			style.border_color = UiKit.GOLD
 			style.set_border_width_all(1)
 			label.text = "%s +%d" % [tier_names[i], Save.AD_LADDER[i]]
@@ -609,23 +609,10 @@ func _on_sound_pressed() -> void:
 	Save.save()
 	refresh()
 
+## v10 direct play: no difficulty choice — tap SOLO and a random bot
+## is picked (loading screen first, then straight to the board).
 func _on_solo_pressed() -> void:
-	var pop: Dictionary = UiKit.popup_window("SOLO — vs AI (offline)", Vector2(560, 460))
-	add_child(pop["dim"])
-	var box: VBoxContainer = pop["box"]
-	box.add_child(UiKit.body_label("No internet needed. Free practice — no coins earned. Win coins in online matches or from ads.", 20))
-	for i in range(3):
-		var names := ["EASY", "MEDIUM", "HARD"]
-		var descs := ["Relaxed — misses often, never chases the queen.", "A fair fight — sometimes chases the queen.", "Sharp — near-perfect aim, chases the queen."]
-		var b := UiKit.gold_button(names[i], 26) if i == 1 else UiKit.dark_button(names[i], 26)
-		box.add_child(b)
-		var d := UiKit.muted_label(descs[i], 17)
-		box.add_child(d)
-		var diff := i
-		b.pressed.connect(func() -> void:
-			pop["dim"].queue_free()
-			play_solo.emit(diff))
-	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
+	play_solo_direct.emit()
 
 func _on_online_pressed() -> void:
 	var pop := UiKit.stake_picker(Save.coins, func(stake: int) -> void: play_online.emit(stake))

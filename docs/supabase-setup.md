@@ -34,6 +34,15 @@ the agent cannot do this step (it needs a Supabase dashboard login).
    **enabled** (it is on by default). This is what sends the 6-digit
    login code to the player's Gmail. Leave "Confirm email" at its
    default — the game uses OTP sign-in, which is self-confirming.
+   NOTE (v10, 2026-11-23): the default "Magic Link" email template
+   contains ONLY a sign-in link and NO 6-digit code — but the game's
+   OTP screen asks the player to type a 6-digit code, so players
+   never see one. Edit **Authentication → Email Templates → Magic
+   Link** and show the code big and clear alongside the link (the
+   template variable is `{{.Token}}`; the link is
+   `{{.ConfirmationURL}}`). Until then the code path still works —
+   the player taps the link instead — but the code itself is
+   invisible.
 2. **Authentication → Providers → Anonymous sign-ins**: OPTIONAL —
    leave it off. The game signs players in with their Gmail (OTP
    code) or Google, which IS the account; anonymous sign-in is not
@@ -45,6 +54,11 @@ the agent cannot do this step (it needs a Supabase dashboard login).
    `com.musehiro.carrom://auth-callback` (the custom-scheme deep
    link the browser returns to after Google sign-in — Android routes
    it back into the game; see `android/build/AndroidManifest.xml`).
+   NOTE (v10, 2026-11-23): the LOOPBACK is now the game's primary
+   return (it needs no native code, so it works in the CI-built APK);
+   the custom scheme is secondary (file poll) until the export
+   workflow is fixed to install the Android build template. Both
+   must stay listed — the OTP magic link uses the loopback too.
 4. (Optional, for one-tap Google sign-in) **Authentication →
    Providers → Google**: enable it with a Google OAuth client — create
    the client in Google Cloud Console (console.cloud.google.com →

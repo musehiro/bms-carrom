@@ -46,11 +46,23 @@ const REALTIME_VSN := "1.0.0"
 const LOOPBACK_PORT := 8765
 const LOOPBACK_PATH := "/callback"
 
+## The loopback URL the browser returns to after a Google sign-in or an
+## OTP magic-link tap (v10 PRIMARY return path). Pure GDScript TCPServer
+## — no native code, no intent filter — so it works in the CI-built APK
+## where the custom-scheme native code is missing (see
+## docs/verification.md v10 root cause 1). Must be allow-listed in
+## Supabase Dashboard -> Authentication -> URL Configuration ->
+## Redirect URLs (it was added in v7 — verify it is still listed).
+const LOOPBACK_REDIRECT := "http://127.0.0.1:8765/callback"
+
 ## The URL Android's browser goes back to after the Google sign-in, so
 ## the browser can open the game again. Registered in Supabase's Redirect
 ## URLs allow-list AND as an intent filter in android/build/AndroidManifest.xml;
 ## GodotApp.java writes the incoming URI to AUTH_CALLBACK_FILE for the
 ## game to pick up (vanilla Godot 4.3 does not surface deep links to GDScript).
+## SECONDARY return path in v10 (the loopback above is primary): the
+## built APK does not contain the native intent-filter code, so the deep
+## link only works once the export is fixed (see docs/verification.md).
 const CUSTOM_SCHEME_REDIRECT := "com.musehiro.carrom://auth-callback"
 ## File the native side writes the deep-link URI into (getFilesDir() is
 ## the same directory Godot maps user:// to on Android).
@@ -203,8 +215,29 @@ func signup_anonymous() -> Dictionary:
 
 ## Send a 6-digit login code to the Gmail (Supabase sends it). Works
 ## for a new Gmail (creates the Auth user) and for an existing one.
-func send_otp(email: String) -> Dictionary:
-	return await _http(HTTPClient.METHOD_POST, "/auth/v1/otp",
+## `redirect_to` + `code_challenge` go on the REQUEST PATH as query
+## parameters (v10): GoTrue takes them as options, NOT in the JSON body
+## — the body form returns HTTP 400. The redirect is the loopback URL
+## so the email's "Sign in" link returns to the game instead of the
+## Site URL (localhost:3000); the challenge makes the link carry
+## ?code= so the loopback listener can complete it (PKCE, like the
+## official clients). The email template itself must ALSO show the
+## 6-digit code {{.Token}} — that is a dashboard setting, not code
+## (see docs/verification.md v10).
+static func otp_path(redirect_to: String = "", code_challenge: String = "") -> String:
+	var path := "/auth/v1/otp"
+	var params := PackedStringArray()
+	if redirect_to != "":
+		params.append("redirect_to=" + redirect_to.uri_encode())
+	if code_challenge != "":
+		params.append("code_challenge=" + code_challenge.uri_encode())
+		params.append("code_challenge_method=S256")
+	if not params.is_empty():
+		path += "?" + "&".join(params)
+	return path
+
+func send_otp(email: String, redirect_to: String = "", code_challenge: String = "") -> Dictionary:
+	return await _http(HTTPClient.METHOD_POST, otp_path(redirect_to, code_challenge),
 		{"email": email, "create_user": true}, false)
 
 ## Verify the 6-digit code. On success the Gmail is linked to the
@@ -239,6 +272,61 @@ func exchange_pkce_code(code: String, verifier: String) -> Dictionary:
 	if access_token == "" or user_id == "":
 		return {"ok": false, "status": int(res["status"]), "data": res["data"], "error": "Google sign-in did not return a session."}
 	return {"ok": true, "status": int(res["status"]), "data": res["data"], "error": ""}
+
+## Extract OAuth tokens from a callback URI's fragment OR query
+## (...#access_token=...&refresh_token=... or
+## ...?access_token=...&refresh_token=...). Browsers never send the
+## fragment to a server, so this only arrives via a pasted link or the
+## deep-link file — the defensive path when GoTrue answers with an
+## implicit-flow redirect instead of ?code=. {} when absent. Pure.
+static func parse_fragment_tokens(uri: String) -> Dictionary:
+	var tail := ""
+	var h := uri.find("#")
+	if h >= 0:
+		tail = uri.substr(h + 1)
+	else:
+		var q := uri.find("?")
+		if q < 0:
+			return {}
+		tail = uri.substr(q + 1)
+	var out := {}
+	for part in tail.split("&"):
+		var kv := part.split("=", false, 1)
+		if kv.size() == 2 and (kv[0] == "access_token" or kv[0] == "refresh_token"):
+			out[kv[0]] = kv[1].uri_decode()
+	if String(out.get("access_token", "")) == "":
+		return {}
+	return out
+
+## The "sub" (user id) inside a JWT access token. Pure — no network.
+## "" when the token is not a decodable JWT.
+static func jwt_sub(token: String) -> String:
+	var parts := token.split(".")
+	if parts.size() != 3:
+		return ""
+	var payload_b64: String = parts[1].replace("-", "+").replace("_", "/")
+	while payload_b64.length() % 4 != 0:
+		payload_b64 += "="
+	var payload: Variant = JSON.parse_string(Marshalls.base64_to_raw(payload_b64).get_string_from_utf8())
+	if payload is Dictionary:
+		return String(payload.get("sub", ""))
+	return ""
+
+## Adopt tokens received out-of-band (a pasted implicit-flow link).
+## Sets the session from the access token; the caller still needs the
+## user's email (get_user) before the profile can load.
+func set_session_from_tokens(access_token_value: String, _refresh_token_value: String) -> bool:
+	var sub := jwt_sub(access_token_value)
+	if sub == "":
+		return false
+	access_token = access_token_value
+	user_id = sub
+	return true
+
+## Fetch the signed-in user's record (the email lives here when the
+## session came from tokens rather than a PKCE code exchange).
+func get_user() -> Dictionary:
+	return await _http(HTTPClient.METHOD_GET, "/auth/v1/user", {}, true)
 
 # ---------------------------------------------------------------- profiles
 

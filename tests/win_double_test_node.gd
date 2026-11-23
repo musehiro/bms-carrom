@@ -3,7 +3,9 @@ extends Node
 ## Premium win-screen test (v6): force online wins on a solo match and
 ## check the pot hold, the COLLECT button, the WATCH 2 ADS -> DOUBLE
 ## offer (full path through Main + the ad ladder), and the exit-credits
-## path. Run headless:
+## path. v10 adds: Win 5 (tour stake 0 — earn offer, NEVER a bare ◉ 0),
+## fireworks on every win screen, and the solo win has no duplicate
+## PRACTICE WIN / CONTINUE button. Run headless:
 ##   godot --headless --path . res://tests/win_double_test.tscn
 ## Exit 0 = all pass, 1 = any fail.
 
@@ -135,6 +137,7 @@ func _run() -> void:
 	_check("win1: COLLECT shows ◉ 200 big", _find_label(_main, "◉ 200") != null)
 	_check("win1: DOUBLE shows ◉ 400", _find_label(_main, "DOUBLE TO ◉ 400") != null)
 	_check("win1: double button exists", m1._double_button != null)
+	_check("win1: fireworks burst on the win screen", m1._fireworks != null and m1._fireworks.particle_count() > 0)
 	var ladder1 := Save.ad_next_reward()
 	_ad_earned = 0
 	Ads.show_rewarded("double_win")
@@ -233,6 +236,42 @@ func _run() -> void:
 	_check("tour loss: stake stays lost (no refund)", Save.coins == coins4 - 100, "coins=%d expected=%d" % [Save.coins, coins4 - 100])
 	_check("tour loss: loss screen names the bot", _find_label_containing(_main, "World Tour loss — Arjun Mehta (BOT) wins your stake ◉ 100") != null)
 	_check("tour loss: tour_wins unchanged", Save.tour_wins == tour_wins_before)
+	# --- Win 5 (v10): tour stake 0 — NEVER a bare ◉ 0. The big button
+	# is the earn path: WATCH 2 ADS -> EARN the next two ladder steps.
+	var coins5z := Save.coins
+	Save.interstitial_counter = 0
+	_main._start_tour_match(WorldTour.BOTS[1], 0)
+	await _wait_for_match()
+	var m5z = _main._match
+	_check("tour0: match exists", m5z != null)
+	if m5z == null:
+		_finish()
+		return
+	_check("tour0: stake 0 costs nothing", Save.coins == coins5z)
+	m5z.rules_state["over"] = true
+	m5z.rules_state["winner"] = 0
+	m5z._show_result()
+	await _frames(3)
+	_check("tour0: earn mode (pot 0)", m5z._earn_mode and m5z._pot_pending == 0)
+	_check("tour0: no bare ◉ 0 anywhere on the win screen", _find_label_containing(_main, "◉ 0") == null)
+	var earn_sum := Save.ad_reward_at(Save.ad_count_today) + Save.ad_reward_at(Save.ad_count_today + 1)
+	_check("tour0: WATCH 2 ADS offer shown", _find_label(_main, "WATCH 2 ADS") != null)
+	_check("tour0: EARN shows the two ladder steps big", _find_label(_main, "EARN ◉ %d" % earn_sum) != null, "earn_sum=%d" % earn_sum)
+	_check("tour0: earn button exists", m5z._double_button != null)
+	_check("tour0: no COLLECT button on a 0 pot", m5z._collect_button == null)
+	_check("tour0: fireworks burst on the win screen", m5z._fireworks != null and m5z._fireworks.particle_count() > 0)
+	_ad_earned = 0
+	if m5z._double_button != null:
+		m5z._double_button.pressed.emit()
+	await _wait_for_ads(1)
+	_check("tour0: first earn ad watched", _ad_earned == 1 and m5z._double_ads == 1)
+	_check("tour0: after ad 1 it asks for one more", _find_label(_main, "Ad 1 of 2 watched — one more to earn!") != null)
+	if m5z._double_button != null:
+		m5z._double_button.pressed.emit()
+	await _wait_for_ads(1)
+	_check("tour0: second earn ad watched", _ad_earned == 2 and m5z._double_ads == 2)
+	_check("tour0: two ads earned the ladder sum", Save.coins == coins5z + earn_sum, "coins=%d expected=%d" % [Save.coins, coins5z + earn_sum])
+	_check("tour0: EARNED label shows the real amount", _find_label(_main, "EARNED ◉ %d ✓" % earn_sum) != null)
 	# --- Solo win (v8): zero coins without an ad; WATCH 1 AD earns the ladder.
 	var coins5 := Save.coins
 	var solo0 := Save.solo_wins
@@ -251,6 +290,9 @@ func _run() -> void:
 	_check("solo: win pays zero coins without an ad", Save.coins == coins5, "coins=%d expected=%d" % [Save.coins, coins5])
 	_check("solo: solo_wins incremented", Save.solo_wins == solo0 + 1)
 	_check("solo: practice win note shown", _find_label(_main, "Practice win — no coins earned.") != null)
+	_check("solo: no duplicate PRACTICE WIN continue button (v10)", _find_label(_main, "★ PRACTICE WIN ★") == null)
+	_check("solo: no bare ◉ 0 anywhere on the win screen", _find_label_containing(_main, "◉ 0") == null)
+	_check("solo: fireworks burst on the win screen", m6._fireworks != null and m6._fireworks.particle_count() > 0)
 	var ladder5 := Save.ad_next_reward()
 	_check("solo: WATCH 1 AD offer shown", _find_label(_main, "WATCH 1 AD") != null)
 	_check("solo: EARN shows the ladder amount", _find_label(_main, "EARN ◉ %d" % ladder5) != null)

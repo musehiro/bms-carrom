@@ -27,10 +27,14 @@ extends Control
 ##     cloud profile for that Gmail.
 ##   CONTINUE WITH GOOGLE — one-tap (PKCE). Tap -> the system browser
 ##     opens the Google account picker -> tap an account -> registered,
-##     nothing typed. The browser returns via the custom-scheme deep
-##     link (GodotApp.java) with the loopback listener as a fallback;
-##     a paste-the-code row covers the case where the automatic return
-##     fails. Every failure shows an error — never silently nothing.
+##     nothing typed. The browser returns via the 127.0.0.1 loopback
+##     listener (v10 PRIMARY — pure GDScript, works in the built APK)
+##     with the custom-scheme deep link as a fallback; a paste-the-code
+##     row covers the case where the automatic return fails, and after
+##     ~60 s a RETRY button appears too. Every failure shows an error
+##     — never silently nothing. The OTP email's "Sign in" link uses
+##     the same loopback return (v10), so tapping it signs the player
+##     in — the 6-digit code stays the primary path.
 ##
 ## The logo is JUST the carrom board (BoardView, no text — logo rule).
 
@@ -70,18 +74,38 @@ var _google_button: Button
 var _verify_later_button: Button
 var _code_row: VBoxContainer
 var _paste_row: VBoxContainer
+var _recovery_row: VBoxContainer # v10: RETRY + help, shown after 60 s pending
+var _recovery_shown := false
 var _pending_gmail := ""
 var _busy := false
 var _google_pending := false
 var _resend_timer: Timer
 var _resend_cooldown := 0
 
+## v10 recovery: if a Google sign-in is still pending after ~60 s the
+## browser probably did not come back — show RETRY + the paste row
+## prominently instead of leaving the player on a dead screen.
+func _process(_delta: float) -> void:
+	if _google_pending and not _recovery_shown and Accounts.google_pending_elapsed() > 60.0:
+		show_recovery_ui()
+
+## Show the recovery panel (also called directly by the screenshot
+## mode and the auth-flow test). Public on purpose.
+func show_recovery_ui() -> void:
+	_recovery_shown = true
+	# The paste row is part of the recovery: RETRY + the code row, both
+	# prominent, so the player is never stuck on a dead screen.
+	_set_google_pending(true)
+	if _recovery_row:
+		_recovery_row.visible = true
+	_set_message(_info_label, "Still waiting for Google? The browser sometimes doesn't come back to the game — tap RETRY below, or copy the code from your browser's address bar (the part after code=) and paste it here.")
+
 func _ready() -> void:
 	UiKit.full_rect(self)
-	# ---- Emerald felt background (vertical gradient) ----
+	# ---- Bright emerald background (v10: vivid, not near-black) ----
 	var grad := Gradient.new()
-	grad.set_color(0, Color(0.055, 0.23, 0.18)) # deep emerald #0E3B2E
-	grad.set_color(1, Color(0.016, 0.063, 0.043)) # near-black green #04100B
+	grad.set_color(0, Color(0.05, 0.45, 0.38)) # vivid emerald
+	grad.set_color(1, Color(0.02, 0.28, 0.22)) # deep teal-green
 	var bg_tex := GradientTexture2D.new()
 	bg_tex.gradient = grad
 	bg_tex.width = 16
@@ -222,24 +246,38 @@ func _ready() -> void:
 	_action_button.pressed.connect(_on_action_pressed)
 	root.add_child(_action_button)
 	# ---- Paste-code fallback (only while a Google sign-in is pending) ----
+	# v10: BIG and prominent — this is the lifeline when the browser
+	# does not return. The hint tells the player exactly where the
+	# code is (the browser address bar, after code=).
 	_paste_row = VBoxContainer.new()
 	_paste_row.add_theme_constant_override("separation", 8)
 	_paste_row.visible = false
 	root.add_child(_paste_row)
-	var paste_hint := UiKit.muted_label("Google taking too long? Paste the code from your browser address bar:", 16)
+	var paste_hint := UiKit.muted_label("Google taking too long? Paste the code from your browser address bar (the part after code=):", 20)
 	paste_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	paste_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	paste_hint.add_theme_color_override("font_color", Color(0.96, 0.95, 0.92))
 	_paste_row.add_child(paste_hint)
 	var paste_hbox := HBoxContainer.new()
 	paste_hbox.add_theme_constant_override("separation", 10)
 	_paste_row.add_child(paste_hbox)
 	_paste_edit = _field("Paste the code or the link here")
 	_paste_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_paste_edit.custom_minimum_size = Vector2(0, 68)
 	paste_hbox.add_child(_paste_edit)
-	var use_code := UiKit.dark_button("USE CODE", 20)
-	use_code.custom_minimum_size = Vector2(150, 62)
+	var use_code := UiKit.dark_button("USE CODE", 24)
+	use_code.custom_minimum_size = Vector2(170, 68)
 	use_code.pressed.connect(_on_use_pasted_code_pressed)
 	paste_hbox.add_child(use_code)
+	# ---- Recovery row (v10: shown after 60 s of Google pending) ----
+	_recovery_row = VBoxContainer.new()
+	_recovery_row.add_theme_constant_override("separation", 10)
+	_recovery_row.visible = false
+	root.add_child(_recovery_row)
+	var retry := UiKit.gold_button("↻  RETRY GOOGLE SIGN-IN", 26)
+	retry.custom_minimum_size = Vector2(0, 68)
+	retry.pressed.connect(_on_google_retry_pressed)
+	_recovery_row.add_child(retry)
 	# ---- Messages ----
 	_error_label = Label.new()
 	_error_label.add_theme_font_size_override("font_size", 18)
@@ -261,7 +299,7 @@ func _ready() -> void:
 	# ---- What registration saves (fills the bottom — no dead space) ----
 	var benefits := PanelContainer.new()
 	var bstyle := StyleBoxFlat.new()
-	bstyle.bg_color = Color(0.04, 0.12, 0.09, 0.96)
+	bstyle.bg_color = Color(0.06, 0.30, 0.25, 0.96)
 	bstyle.border_color = Color(0.83, 0.69, 0.22, 0.55)
 	bstyle.set_border_width_all(1)
 	bstyle.set_corner_radius_all(16)
@@ -281,7 +319,7 @@ func _ready() -> void:
 	free.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	free.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
 	bcols.add_child(free)
-	var foot := UiKit.muted_label("BMS Carrom v9.0 • Account required • Free to play", 16)
+	var foot := UiKit.muted_label("BMS Carrom v10.0 • Account required • Free to play", 16)
 	foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	root.add_child(foot)
 	# Resend cooldown timer.
@@ -289,6 +327,7 @@ func _ready() -> void:
 	_resend_timer.wait_time = 1.0
 	_resend_timer.timeout.connect(_on_resend_tick)
 	add_child(_resend_timer)
+	Accounts.otp_link_finished.connect(_on_otp_link_finished)
 	_set_mode("register")
 	# A Google sign-in may already be pending (cold start after the
 	# browser opened): show the pending state, not a blank screen.
@@ -311,7 +350,7 @@ func _field(placeholder: String) -> LineEdit:
 	e.add_theme_color_override("font_color", Color(0.96, 0.95, 0.92))
 	e.custom_minimum_size = Vector2(0, 62)
 	var normal := StyleBoxFlat.new()
-	normal.bg_color = Color(0.05, 0.13, 0.10)
+	normal.bg_color = Color(0.08, 0.26, 0.21)
 	normal.border_color = UiKit.GOLD
 	normal.set_border_width_all(2)
 	normal.set_corner_radius_all(12)
@@ -404,6 +443,10 @@ func _set_google_pending(pending: bool) -> void:
 	_google_button.disabled = pending
 	_google_button.text = "Signing in with Google…" if pending else "Continue with Google"
 	_paste_row.visible = pending
+	if not pending:
+		_recovery_shown = false
+		if _recovery_row:
+			_recovery_row.visible = false
 
 func _start_resend_cooldown() -> void:
 	_resend_cooldown = 60
@@ -508,6 +551,26 @@ func _on_google_finished(ok: bool, message: String) -> void:
 		signed_in.emit()
 	else:
 		_set_message(_error_label, message)
+
+## An OTP magic-link tap completed the sign-in (v10): the player was
+## on the register or sign-in tab, so emit the matching signal.
+func _on_otp_link_finished(ok: bool, message: String) -> void:
+	_set_google_pending(false)
+	if ok:
+		if _mode == "register":
+			registered.emit()
+		else:
+			signed_in.emit()
+	else:
+		_set_message(_error_label, message)
+
+## RETRY (v10 recovery): cancel the dead pending return and open
+## Google again. The player never has to stare at a stuck screen.
+func _on_google_retry_pressed() -> void:
+	Accounts.cancel_pending_return()
+	_set_google_pending(false)
+	_set_message(_error_label, "")
+	_on_google_pressed()
 
 func _on_use_pasted_code_pressed() -> void:
 	if not Accounts.finish_google_with_pasted_code(_paste_edit.text):

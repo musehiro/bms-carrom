@@ -47,6 +47,10 @@ func _initialize() -> void:
 	_test_economy_v5_consts()
 	_test_supabase_pkce()
 	_test_v9_auth_callbacks()
+	_test_v10_auth_return()
+	_test_world_tour_random_bot()
+	_test_three_d_button()
+	_test_save_ad_reward_at()
 	_test_supabase_realtime_parse()
 	_test_supabase_rows()
 	_test_net_invite_join_message()
@@ -800,6 +804,89 @@ func _test_v9_auth_callbacks() -> void:
 	_check("v9 ads: policy 8 also migrates", int(mig8.get("counter", -1)) == 0 and int(mig8.get("policy_version", -1)) == 9)
 	var mig9: Dictionary = SaveScript.migrated_ads_policy(9, 2)
 	_check("v9 ads: current policy keeps the counter", int(mig9.get("counter", -1)) == 2 and int(mig9.get("policy_version", -1)) == 9)
+
+func _test_v10_auth_return() -> void:
+	# OTP request path: redirect_to + PKCE challenge are QUERY params,
+	# never in the JSON body (the body form returns 400). The loopback
+	# is the v10 PRIMARY return path (it works in the CI-built APK).
+	_check("v10 auth: otp path without options is bare", SupabaseClient.otp_path() == "/auth/v1/otp")
+	var path := SupabaseClient.otp_path(SupabaseClient.LOOPBACK_REDIRECT, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+	_check("v10 auth: otp path carries the loopback redirect", path.contains("redirect_to=http%3A%2F%2F127.0.0.1%3A8765%2Fcallback"))
+	_check("v10 auth: otp path carries the S256 challenge", path.contains("code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM") and path.contains("code_challenge_method=S256"))
+	var url := SupabaseClient.google_authorize_url("https://xyz.supabase.co", "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", SupabaseClient.LOOPBACK_REDIRECT)
+	_check("v10 auth: authorize URL uses the loopback redirect", url.contains("redirect_to=http%3A%2F%2F127.0.0.1%3A8765%2Fcallback"))
+	# Fragment tokens (implicit-flow defence: pasted links / deep link).
+	var frag := SupabaseClient.parse_fragment_tokens("com.musehiro.carrom://auth-callback#access_token=tok123&refresh_token=ref456&token_type=bearer")
+	_check("v10 auth: fragment tokens parsed", String(frag.get("access_token", "")) == "tok123" and String(frag.get("refresh_token", "")) == "ref456")
+	var qfrag := SupabaseClient.parse_fragment_tokens("http://127.0.0.1:8765/callback?access_token=tok9&refresh_token=ref9")
+	_check("v10 auth: query tokens parsed", String(qfrag.get("access_token", "")) == "tok9")
+	_check("v10 auth: no tokens returns empty", SupabaseClient.parse_fragment_tokens("com.musehiro.carrom://auth-callback?code=abc").is_empty())
+	# JWT sub decode (the user id inside an access token).
+	var payload := '{"sub":"user-123","email":"a@b.c"}'
+	var b64 := Marshalls.raw_to_base64(payload.to_utf8_buffer()).replace("+", "-").replace("/", "_").rstrip("=")
+	var token := "eyJhbGciOiJIUzI1NiJ9." + b64 + ".sig"
+	_check("v10 auth: jwt sub decoded", SupabaseClient.jwt_sub(token) == "user-123")
+	_check("v10 auth: garbage token has no sub", SupabaseClient.jwt_sub("not-a-jwt") == "")
+
+func _test_world_tour_random_bot() -> void:
+	# Seeded RNG: deterministic picks, all 5 bots reachable, and the
+	# near-level weighting holds (a Lv 14 player meets Kasun far more
+	# often than Emma over 200 picks).
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 42
+	var counts := {}
+	for i in range(200):
+		var bot: Dictionary = WorldTour.random_bot_near_level(14, rng)
+		var id := String(bot.get("id", ""))
+		counts[id] = int(counts.get(id, 0)) + 1
+	_check("v10 tour: random bot is always one of the 5", counts.size() == 5)
+	_check("v10 tour: near-level bot picked most", int(counts.get("kasun", 0)) > int(counts.get("emma", 0)) * 2, str(counts))
+	var rng2 := RandomNumberGenerator.new()
+	rng2.seed = 42
+	var first: Dictionary = WorldTour.random_bot_near_level(14, rng2)
+	rng.seed = 42
+	var first2: Dictionary = WorldTour.random_bot_near_level(14, rng)
+	_check("v10 tour: seeded RNG is deterministic", String(first.get("id", "")) == String(first2.get("id", "")))
+
+func _test_three_d_button() -> void:
+	# Nana's chunky-3D recipe, pure helpers (no drawing needed).
+	var top := Color(1.0, 0.717, 0.012)
+	var bottom := Color(1.0, 0.482, 0.329)
+	_check("v10 3d: gradient t=0 is the bright top", ThreeDButton.gradient_color_at(0.0, top, bottom).is_equal_approx(top))
+	_check("v10 3d: gradient t=1 is the dark bottom", ThreeDButton.gradient_color_at(1.0, top, bottom).is_equal_approx(bottom))
+	var mid := ThreeDButton.gradient_color_at(0.5, top, bottom)
+	_check("v10 3d: gradient midpoint is between top and bottom", mid.g > bottom.g and mid.g < top.g)
+	var lip := ThreeDButton.lip_for(bottom)
+	_check("v10 3d: lip is darker than the bottom colour", lip.v < bottom.v)
+	_check("v10 3d: blue lip is Nana's exact #1558AC", (UiKit.TILE_BLUE["lip"] as Color).is_equal_approx(Color(0.082, 0.345, 0.674)))
+	var pts := ThreeDButton.rounded_rect_points(Rect2(0, 0, 100, 60), 10.0, 6)
+	_check("v10 3d: rounded outline has 4 arcs of points", pts.size() == 28)
+	var clamped := ThreeDButton.clamp_point_to_rounded_rect(Vector2(0, 0), Rect2(0, 0, 100, 60), 10.0)
+	_check("v10 3d: corner point projects onto the arc", absf(clamped.distance_to(Vector2(10, 10)) - 10.0) < 0.5, str(clamped))
+	_check("v10 3d: centre passes through unchanged", ThreeDButton.clamp_point_to_rounded_rect(Vector2(50, 30), Rect2(0, 0, 100, 60), 10.0).is_equal_approx(Vector2(50, 30)))
+	var mesh := ThreeDButton.gradient_mesh(Rect2(0, 0, 100, 60), 10.0, top, bottom)
+	var tris: PackedVector2Array = mesh["tris"]
+	var cols: PackedColorArray = mesh["colors"]
+	_check("v10 3d: mesh has 8x8 quads = 384 vertices", tris.size() == 384 and cols.size() == 384)
+	_check("v10 3d: mesh gradient runs bright to dark", cols[0].g > cols[cols.size() - 1].g)
+	# Minimum size: a 30pt button is at least 84 px tall (big buttons).
+	var b := ThreeDButton.new()
+	b.text = "PLAY"
+	b.add_theme_font_size_override("font_size", 30)
+	var ms := b._get_minimum_size()
+	_check("v10 3d: min height is big (30pt -> 84px)", ms.y >= 80.0, str(ms))
+	_check("v10 3d: min width fits the label", ms.x > 60.0, str(ms))
+	b.queue_free()
+
+func _test_save_ad_reward_at() -> void:
+	var SaveScript: GDScript = load("res://scripts/save_data.gd")
+	var s = SaveScript.new()
+	_check("v10 save: ladder step 0 is 150", s.ad_reward_at(0) == 150)
+	_check("v10 save: ladder step 1 is 200", s.ad_reward_at(1) == 200)
+	_check("v10 save: ladder step 4 is 400", s.ad_reward_at(4) == 400)
+	_check("v10 save: ladder clamps past the last step", s.ad_reward_at(99) == 400)
+	_check("v10 save: negative count clamps to the first step", s.ad_reward_at(-3) == 150)
+	s.queue_free()
 
 func _test_supabase_realtime_parse() -> void:
 	var join_ok := SupabaseClient.parse_realtime_message(JSON.stringify({

@@ -111,8 +111,8 @@ func _run() -> void:
 	# --- A5: register screen is full (benefits + footer at the bottom) ---
 	_check("auth: benefits panel present", _find_label_containing(_main._auth, "saved to your account forever") != null)
 	_check("auth: free-to-play / no-ads line present", _find_label_containing(_main._auth, "No ads until you play") != null)
-	var foot := _find_label_containing(_main._auth, "BMS Carrom v9.0")
-	_check("auth: footer says v9.0", foot != null)
+	var foot := _find_label_containing(_main._auth, "BMS Carrom v10.0")
+	_check("auth: footer says v10.0", foot != null)
 	var vp_y: float = _main.get_viewport_rect().size.y
 	_check("auth: footer sits at the bottom of the screen (no dead space)", foot != null and foot.get_global_rect().end.y >= vp_y - 40.0)
 	# --- A6: paste-code fallback row only while Google is pending ---
@@ -124,6 +124,17 @@ func _run() -> void:
 	_main._auth._set_google_pending(false)
 	await _frames(2)
 	_check("auth: paste-code row hides again when Google finishes", not use_code.is_visible_in_tree())
+	# --- A8 (v10): recovery UI — if the browser never returns (dead
+	# redirect), the player gets a RETRY button + the paste row, big and
+	# clear, instead of a silent dead register screen. ---
+	_main._auth.show_recovery_ui()
+	await _frames(2)
+	var retry := _find_button_containing(_main._auth, "RETRY GOOGLE SIGN-IN")
+	_check("auth: recovery shows RETRY GOOGLE SIGN-IN", retry != null and retry.is_visible_in_tree())
+	_check("auth: recovery keeps the paste-code row visible", use_code.is_visible_in_tree())
+	_main._auth._set_google_pending(false)
+	await _frames(2)
+	_check("auth: recovery hides again when Google finishes", retry != null and not retry.is_visible_in_tree())
 	# --- A7: RESEND CODE exists (hidden until a code is sent) ---
 	_check("auth: RESEND CODE button exists", _main._auth._resend_button != null)
 	_check("auth: RESEND CODE hidden until a code is sent", not _main._auth._resend_button.is_visible_in_tree())

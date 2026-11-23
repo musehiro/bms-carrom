@@ -51,6 +51,14 @@ var _result_pop: Dictionary = {}
 # v8 solo win ad-earn: WATCH AD button on the solo win screen.
 var _solo_earn_button: Button = null
 var _solo_earn_label: Label = null
+# v10 win screen: fireworks overlay + the pot-0 earn mode (a staked win
+# with a 0 pot shows WATCH 2 ADS -> EARN instead of a bare ◉ 0 — the
+# two ads pay the next two ladder steps; _earn_coins_before is the
+# ad-coins counter at press time, so the final label shows the real
+# amount earned even if the daily cap cuts it short).
+var _fireworks: Fireworks = null
+var _earn_mode := false
+var _earn_coins_before := 0
 
 var pieces: Array = []
 var rules_state: Dictionary = {}
@@ -712,16 +720,31 @@ func _show_result() -> void:
 	if show_ad:
 		Ads.maybe_show_interstitial()
 
-## Premium win screen (v6): a BIG "WINNER" display plus two big premium
-## buttons — (1) COLLECT with the winnings amount BIG in the middle,
-## (2) WATCH 2 ADS to DOUBLE the winnings. The pot is HELD (not credited)
-## until the player collects, doubles, or leaves the screen — leaving
-## without collecting credits the base pot, so coins are never lost.
+## Premium win screen (v6, redesigned v10): fireworks burst on win, the
+## amount BIG and beautiful in the centre, TWO BIG chunky 3D buttons —
+## (1) COLLECT with the winnings total BIG in the middle, (2) WATCH 2
+## ADS to DOUBLE the winnings. The pot is HELD (not credited) until the
+## player collects, doubles, or leaves the screen — leaving without
+## collecting credits the base pot, so coins are never lost.
+## Pot 0 (stake 0, or a friendly match): NEVER a bare "◉ 0" — the big
+## button is the earn path instead (WATCH 2 ADS -> EARN the next two
+## ladder steps). The stake line shows no numbers at all when the pot
+## is 0. Clean-UI rule: no duplicate buttons — the old solo "PRACTICE
+## WIN / TAP TO CONTINUE" button is gone (it duplicated REMATCH).
 func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, winner: int) -> void:
-	var pop: Dictionary = UiKit.popup_window("MATCH RESULT", Vector2(600, 680))
+	_earn_mode = false
+	var has_pot := _is_staked_mode() and my_share > 0
+	var pop_size := Vector2(620, 780) if has_pot or not _is_staked_mode() else Vector2(620, 660)
+	var pop: Dictionary = UiKit.popup_window("MATCH RESULT", pop_size)
 	_result_pop = pop
 	_hud.add_child(pop["dim"])
 	var box: VBoxContainer = pop["box"]
+	# Fireworks over the whole screen (mouse-transparent, so the win
+	# buttons underneath keep working).
+	_fireworks = Fireworks.new()
+	UiKit.full_rect(_fireworks)
+	_hud.add_child(_fireworks)
+	_fireworks.start_celebration()
 	var big := Label.new()
 	big.text = "★ WINNER ★"
 	big.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -732,35 +755,65 @@ func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, 
 	big.add_theme_constant_override("shadow_offset_y", 3)
 	box.add_child(big)
 	if _is_staked_mode():
-		if player_count == 4:
-			box.add_child(UiKit.body_label("Your team wins!  Pot ◉ %d (4 stakes) — your team's half ◉ %d" % [pot, my_share], 20))
+		if my_share > 0:
+			if player_count == 4:
+				box.add_child(UiKit.body_label("Your team wins!  Pot ◉ %d (4 stakes) — your team's half ◉ %d" % [pot, my_share], 20))
+			else:
+				box.add_child(UiKit.body_label("Your stake ◉ %d + Opponent stake ◉ %d" % [your_stake, opp_stake], 20))
+			if mode == "tour":
+				# The opponent is a computer — say so right on the win screen.
+				box.add_child(UiKit.body_label("World Tour — you beat %s" % opponent_name, 20))
 		else:
-			box.add_child(UiKit.body_label("Your stake ◉ %d + Opponent stake ◉ %d" % [your_stake, opp_stake], 20))
-		if mode == "tour":
-			# The opponent is a computer — say so right on the win screen.
-			box.add_child(UiKit.body_label("World Tour — you beat %s" % opponent_name, 20))
+			# Stake 0: a friendly match — no numbers at all, never ◉ 0.
+			if mode == "tour":
+				box.add_child(UiKit.body_label("World Tour — you beat %s (friendly match, no stake)" % opponent_name, 20))
+			elif player_count == 4:
+				box.add_child(UiKit.body_label("Friendly doubles — no stakes.", 20))
+			else:
+				box.add_child(UiKit.body_label("Friendly match — no stake.", 20))
 	else:
 		box.add_child(UiKit.body_label("Practice win — no coins earned.", 20))
-	# Button 1 — COLLECT (staked) / CONTINUE (solo): the amount BIG.
+	# Button 1 — COLLECT (staked, pot > 0): the TOTAL big in the middle.
 	if _is_staked_mode():
-		var collect := _stacked_button([
-			{"text": "◉ %d" % my_share, "size": 44, "color": Color(0.12, 0.10, 0.02)},
-			{"text": "TAP TO COLLECT", "size": 18, "color": Color(0.12, 0.10, 0.02)}], false)
-		_collect_button = collect["button"]
-		_collect_amount_label = collect["labels"][0]
-		_collect_button.pressed.connect(_on_collect_pot)
-		box.add_child(_collect_button)
-		# Button 2 — DOUBLE (only when there is a pot to double).
 		if my_share > 0:
+			var collect := _stacked_button([
+				{"text": "◉ %d" % my_share, "size": 48, "color": Color(0.12, 0.10, 0.02)},
+				{"text": "TAP TO COLLECT", "size": 20, "color": Color(0.12, 0.10, 0.02)}], "gold")
+			_collect_button = collect["button"]
+			_collect_amount_label = collect["labels"][0]
+			_collect_button.pressed.connect(_on_collect_pot)
+			box.add_child(_collect_button)
+			# Button 2 — DOUBLE (only when there is a pot to double).
 			var dbl := _stacked_button([
 				{"text": "WATCH 2 ADS", "size": 26, "color": Color(1, 1, 1)},
-				{"text": "DOUBLE TO ◉ %d" % (my_share * 2), "size": 34, "color": UiKit.GOLD_LIGHT}], true)
+				{"text": "DOUBLE TO ◉ %d" % (my_share * 2), "size": 36, "color": UiKit.GOLD_LIGHT}], "purple")
 			_double_button = dbl["button"]
 			_double_button.pressed.connect(_on_double_pressed)
 			box.add_child(_double_button)
 			_double_label = UiKit.muted_label("2 ads double your winnings — each ad also pays the ad ladder.", 17)
 			_double_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			box.add_child(_double_label)
+		else:
+			# Pot 0: no COLLECT, no DOUBLE — ONE big earn button. Two
+			# ads pay the next two ladder steps (the amount shown).
+			_earn_mode = true
+			_earn_coins_before = Save.ad_coins_today
+			var first := Save.ad_next_reward()
+			if first > 0:
+				var earn_amount := first + Save.ad_reward_at(Save.ad_count_today + 1)
+				var earn := _stacked_button([
+					{"text": "WATCH 2 ADS", "size": 26, "color": Color(1, 1, 1)},
+					{"text": "EARN ◉ %d" % earn_amount, "size": 36, "color": UiKit.GOLD_LIGHT}], "pink")
+				_double_button = earn["button"]
+				_double_button.pressed.connect(_on_double_pressed)
+				box.add_child(_double_button)
+				_double_label = UiKit.muted_label("Two ads pay the ad ladder twice — no stake needed.", 17)
+				_double_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+				box.add_child(_double_label)
+			else:
+				var capped := UiKit.muted_label("Ad limit reached today — come back tomorrow for ad coins.", 17)
+				capped.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+				box.add_child(capped)
 	else:
 		# v8: a solo win pays no coins — but the player may watch ONE ad
 		# to earn the ladder amount (same ladder as the FREE COINS panel).
@@ -770,7 +823,7 @@ func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, 
 		if earn_amount > 0:
 			var earn := _stacked_button([
 				{"text": "WATCH 1 AD", "size": 26, "color": Color(1, 1, 1)},
-				{"text": "EARN ◉ %d" % earn_amount, "size": 34, "color": UiKit.GOLD_LIGHT}], true)
+				{"text": "EARN ◉ %d" % earn_amount, "size": 36, "color": UiKit.GOLD_LIGHT}], "pink")
 			_solo_earn_button = earn["button"]
 			_solo_earn_label = earn["labels"][1]
 			_solo_earn_button.pressed.connect(_on_solo_earn_pressed)
@@ -782,12 +835,6 @@ func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, 
 			var capped := UiKit.muted_label("Ad limit reached today — come back tomorrow for ad coins.", 17)
 			capped.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			box.add_child(capped)
-		var cont := _stacked_button([
-			{"text": "★ PRACTICE WIN ★", "size": 30, "color": Color(0.12, 0.10, 0.02)},
-			{"text": "TAP TO CONTINUE", "size": 18, "color": Color(0.12, 0.10, 0.02)}], false)
-		_collect_button = cont["button"]
-		_collect_button.pressed.connect(func() -> void: rematch_requested.emit())
-		box.add_child(_collect_button)
 	# Info line: XP / level / board score.
 	var info := "XP: +%d" % xp_earned
 	if new_level > 0:
@@ -805,19 +852,17 @@ func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, 
 	home.pressed.connect(func() -> void: _exit_result_home())
 	again.pressed.connect(func() -> void: _exit_result_rematch())
 
-## A big premium button with stacked centred lines (amount BIG in the
-## middle). Returns {button, labels}. `purple` gives the rich purple +
-## gold style used for the DOUBLE offer; otherwise gold.
-func _stacked_button(lines: Array, purple: bool) -> Dictionary:
-	var b := UiKit.dark_button("", 28)
-	if not purple:
-		b = UiKit.gold_button("", 28)
-	else:
-		b.add_theme_stylebox_override("normal", UiKit.panel_style(Color(0.38, 0.18, 0.58, 1.0), UiKit.GOLD, 16, 3))
-		b.add_theme_stylebox_override("hover", UiKit.panel_style(Color(0.46, 0.24, 0.68, 1.0), UiKit.GOLD_LIGHT, 16, 3))
-		b.add_theme_stylebox_override("pressed", UiKit.panel_style(Color(0.30, 0.12, 0.48, 1.0), UiKit.GOLD, 16, 3))
-		b.add_theme_stylebox_override("disabled", UiKit.panel_style(Color(0.20, 0.20, 0.24, 1.0), Color(0.5, 0.5, 0.5), 16, 2))
-	b.custom_minimum_size = Vector2(0, 112)
+## A big chunky 3D button with stacked centred lines (amount BIG in the
+## middle). Returns {button, labels}. `style` picks the tile pair:
+## "gold" (COLLECT), "purple" (DOUBLE), "pink" (earn offers).
+func _stacked_button(lines: Array, style: String) -> Dictionary:
+	var pair: Dictionary = UiKit.TILE_GOLD
+	if style == "purple":
+		pair = UiKit.TILE_ALPHABET
+	elif style == "pink":
+		pair = UiKit.TILE_BALLOON
+	var b := UiKit.tile_button("", 28, pair)
+	b.custom_minimum_size = Vector2(0, 124)
 	var vb := VBoxContainer.new()
 	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	UiKit.full_rect(vb)
@@ -860,7 +905,10 @@ func _on_collect_pot() -> void:
 		_double_label.text = "Collected ◉ %d ✓" % amount
 
 func _on_double_pressed() -> void:
-	if _pot_credited or _pot_pending <= 0 or _double_ads >= 2:
+	if _pot_credited or _double_ads >= 2:
+		return
+	# Earn mode (pot 0) has no pot to double — the two ads ARE the earn.
+	if not _earn_mode and _pot_pending <= 0:
 		return
 	Ads.show_rewarded("double_win")
 	if _double_button:
@@ -871,8 +919,25 @@ func _on_double_pressed() -> void:
 ## Called by Main when a "double_win" rewarded ad completes. Each of the
 ## two ads ALSO pays the ad ladder (Main's handler pays the ladder for
 ## every rewarded ad) and advances it — the doubling is on top of that.
-## After the 2nd ad the held pot is credited DOUBLED.
+## After the 2nd ad the held pot is credited DOUBLED. In earn mode
+## (pot 0) the two ads are the earn itself: the label shows the real
+## amount the ladder paid (ad_coins_today delta).
 func on_double_ad_watched() -> void:
+	if _earn_mode:
+		_double_ads += 1
+		if _double_ads >= 2:
+			var earned := Save.ad_coins_today - _earn_coins_before
+			if _double_button:
+				_double_button.disabled = true
+			if _double_label:
+				_double_label.text = "EARNED ◉ %d ✓" % earned
+			_show_message("Ad coins earned — ◉ %d!" % earned, 3.0)
+		else:
+			if _double_button:
+				_double_button.disabled = false
+			if _double_label:
+				_double_label.text = "Ad 1 of 2 watched — one more to earn!"
+		return
 	if _pot_credited or _pot_pending <= 0:
 		return
 	_double_ads += 1

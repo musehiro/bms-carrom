@@ -18,7 +18,7 @@ func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	UiKit.full_rect(self)
 	var bg := ColorRect.new()
-	bg.color = Color(0.09, 0.07, 0.05)
+	bg.color = Color(0.04, 0.45, 0.42) # v10: vivid teal, not near-black
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	UiKit.full_rect(bg)
 	add_child(bg)

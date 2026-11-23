@@ -749,3 +749,389 @@ In `verification/v9/`:
   needs his test).
 - Live two-device play / live Gmail login restore on real phones (as
   before).
+
+## v10 verification (2026-11-23) — Google return fix, no bot list, win-screen redesign, brighter game
+
+User tested v9 on his real phone (2026-11-23 07:50): Google sign-in went
+to a dead localhost page, the win screen showed "◉ 0", the World Tour
+roster made him choose a bot, and the whole game looked dark/dull/black.
+Diagnosed first, then fixed. (A fifth screenshot arrived 08:08: the OTP
+email has no 6-digit code — covered in root cause (b) below.)
+
+### 0. Diagnosis (root causes, verified before fixing)
+
+**Complaint 1 — Google sign-in still broken (P0; screenshots
+shot-075026.png + shot-075042.png):** after picking his Google account,
+Chrome opened `localhost:3000/?code=faa6ddcf-1be9-4…` and showed "This
+site can't be reached — localhost refused to connect". His Gmail shows
+Google's own email: "you used Sign in with Google to sign in to
+hyhlhngybzwnungnshff.supabase.co on 23 November at 07:50, Bm Sirimanna,
+bmsirimanna@gmail.com" — so **Google auth SUCCEEDED; only the RETURN
+redirect failed.** Two stacked causes, both proved:
+
+- (a) **The custom-scheme redirect was not in Supabase's Redirect URLs
+  allow-list.** GoTrue does NOT validate `redirect_to` at authorize time
+  — proved by live curl 2026-11-23: authorize with the custom-scheme
+  redirect_to → 302 to accounts.google.com with
+  `redirect_to=com.musehiro.carrom%3A%2F%2Fauth-callback` in the Google
+  URL, and authorize with a BOGUS redirect_to
+  (`https://example.com/not-allowed`) → ALSO 302 with the bogus value
+  passed through. So the v9 "302 proves it's accepted" claim was WRONG.
+  Validation happens after Google returns: GoTrue checks the allow-list
+  and falls back to the Site URL (http://localhost:3000) when the
+  redirect is not listed. The localhost:3000 screenshot therefore proves
+  the custom scheme was NOT listed. **Fix (parent browser task):** add
+  `com.musehiro.carrom://auth-callback` to Supabase Dashboard →
+  Authentication → URL Configuration → Redirect URLs, and verify
+  `http://127.0.0.1:8765/callback` is still listed.
+- (b) **The BUILT v9 APK does not contain the native customizations.**
+  Proved by inspecting `~/workspace/tmp/carrom-v9-verify-hiro.apk`: the
+  binary AndroidManifest.xml string pool has NO `auth-callback` host
+  string (UTF-16 + UTF-8 both missing); `classes3.dex` (828 bytes)
+  holds only the STOCK GodotApp (`onCreate` + `installSplashScreen`,
+  no `onNewIntent`, no `_forwardDeepLink`); `auth_callback.txt` /
+  `auth-callback` appear in NO dex file. The VIEW/BROWSABLE strings in
+  the manifest come from library manifests, not the custom filter.
+  Root cause of the stock APK: the repo's `android/build/` is
+  INCOMPLETE — GitHub API listing shows only `AndroidManifest.xml` +
+  `src/` (no `build.gradle`, `settings.gradle`, `gradle.properties`,
+  `gradlew`, `libs/`, `res/`, `assetPacks/`, `assets/`) — and
+  `android/.build_version` is ABSENT from GitHub (raw URL 404),
+  although it exists locally ("4.3.stable", created 2026-11-22 01:58)
+  with `android/build/.gdignore` present. Godot silently
+  ignores/re-extracts a manually-extracted template without the
+  version marker ("no version info for it exists" — corroborated by
+  Godot PR #88297 discussion and a headless-export guide: manual
+  extraction is silently ignored; `--install-android-build-template`
+  creates the required state). The full local template is 178 MB / 57
+  files — it CANNOT be pushed via the GitHub connector (16 MB snapshot
+  limit), and workflow files must not change in this push, so the
+  export cannot be fixed in-repo this way. **Fix in v10: make the
+  LOOPBACK the primary redirect** (`http://127.0.0.1:8765/callback` —
+  pure GDScript `TCPServer`, no native dependency, works with the
+  current CI export); keep the deep link as secondary (file poll
+  stays). The loopback connection queues in the kernel backlog while
+  the game is backgrounded and is accepted when the game resumes —
+  Chrome spins meanwhile, so the pending UI must tell the player to
+  come back to the game. **Follow-up (parent/browser):** fix the export
+  properly in the workflow later (install template from the downloaded
+  export templates + overlay the repo's custom manifest/GodotApp.java
+  after extraction) so the deep link works too; and verify the built
+  v10 APK's manifest + dex in the ship procedure before delivering.
+
+**Complaint 1b — OTP email has no 6-digit code (screenshot
+shot-080828-email.png):** a second email at 07:51 from "Supabase Auth"
+(noreply@mail.app.supabase.io), subject "Your sign-in link" — "Follow
+the link below to sign in. This link expires shortly and can only be
+used once. [Sign in]". NO 6-digit code anywhere, but the game's OTP
+screen asks the player to type a 6-digit code. Two causes:
+
+- (a) **Supabase's `POST /auth/v1/otp` sends the "Magic Link"
+  template; what the player receives depends ONLY on the template** —
+  `{{.ConfirmationURL}}` sends a link, `{{.Token}}` sends the 6-digit
+  code, both can be in one email (Supabase docs + supabase-flutter/dart
+  `signInWithOtp` docs, verified by web search 2026-11-23). The
+  default template contains only the link — that is why his 07:51
+  email has NO code while the game asks for one. **Fix (parent browser
+  task):** edit the Magic Link email template (Auth → Email Templates)
+  to show the 6-digit code `{{.Token}}` big and clear alongside the
+  link.
+- (b) **`send_otp` sent `redirect_to` in the JSON body — the wrong
+  place.** Official clients pass it as a QUERY parameter on
+  `POST /auth/v1/otp?redirect_to=...` (not in the JSON body — the v10
+  agent's test with `redirect_to` in the body returned HTTP 400
+  `email_address_invalid` for the probe address, while the same address
+  without it later returned 429). **Fix in v10:** `Supabase.otp_path()`
+  builds `/auth/v1/otp?redirect_to=...&code_challenge=...&
+  code_challenge_method=S256`; `send_otp` uses it; a PKCE verifier is
+  generated for the OTP request (official clients start a PKCE flow for
+  OTP so the magic link returns `?code=`), persisted, the loopback
+  listener starts on OTP send, and the magic-link return is handled
+  the same way as Google (unified return-pending: code exchange; plus
+  defensive handling of `#access_token=` implicit-flow tokens via JWT
+  `sub` decode). ⛔ **The OTP endpoint is now rate-limited: follow-up
+  OTP probes returned HTTP 429 `over_email_send_rate_limit` — a hard
+  stop for the OTP endpoint in this task; do NOT call `/auth/v1/otp`
+  again until the limit resets.** (The v9 agent had earlier verified
+  OTP → HTTP 200 with a valid Gmail and wrong code → 403
+  `otp_expired`.)
+- (c) The "Sign in" link in that email hits the same dead
+  localhost:3000 redirect as the Google flow — it lands on the
+  loopback (or the custom scheme once the allow-list is fixed) once
+  the Redirect URLs are fixed, so tapping the email link returns to
+  the game.
+
+**Complaint 2 — "after winning it shows no coins at all" (screenshot
+shot-075549.png):** he won a World Tour match with stake 0 and the
+popup showed "◉ 0 TAP TO COLLECT". The v6 win screen assumed a pot
+always exists. **Fix in v10:** fireworks/confetti burst on every win;
+the amount BIG in the centre; TWO BIG buttons (COLLECT with the TOTAL
+big, DOUBLE with the doubled amount big). When the pot is 0 (stake 0,
+or a Solo win): NEVER a bare "◉ 0" — the big button is the earn path
+instead (solo: "WATCH 1 AD → EARN ◉ <ladder amount>"; tour stake 0:
+"WATCH 2 ADS → EARN ◉ <sum of the next two ladder steps>"). The stake
+line shows no numbers at all when the pot is 0. The solo "★ PRACTICE
+WIN ★ / TAP TO CONTINUE" button is GONE (it duplicated REMATCH —
+clean-UI rule).
+
+**Complaint 3 — "don't show them like that" (screenshot
+shot-075612.png, World Tour roster):** the roster made him choose
+which bot to play. **Fix in v10:** the roster screen is DELETED
+(`scripts/tour_roster.gd` is now dead code on disk — left in place,
+noted here; the connector snapshot-push only adds/updates, so it stays
+in the repo until a later cleanup). Tapping SOLO → short loading
+screen → straight to the board vs a random bot (free, no coins, as
+now). Tapping WORLD TOUR → stake picker (unchanged) → loading →
+straight to the board vs a random advanced bot, weighted near the
+player's level (`WorldTour.random_bot_near_level`, weight =
+1/(1+gap×0.35) — a Rookie usually meets Arjun/Kasun, rarely Emma; every
+bot stays reachable). Opponent name/country/level still shown in the
+match HUD ("Kasun Perera (BOT) Lv 14") — the honesty rule is unchanged:
+every bot clearly marked BOT/COMPUTER in the HUD.
+
+**Complaint 4 — "everywhere looks dull and black":** the board +
+everything inside the game was too dark. **Fix in v10:** brighter
+palette everywhere — pale beech board (classic surface (0.94, 0.84,
+0.68)), vivid teal/emerald backdrop (board view (0.02, 0.55, 0.62) →
+(0.02, 0.62, 0.38); home/mode/nearby (0.04, 0.45, 0.42)), brighter
+panels (UiKit.PANEL vivid teal (0.06, 0.34, 0.36, 0.97)), lighter
+muted text. The board stays ICF-accurate (exactly 2 base circles per
+corner, 8 total) and the Carrom Pool clarity is unchanged — just
+brighter. Screenshots prove the brighter look (see §4).
+
+### 1. Nana's chunky-3D button recipe → Godot (NEW in v10)
+
+Nana replied in the shared file 2026-11-23 08:20 with the recipe from
+the LingoLand English app (`lingoland-english-app`, `client/src/
+theme.css`, `components.tsx`, `App.tsx`) — the chunky 3D game tiles
+Buddhika loves. Web React/CSS — does NOT drop into Godot directly;
+rebuilt as `scripts/three_d_button.gd` (`class_name ThreeDButton
+extends Button`). Godot translation:
+
+| CSS (her message) | Godot (`ThreeDButton`) |
+|---|---|
+| Two-tone diagonal gradient, bright top-left → dark bottom-right (`linear-gradient(145deg, color1, color2)`) | 8×8 vertex-colour mesh over the rounded rect (`gradient_mesh`); each vertex coloured by its diagonal position, clamped to the rounded shape (`clamp_point_to_rounded_rect`) |
+| Solid darker "lip" 5–7 px under the button (`box-shadow: 0 6px 0 color2`) | Full face drawn in the lip colour first; the body covers all but the bottom 6 px strip (`lip_for(bottom)` = bottom darkened to 0.45 value) |
+| Soft blurred drop shadow below the lip (`box-shadow: 0 12px 18px rgba(37,81,126,0.18)`) | 2 expanding soft-shadow rounded rects (rgba(37,81,126,0.10/0.06), +3/+6 px) |
+| White highlight along the top inside edge + diagonal white sheen (`.gloss::after`, 115deg white 0.38 → 0.1 at 34% → 0 at 55%) | 2 px white 0.30 top-inside line + diagonal white sheen polygon (0.28 → 0) |
+| Big rounded corners 22–26 px, pills fully round | `corner_radius` 24 px for tiles, 9999 (pill) for buttons; outline via `rounded_rect_points` (6 segments per arc) |
+| On press sinks 4–5 px, lip shrinks to 1–2 px in ~0.08 s (`:active { transform: translateY(4px) }`) | `_sink` 0→1 in 0.08 s (`_process` lerp): face drops 4 px, lip 6→2 px; hover brightens |
+| Font Baloo 2 Bold, white labels + dark text-shadow | Baloo 2 is unavailable in Godot — the Godot fallback font is the closest available; labels drawn in `_draw()` with a dark shadow + 1 px double-draw for boldness (native text made transparent via theme colour overrides) |
+| Tile pairs: Alphabet Fun #B06EE8→#7A5BD0, Phonics #7ED321→#46A302, Spelling Bee #19C2F0→#1E6FD9, Quiz Time #FFB703→#FF7B54, Balloon Pop #FF6B6B→#FF2E9E; round blue buttons #38B6FF→#1E6FD9, lip #1558AC | `UiKit.TILE_ALPHABET/PHONICS/SPELLING/QUIZ/BALLOON/BLUE` + `TILE_GOLD` (#FFD968→#E9A91C, Carrom gold); `tile_button(text, font_size, pair)`; `gold_button()` → gold pair, `dark_button()` → round-blue pair |
+
+Deliberate deviation from her white-labels rule: **gold buttons use
+DARK text** — white on bright gold reads badly; dark-on-gold is the
+established Carrom look (verified in the screenshots: "◉ 200" and
+"PLAY" read clearly). Minimum-size floor (`_get_minimum_size`: height
+= font_size×2+24, width = longest label line + 32) keeps every button
+BIG — needed because the empty styleboxes carry no padding. Still a
+real `Button` — `.text`, `.pressed`, `.disabled`, `is Button` all work,
+so existing tests that find buttons by text keep working.
+
+**Clean-UI rule (user, 2026-11-23 08:17):** the game must stay CLEAN
+and BEAUTIFUL — do NOT stuff it with lots of things or lots of
+buttons; a player must understand it at a glance. Every button must
+be BIG — no tiny little buttons. Applied to the win screen redesign
+(both big buttons), the register screen, and every mode screen touched
+in v10. The solo CONTINUE button was removed for this reason.
+
+### 2. What changed (v10)
+
+- `scripts/supabase.gd`: `LOOPBACK_REDIRECT` is now the v10 PRIMARY
+  return (custom scheme secondary); `otp_path(redirect_to,
+  code_challenge)` (query params, never body); `parse_fragment_tokens`
+  (fragment OR query); `jwt_sub` (base64url payload "sub");
+  `set_session_from_tokens`; `get_user`.
+- `scripts/save_data.gd`: persisted `pending_return_verifier`,
+  `pending_return_deadline`, `pending_return_kind` ("google" |
+  "otp_link"); legacy `google_pkce_*` kept for v9 installs; new
+  `ad_reward_at(count)` (ladder amount for the Nth ad).
+- `scripts/accounts.gd`: unified pending return (loopback primary,
+  deep-link file secondary, paste fallback); `_start_return_listener`
+  (shared Google + OTP); `finish_google_with_pasted_code` handles bare
+  code, full URL, and `#access_token=` links for either kind;
+  `_finish_return_with_tokens` (implicit flow via `get_user`); recovery
+  signals (`google_finished` / `otp_link_finished` by kind).
+- `scripts/auth_screen.gd`: recovery UI — when a Google sign-in is
+  pending > 60 s, `show_recovery_ui()` shows a big ↻ RETRY GOOGLE
+  SIGN-IN button (68 px) + the paste row PROMINENTLY (20 pt hint
+  telling the player the code is in the browser address bar after
+  `code=`, 68 px edit, 24 pt USE CODE); brighter emerald background;
+  footer "BMS Carrom v10.0".
+- `scripts/three_d_button.gd` (NEW) + `scripts/ui_kit.gd` (tile
+  pairs, `tile_button`, `gold_button`/`dark_button` → ThreeDButton,
+  brighter PANEL/MUTED).
+- `scripts/fireworks.gd` (NEW): 5 bursts over ~2 s (0.4 s gap, 42
+  particles each), gold/red/teal/white/purple, gravity 520, fade by
+  life; mouse-transparent; `set_process(false)` when done.
+- `scripts/match.gd`: win screen rework (§0 complaint 2) — fireworks
+  overlay, stacked chunky buttons (`_stacked_button(lines, style)`
+  "gold"|"purple"|"pink"), earn mode for pot 0, no bare ◉ 0, no solo
+  CONTINUE button; HUD panels use the brighter default PANEL.
+- `scripts/main.gd`: roster + difficulty popup deleted from the flow
+  (new `LoadingScreen`, `_show_loading` / `_show_loading_then`,
+  `_start_solo_direct`, `_start_tour_random`); rematch re-rolls a new
+  random bot (tour keeps the same stake); new shot modes "tour"
+  (tour loading), "loading" (solo loading), "tourwin0", "googlepending".
+- `scripts/home.gd`, `scripts/mode_choice.gd`, `scripts/nearby.gd`,
+  `scripts/board_view.gd`, `scripts/shop_data.gd`: brighter palette
+  (§0 complaint 4); SOLO/ONLINE are now tiles (Phonics green /
+  Spelling blue); mode buttons are now tiles (SOLO green, WORLD TOUR
+  amber, ONLINE blue, NEARBY purple).
+- `scripts/world_tour.gd`: `random_bot_near_level(player_level,
+  rng := null)` (weighted near-level pick, seeded-RNG testable).
+- `docs/supabase-setup.md`: redirect URLs now list BOTH the loopback
+  (primary) and the custom scheme (secondary).
+
+### 3. Tests
+
+- Import: `godot --headless --import --path .` — 0 script errors.
+  (One parse error caught + fixed during the run: `three_d_button.gd`
+  `clamp_point_to_rounded_rect` — `var d := q - c` could not infer a
+  type because `corners` was an untyped Array; fixed by declaring
+  `corners: Array[Vector2]`.)
+- Logic runner: `godot --headless --path . -s tests/test_runner.gd`
+  — **192 passed, 0 failed** (was 163; +29 v10 checks: OTP query
+  path + loopback authorize URL, fragment-token parsing, JWT sub
+  decode, random-bot weighting/determinism/all-5-reachable, 3D-button
+  pure helpers (gradient endpoints/midpoint, lip darker, Nana's exact
+  #1558AC blue lip, rounded outline point count, corner projection,
+  centre passthrough, mesh vertex count + gradient direction, minimum
+  size floor), ladder `ad_reward_at` values + clamping).
+- Ads gate scene: `res://tests/ads_test.tscn` — **9 passed, 0
+  failed** (unchanged).
+- Auth flow scene: `res://tests/auth_flow_test.tscn` (xvfb) —
+  **26 passed, 0 failed** (was 23; +3 v10: footer v10.0, recovery
+  RETRY button visible + paste row visible, recovery hides when Google
+  finishes).
+- Supabase mock: `res://tests/supabase_mock_test.tscn` —
+  **39 passed, 0 failed** (was 38; +1 v10 regression check — see bug
+  1 below).
+- Server 38/38, LAN 16/16, stakes 32/32, aim 19/19, accounts 32/32,
+  input 9/9 — no regressions (all inside the logic runner except
+  server_test).
+- Popup flow scene: `res://tests/popup_flow_test.tscn` (xvfb) —
+  **20 passed, 0 failed** (was 18; F2/F3 rewritten for direct play:
+  SOLO tap shows the loading screen with NO difficulty popup, then a
+  solo match starts vs a random bot, free, no stake).
+- Popup double scene: `res://tests/popup_double_test.tscn` (xvfb) —
+  **6 passed, 0 failed** (was 5; SOLO android-tap → loading → match,
+  no difficulty popup).
+- Win-double scene: `res://tests/win_double_test.tscn` (xvfb) —
+  **64 passed, 0 failed** (was 46; +18 v10: fireworks on Win 1,
+  Win 5 tour stake 0 — earn mode, no "◉ 0" anywhere, WATCH 2 ADS +
+  EARN ◉ <two ladder steps>, no COLLECT button, 2 ads earn the ladder
+  sum with the "EARNED ◉ … ✓" label, fireworks; solo — no "★ PRACTICE
+  WIN ★" button, no "◉ 0", fireworks).
+- `net_test.tscn` (live two-client match against a server) still
+  cannot run in this sandbox: UDP sockets are blocked here
+  (PermissionError: [Errno 1]), so the clients cannot reach even a
+  locally running server. Pre-existing environment limit, not a v10
+  change.
+- **Total: 403 checks green, 0 failed** (192 + 9 + 26 + 39 + 38 + 9 +
+  20 + 6 + 64).
+
+### 4. Screenshots — checked by eye (xvfb, software GL)
+
+In `verification/v10/` (each mode at 720×1280 + 720×1640):
+- `login` — vivid emerald, bright board logo, gold "WELCOME TO
+  CARROM", white "Continue with Google" with the correct four-colour
+  "G", big gold REGISTER tab + blue SIGN IN tab, big gold "REGISTER &
+  PLAY" (3D gradient + lip visible), benefits panel + "Free to play •
+  No ads until you play", footer "BMS Carrom v10.0 • Account required
+  • Free to play" fully visible — no dead space.
+- `googlepending` — "Signing in with Google…" on the Google button,
+  the paste row PROMINENT ("Google taking too long? Paste the code
+  from your browser address bar (the part after code=):" + big edit +
+  blue USE CODE), big gold "↻ RETRY GOOGLE SIGN-IN". Nit: on
+  720×1280 the recovery info line at the very bottom is cut
+  mid-sentence (the screen scrolls, so it is readable — noted, not
+  fixed).
+- `home` — vivid teal, big pale board with the labelled diagram (all
+  8 callouts: Striker, White coin, Black coin, Queen, Pocket, Base
+  line, Centre circle, Diagonal), big gold PLAY (dark text reads
+  clearly), green SOLO tile + blue ONLINE tile, SHOP / HOW TO PLAY /
+  AIM-ASSIST pills, ad ladder panel, DAILY BONUS gold, FREE COINS
+  blue, footer v10.0, AD slot at the bottom. Board: exactly 2 base
+  circles per corner, 8 total — counted in the shot.
+- `playchoice` — CHOOSE A MODE, 4 big chunky tiles (SOLO green,
+  WORLD TOUR amber, ONLINE blue, NEARBY purple) with visible gradient
+  + lip + sheen; the note "World Tour bots are computers (BOT)" is
+  under the tiles; BACK at the bottom. Nit: a ~300 px empty teal gap
+  between the notes and BACK on 720×1280 (clean, but empty).
+- `loading` — clean vivid teal, "GETTING READY" gold, "Solo — free
+  practice vs a random bot.", animated dots.
+- `match` — bright board in-match (coins scattered mid-game),
+  "YOUR TURN — BLACK" + gold timer bar, "Medium Bot Lv 2" up top,
+  "Test Player (YOU) Lv 4 · Rookie" + pause below, hint line at the
+  bottom. Base circles 2 per corner, 8 total — counted.
+- `aim` — aim guide on the bright board (dotted line + orange arrow
+  + striker halo + gold dashed prediction).
+- `tourwin` — ★ WINNER ★, "Your stake ◉ 100 + Opponent stake ◉ 100",
+  "World Tour — you beat Arjun Mehta (BOT)", big gold COLLECT with
+  "◉ 200" HUGE + "TAP TO COLLECT", purple DOUBLE "WATCH 2 ADS /
+  DOUBLE TO ◉ 400", "XP: +150 • LEVEL UP! Now Lv 5 · Bronze • Board
+  score: 9", FIND REMATCH gold, HOME blue. Fireworks particles
+  visible across the screen (also caught mid-burst on the 1640 shot).
+  Nit: the fixed 620×780 popup has ~200 px of empty teal below HOME
+  (content ends early) — clean, but the popup could be shorter.
+- `tourwin0` — ★ WINNER ★, "World Tour — you beat Arjun Mehta (BOT)
+  (friendly match, no stake).", big pink "WATCH 2 ADS / EARN ◉ 350"
+  (350 = the next two ladder steps, 150 + 200), "Two ads pay the ad
+  ladder twice — no stake needed.", XP line, FIND REMATCH, HOME.
+  **No bare "◉ 0" anywhere.** Fireworks visible.
+- `solowin` — "Practice win — no coins earned.", pink "WATCH 1 AD /
+  EARN ◉ 150", "One ad pays the ad-ladder amount — same as FREE
+  COINS.", XP line, REMATCH, HOME. **No "★ PRACTICE WIN ★ / TAP TO
+  CONTINUE" button.** Fireworks visible.
+
+### 5. Bugs found and fixed during verification
+
+1. **CRITICAL (v10, found by the mock test) — the OTP listener leaked
+   and blocked Google sign-in.** `request_login_code` starts the
+   `otp_link` loopback listener, but `verify_code_and_login` never
+   ended it: `_google_pending` stayed true, so a later
+   `begin_google_sign_in()` returned early ("a return is already in
+   flight") without starting a Google return — the loopback callback
+   then completed as an OTP-link return (emitting `otp_link_finished`,
+   not `google_finished`) — and on real Supabase the PKCE exchange
+   would have failed with the OTP verifier. Symptom in the test:
+   "mock: Google sign-in finished via loopback" FAILED while "Google
+   Gmail linked" PASSED. Fixed: `verify_code_and_login` calls
+   `_end_google_pending()` once the code verifies (the magic link is
+   no longer needed); `begin_google_sign_in` now cancels a pending
+   OTP-link return instead of returning early (a Google return already
+   in flight still returns true). Regression check added to the mock
+   test ("OTP verify ends the pending return"). Mock test now 39/39 —
+   the loopback Google sign-in works end-to-end against the mock
+   (begin → fake browser callback → `google_finished` ok → Gmail
+   linked).
+2. **Recovery UI did not show the paste row.** `show_recovery_ui()`
+   only showed the retry row — the paste row stayed hidden, so the
+   recovery screen offered RETRY but not the code fallback. Fixed:
+   `show_recovery_ui()` now calls `_set_google_pending(true)` first
+   (paste row visible) and then shows the retry row. Auth-flow test
+   caught it ("recovery keeps the paste-code row visible" failed,
+   then 26/26).
+3. **`three_d_button.gd` type-inference parse error** — see §3
+   (untyped `corners` Array). Fixed with `Array[Vector2]`.
+
+### 6. NOT verified (needs Buddhika / a real device)
+
+- Live Google tap on his phone (account picker → tap account →
+  registered). The loopback return + recovery UI are verified against
+  the mock and by code inspection; the real Supabase Redirect URLs
+  allow-list still needs the parent browser task (add the custom
+  scheme, verify the loopback is listed) — until then the return may
+  still fall back to localhost:3000 on the real project. The paste-code
+  fallback + RETRY cover that case in-game.
+- Live receipt of a real OTP code email (the Magic Link template fix
+  is a dashboard edit — parent browser task; the endpoint is
+  rate-limited at 429, so no live OTP probe was run in v10).
+- Live two-device play / live Gmail login restore on real phones (as
+  before).
+- The built v10 APK's manifest/dex must be checked in the ship
+  procedure (does it contain `auth-callback` / `auth_callback.txt`?
+  The v10 loopback fix does NOT need the native code, so a missing
+  deep-link in the APK is expected until the workflow fix — report
+  honestly what the APK contains).
