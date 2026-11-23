@@ -51,6 +51,7 @@ func _initialize() -> void:
 	_test_world_tour_random_bot()
 	_test_three_d_button()
 	_test_save_ad_reward_at()
+	_test_play_games()
 	_test_supabase_realtime_parse()
 	_test_supabase_rows()
 	_test_net_invite_join_message()
@@ -926,3 +927,157 @@ func _test_net_invite_join_message() -> void:
 	_check("v7 net: invite_join message shape", String(msg.get("type", "")) == "invite_join" and String(msg.get("group_id", "")) == "grp-9" and int(msg.get("stake", 0)) == 100 and not bool(msg.get("is_inviter", true)))
 	var inviter := NetClient.invite_join_message("grp-9", "Me", 3, 100, "4p", 1, true)
 	_check("v7 net: inviter flag + 4p mode carried", bool(inviter.get("is_inviter", false)) and String(inviter.get("mode", "")) == "4p" and int(inviter.get("table", -1)) == 1)
+
+# ------------------------------------------------- Play Games Services
+## Mock plugin clients (same method names as the real v3.4.0 clients,
+## recording calls). Lets the wrapper be tested headless, with no
+## Android and no real Play Games account.
+class MockPGSSignIn:
+	extends RefCounted
+	var calls: Array = []
+	func sign_in() -> void:
+		calls.append({"method": "sign_in"})
+	func is_authenticated() -> void:
+		calls.append({"method": "is_authenticated"})
+
+class MockPGSAchievements:
+	extends RefCounted
+	var calls: Array = []
+	func unlock_achievement(achievement_id: String) -> void:
+		calls.append({"method": "unlock", "id": achievement_id})
+	func increment_achievement(achievement_id: String, amount: int) -> void:
+		calls.append({"method": "increment", "id": achievement_id, "amount": amount})
+	func show_achievements() -> void:
+		calls.append({"method": "show_achievements"})
+
+class MockPGSLeaderboards:
+	extends RefCounted
+	var calls: Array = []
+	func submit_score(leaderboard_id: String, score: int) -> void:
+		calls.append({"method": "submit_score", "id": leaderboard_id, "score": score})
+	func show_leaderboard(leaderboard_id: String) -> void:
+		calls.append({"method": "show_leaderboard", "id": leaderboard_id})
+	func show_all_leaderboards() -> void:
+		calls.append({"method": "show_all_leaderboards"})
+
+func _pgs_has(actions: Array, type: String, key: String = "") -> bool:
+	for a in actions:
+		if String(a.get("type", "")) == type and (key == "" or String(a.get("key", "")) == key):
+			return true
+	return false
+
+func _pgs_has_amount(actions: Array, type: String, key: String, amount: int) -> bool:
+	for a in actions:
+		if String(a.get("type", "")) == type and String(a.get("key", "")) == key and int(a.get("amount", -1)) == amount:
+			return true
+	return false
+
+func _pgs_has_score(actions: Array, score: int) -> bool:
+	for a in actions:
+		if String(a.get("type", "")) == "submit_score" and int(a.get("score", -1)) == score:
+			return true
+	return false
+
+func _mock_has(calls: Array, method: String, id: String = "") -> bool:
+	for c in calls:
+		if String(c.get("method", "")) == method and (id == "" or String(c.get("id", "")) == id):
+			return true
+	return false
+
+func _mock_submit_score(calls: Array) -> int:
+	for c in calls:
+		if String(c.get("method", "")) == "submit_score":
+			return int(c.get("score", -1))
+	return -1
+
+const _PGS_TEST_IDS := {
+	"first_flick": "CgkI-test-flick", "first_win": "CgkI-test-win",
+	"pocket_the_queen": "CgkI-test-queen", "clean_sweep": "CgkI-test-sweep",
+	"hat_trick": "CgkI-test-hat", "century_maker": "CgkI-test-century",
+	"sharpshooter": "CgkI-test-sharp", "regular_player": "CgkI-test-regular",
+	"carrom_champion": "CgkI-test-champ", "board_master": "CgkI-test-master",
+}
+
+func _test_play_games() -> void:
+	var PGScript: GDScript = load("res://scripts/play_games.gd")
+	# Score formula (10/coin + 30 queen + 25 win; max 145).
+	_check("pgs: clean-sweep win scores 115", PGScript.compute_match_score(9, false, true) == 115)
+	_check("pgs: 8 coins + queen + win scores 135", PGScript.compute_match_score(8, true, true) == 135)
+	_check("pgs: scoreless loss scores 0", PGScript.compute_match_score(0, false, false) == 0)
+	_check("pgs: 8-coin loss scores 80 (below century)", PGScript.compute_match_score(8, false, false) == 80)
+	_check("pgs: negative coins clamp to 0", PGScript.compute_match_score(-2, false, false) == 0)
+	# Pure action mapping: first match, a loss.
+	var first_loss: Array = PGScript.match_actions({"won": false, "matches_played": 1, "matches_won": 0, "win_streak": 0, "coins_pocketed": 3, "queen_covered": false, "clean_sweep": false, "total_coins_pocketed": 3, "score": 30})
+	_check("pgs: first finished match unlocks First Flick", _pgs_has(first_loss, "unlock", "first_flick"))
+	_check("pgs: loss submits its score", _pgs_has_score(first_loss, 30))
+	_check("pgs: loss increments sharpshooter by coins pocketed", _pgs_has_amount(first_loss, "increment", "sharpshooter", 3))
+	_check("pgs: loss earns no win actions", not _pgs_has(first_loss, "unlock", "first_win") and not _pgs_has(first_loss, "increment", "regular_player"))
+	# Pure action mapping: first win, clean sweep with the queen.
+	var first_win: Array = PGScript.match_actions({"won": true, "matches_played": 1, "matches_won": 1, "win_streak": 1, "coins_pocketed": 9, "queen_covered": true, "clean_sweep": true, "total_coins_pocketed": 9, "score": 145})
+	_check("pgs: first win unlocks First Win", _pgs_has(first_win, "unlock", "first_win"))
+	_check("pgs: queen covered unlocks Pocket the Queen", _pgs_has(first_win, "unlock", "pocket_the_queen"))
+	_check("pgs: 9 coins + win unlocks Clean Sweep", _pgs_has(first_win, "unlock", "clean_sweep"))
+	_check("pgs: 145-pt match unlocks Century Maker", _pgs_has(first_win, "unlock", "century_maker"))
+	_check("pgs: first win increments all three win counters", _pgs_has_amount(first_win, "increment", "regular_player", 1) and _pgs_has_amount(first_win, "increment", "carrom_champion", 1) and _pgs_has_amount(first_win, "increment", "board_master", 1))
+	_check("pgs: first win submits 145", _pgs_has_score(first_win, 145))
+	# Third straight win, mid-range score.
+	var third_win: Array = PGScript.match_actions({"won": true, "matches_played": 5, "matches_won": 3, "win_streak": 3, "coins_pocketed": 5, "queen_covered": false, "clean_sweep": false, "total_coins_pocketed": 20, "score": 75})
+	_check("pgs: 3rd straight win unlocks Hat-Trick", _pgs_has(third_win, "unlock", "hat_trick"))
+	_check("pgs: 75-pt match does not unlock Century Maker", not _pgs_has(third_win, "unlock", "century_maker"))
+	# Scoreless match submits nothing.
+	var scoreless: Array = PGScript.match_actions({"won": false, "matches_played": 2, "matches_won": 0, "win_streak": 0, "coins_pocketed": 0, "queen_covered": false, "clean_sweep": false, "total_coins_pocketed": 0, "score": 0})
+	_check("pgs: scoreless match submits nothing", not _pgs_has(scoreless, "submit_score"))
+	_check("pgs: scoreless match earns no sharpshooter steps", not _pgs_has(scoreless, "increment", "sharpshooter"))
+	# Mock-client execution: signed in + configured -> calls land.
+	var pg = PGScript.new()
+	var mock_si := MockPGSSignIn.new()
+	var mock_ach := MockPGSAchievements.new()
+	var mock_lb := MockPGSLeaderboards.new()
+	pg.configure_ids("CgkI-test-board", _PGS_TEST_IDS)
+	pg.set_test_clients(mock_si, mock_ach, mock_lb)
+	pg.set_test_signed_in(true)
+	pg.report_match_result({"won": true, "matches_played": 1, "matches_won": 1, "win_streak": 1, "coins_pocketed": 9, "queen_covered": true, "clean_sweep": true, "total_coins_pocketed": 9, "score": 145})
+	_check("pgs: signed-in match submits the score to the leaderboard", _mock_submit_score(mock_lb.calls) == 145)
+	_check("pgs: signed-in match unlocks First Win on the client", _mock_has(mock_ach.calls, "unlock", "CgkI-test-win"))
+	_check("pgs: signed-in match unlocks the queen achievement", _mock_has(mock_ach.calls, "unlock", "CgkI-test-queen"))
+	_check("pgs: signed-in match increments sharpshooter by 9", _mock_has(mock_ach.calls, "increment", "CgkI-test-sharp"))
+	# Queen covered mid-match fires its unlock call at once.
+	var ach_before := mock_ach.calls.size()
+	pg.report_queen_covered()
+	_check("pgs: queen-covered event fires its unlock call", mock_ach.calls.size() == ach_before + 1 and _mock_has(mock_ach.calls, "unlock", "CgkI-test-queen"))
+	# Leaderboard UI: signed out -> asks sign-in once, opens after auth.
+	pg.set_test_signed_in(false)
+	var si_before := mock_si.calls.size()
+	var lb_before := mock_lb.calls.size()
+	pg.show_leaderboard()
+	_check("pgs: leaderboard while signed out requests sign-in", mock_si.calls.size() == si_before + 1)
+	_check("pgs: leaderboard does not open before sign-in", mock_lb.calls.size() == lb_before)
+	pg._on_authenticated(true)
+	_check("pgs: leaderboard opens after sign-in succeeds", _mock_has(mock_lb.calls, "show_leaderboard", "CgkI-test-board"))
+	# Sign-in failure / signed out must NOT block play: no calls, no crash.
+	pg.set_test_signed_in(false)
+	var ach_n := mock_ach.calls.size()
+	var lb_n := mock_lb.calls.size()
+	pg.report_match_result({"won": true, "matches_played": 2, "matches_won": 2, "win_streak": 2, "coins_pocketed": 4, "queen_covered": false, "clean_sweep": false, "total_coins_pocketed": 13, "score": 65})
+	pg.report_queen_covered()
+	_check("pgs: signed-out match sends no achievement calls", mock_ach.calls.size() == ach_n)
+	_check("pgs: signed-out match sends no leaderboard calls", mock_lb.calls.size() == lb_n)
+	# Unconfigured IDs: signed in, but nothing to call.
+	var pg2 = PGScript.new()
+	var mock_ach2 := MockPGSAchievements.new()
+	var mock_lb2 := MockPGSLeaderboards.new()
+	pg2.set_test_clients(MockPGSSignIn.new(), mock_ach2, mock_lb2)
+	pg2.set_test_signed_in(true)
+	pg2.report_match_result({"won": true, "matches_played": 1, "matches_won": 1, "win_streak": 1, "coins_pocketed": 9, "queen_covered": true, "clean_sweep": true, "total_coins_pocketed": 9, "score": 145})
+	_check("pgs: unconfigured IDs send no calls even when signed in", mock_ach2.calls.is_empty() and mock_lb2.calls.is_empty())
+	# No plugin at all (fresh instance, no mocks): reporting is a safe no-op.
+	var pg3 = PGScript.new()
+	pg3.report_match_result({"won": true, "matches_played": 1, "matches_won": 1, "win_streak": 1, "coins_pocketed": 9, "queen_covered": true, "clean_sweep": true, "total_coins_pocketed": 9, "score": 145})
+	pg3.report_queen_covered()
+	pg3.show_leaderboard()
+	pg3.show_achievements()
+	_check("pgs: no-plugin instance reports without crashing", true)
+	_check("pgs: no-plugin instance is unavailable + unsigned-in", not pg3.is_available() and not pg3.is_signed_in())
+	pg.queue_free()
+	pg2.queue_free()
+	pg3.queue_free()

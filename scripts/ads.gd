@@ -29,6 +29,10 @@ var _interstitial_load_cb := InterstitialAdLoadCallback.new()
 var _interstitial_content_cb := FullScreenContentCallback.new()
 var _rewarded_timer: Timer = null
 var _load_timeout: Timer = null
+# F12: set when maybe_show_interstitial() has to load an ad on demand
+# (no preloaded one) — the load callback shows it once it arrives.
+# A warm_up() preload leaves this false and just stays preloaded.
+var _interstitial_show_pending := false
 var _simulated := false
 
 func _ready() -> void:
@@ -126,6 +130,11 @@ func _simulate_rewarded() -> void:
 
 func _on_simulated_rewarded_done() -> void:
 	rewarded_earned.emit(_rewarded_reason, true)
+	# L9: free the one-shot timer instead of leaking it as a child of
+	# the Ads autoload on every simulated ad.
+	if _rewarded_timer:
+		_rewarded_timer.queue_free()
+		_rewarded_timer = null
 
 func _on_rewarded_loaded(ad: RewardedAd) -> void:
 	_disarm_timeout()
@@ -169,6 +178,11 @@ func maybe_show_interstitial() -> bool:
 	if _interstitial_ad:
 		_interstitial_ad.show()
 		return true
+	# F12: no preloaded ad — remember a show was requested so the ad
+	# is shown as soon as this load completes (see
+	# _on_interstitial_loaded), instead of sitting preloaded until the
+	# next 3rd match.
+	_interstitial_show_pending = true
 	InterstitialAdLoader.new().load(AdsConfig.INTERSTITIAL_UNIT_ID, AdRequest.new(), _interstitial_load_cb)
 	_arm_load_timeout("interstitial")
 	return true
@@ -177,7 +191,11 @@ func _simulate_interstitial() -> void:
 	var t := Timer.new()
 	t.wait_time = 1.0
 	t.one_shot = true
-	t.timeout.connect(func() -> void: interstitial_closed.emit())
+	t.timeout.connect(func() -> void:
+		interstitial_closed.emit()
+		# L9: free the one-shot timer instead of leaking it as a
+		# child of the Ads autoload on every simulated interstitial.
+		t.queue_free())
 	add_child(t)
 	t.start()
 
@@ -190,9 +208,16 @@ func _on_interstitial_loaded(ad: InterstitialAd) -> void:
 	_disarm_timeout()
 	_interstitial_ad = ad
 	_interstitial_ad.full_screen_content_callback = _interstitial_content_cb
+	# F12: an on-demand load (maybe_show_interstitial with no preloaded
+	# ad) is shown now that it has arrived. A warm_up() preload leaves
+	# _interstitial_show_pending false and just stays preloaded.
+	if _interstitial_show_pending:
+		_interstitial_show_pending = false
+		_interstitial_ad.show()
 
 func _on_interstitial_failed_to_load(error: LoadAdError) -> void:
 	_disarm_timeout()
+	_interstitial_show_pending = false
 	print("[Ads] Interstitial failed to load: ", error.message)
 	interstitial_failed.emit()
 
@@ -218,6 +243,9 @@ func _arm_load_timeout(kind: String) -> void:
 		if kind == "rewarded":
 			rewarded_failed.emit(_rewarded_reason)
 		else:
+			# F12: an on-demand interstitial load that times out must
+			# not show a later-arriving ad for a stale request.
+			_interstitial_show_pending = false
 			interstitial_failed.emit())
 	add_child(_load_timeout)
 	_load_timeout.start()

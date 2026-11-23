@@ -81,6 +81,12 @@ func _run() -> void:
 	_check("v9 ads: interstitial blocked at counter 2", not Ads.maybe_show_interstitial())
 	Save.interstitial_counter = 3
 	_check("v9 ads: interstitial allowed at counter 3", Ads.maybe_show_interstitial())
+	# --- Phase 2b: L9 — simulated-ad timers are freed after firing ---
+	# The rewarded timer from Phase 2 above must already be gone.
+	_check("L9: simulated rewarded timer freed after firing", Ads._rewarded_timer == null)
+	var ads_kids := Ads.get_child_count()
+	await get_tree().create_timer(1.5).timeout
+	_check("L9: simulated interstitial timer freed after firing", Ads.get_child_count() == ads_kids - 1)
 	# --- Phase 3: migration ---
 	var cfg := ConfigFile.new()
 	cfg.set_value("ads", "interstitial_counter", 5)

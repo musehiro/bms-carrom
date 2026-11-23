@@ -29,6 +29,22 @@ const MATCH_SCAN_INTERVAL := 1.0 # seconds between widening re-scans
 # The match starts when every expected player has joined; the room is
 # cleaned up after 3 minutes so a slow invitee does not hold it forever.
 const INVITE_ROOM_TIMEOUT := 180.0
+# F13 Phase 1 — the server used to trust whatever the client claimed
+# (any level, any stake, any name). Claimed fields are now sanitised
+# before they are stored or matched on; nothing here verifies them
+# against Supabase (that is Phase 2 — see the report). Caps are
+# deliberately generous so no legitimate player is ever blocked:
+# levels are 1..100, stakes 0..1,000,000, names 32 chars, tables 0..2.
+const MAX_CLAIMED_NAME_LEN := 32
+const MAX_CLAIMED_LEVEL := 100
+const MAX_CLAIMED_STAKE := 1000000
+const MAX_TABLE := 2
+# Relay rate limit: a client can legitimately send ~1 shot + 1 state
+# per turn (a few per second at most). Over 10 shot/state messages in
+# one second is flooding — drop the excess, and disconnect a peer that
+# sustains it (5 over-limit windows).
+const RELAY_MAX_PER_SEC := 10
+const RELAY_MAX_VIOLATIONS := 5
 
 var _peer: ENetMultiplayerPeer = null
 var _queue: Array = [] # {id, name, level, table, stake, mode, at}
@@ -37,6 +53,7 @@ var _peer_room := {} # peer_id -> room_id
 var _names := {} # peer_id -> display name
 var _invite_rooms := {} # group_id -> {mode, expected, table, players: [...], at}
 var _peer_invite := {} # peer_id -> group_id (waiting in an invite room)
+var _relay_limits := {} # F13: peer_id -> {window_start, count, violations}
 var _room_seq := 0
 var _scan_timer := 0.0
 
@@ -73,6 +90,7 @@ func _on_peer_disconnected(id: int) -> void:
 	print("[Server] Peer disconnected: %d" % id)
 	_remove_from_queue(id)
 	_leave_invite_room(id)
+	_relay_limits.erase(id)
 	var room_id: int = int(_peer_room.get(id, -1))
 	if room_id >= 0:
 		_dissolve_room(room_id, id)
@@ -110,16 +128,22 @@ func _relay(payload: String) -> void:
 		return
 	match String(data.get("type", "")):
 		"queue":
-			_names[sender] = String(data.get("name", "Player"))
+			# F13 Phase 1: sanitise the claim before it is stored or
+			# matched on. A non-numeric level/stake or a negative
+			# stake is not queued at all.
+			var claim := sanitize_claim(data)
+			if not bool(claim.get("ok", false)):
+				_send_to(sender, {"type": "error", "message": String(claim.get("error", "Bad matchmaking request."))})
+				print("[Server] Rejected queue from peer %d: %s" % [sender, claim.get("error", "")])
+				return
+			_names[sender] = String(claim["name"])
 			_remove_from_queue(sender)
-			var mode := String(data.get("mode", "2p"))
-			if mode != "4p":
-				mode = "2p"
-			_queue.append({"id": sender, "name": String(data.get("name", "Player")),
-				"level": int(data.get("level", 1)), "table": int(data.get("table", 0)),
-				"stake": maxi(0, int(data.get("stake", 0))), "mode": mode,
+			var mode := String(claim["mode"])
+			_queue.append({"id": sender, "name": String(claim["name"]),
+				"level": int(claim["level"]), "table": int(claim["table"]),
+				"stake": int(claim["stake"]), "mode": mode,
 				"at": Time.get_unix_time_from_system()})
-			print("[Server] %s (Lv %d) queued for %s table %d, stake %d" % [data.get("name"), int(data.get("level", 1)), mode, int(data.get("table", 0)), int(data.get("stake", 0))])
+			print("[Server] %s (Lv %d) queued for %s table %d, stake %d" % [claim["name"], int(claim["level"]), mode, int(claim["table"]), int(claim["stake"])])
 			_try_match()
 		"invite_join":
 			_names[sender] = String(data.get("name", "Player"))
@@ -132,14 +156,82 @@ func _relay(payload: String) -> void:
 				_dissolve_room(room_id2, sender)
 
 ## Relay a shot/state message to everyone else in the sender's room.
+## F13 Phase 1: per-peer rate limiting — a flooding peer's excess
+## messages are dropped, and a peer that sustains flooding is
+## disconnected (its room then dissolves via _on_peer_disconnected).
 func _relay_to_room(sender: int, data: Dictionary) -> void:
 	var room_id: int = int(_peer_room.get(sender, -1))
 	if room_id < 0:
+		return
+	var check := relay_rate_check(_relay_limits.get(sender, {}), Time.get_unix_time_from_system())
+	_relay_limits[sender] = check["state"]
+	if not bool(check.get("allowed", false)):
+		if bool(check.get("disconnect", false)):
+			print("[Server] Disconnecting peer %d for relay flooding" % sender)
+			_relay_limits.erase(sender)
+			_peer.disconnect_peer(sender)
 		return
 	var room: Dictionary = _rooms.get(room_id, {})
 	for pid in room.get("players", []):
 		if int(pid) != sender:
 			_send_to(int(pid), data)
+
+## F13 Phase 1 — sanitise a client's claimed identity for queue /
+## invite_join. Pure, unit-tested. Returns {ok, name, level, table,
+## stake, mode} on success, {ok: false, error} when the claim is not
+## even well-formed (non-numeric level/stake, negative stake).
+## Clamping (not rejection) is used for out-of-range-but-numeric
+## values, so a slightly-off client still plays: level 1..100, stake
+## 0..1,000,000, table 0..2, name stripped + truncated to 32 chars.
+static func sanitize_claim(data: Dictionary) -> Dictionary:
+	var level_raw: Variant = data.get("level", 1)
+	var stake_raw: Variant = data.get("stake", 0)
+	var table_raw: Variant = data.get("table", 0)
+	if typeof(level_raw) != TYPE_INT and typeof(level_raw) != TYPE_FLOAT:
+		return {"ok": false, "error": "Level must be a number."}
+	if typeof(stake_raw) != TYPE_INT and typeof(stake_raw) != TYPE_FLOAT:
+		return {"ok": false, "error": "Stake must be a number."}
+	if typeof(table_raw) != TYPE_INT and typeof(table_raw) != TYPE_FLOAT:
+		return {"ok": false, "error": "Table must be a number."}
+	var stake := int(stake_raw)
+	if stake < 0:
+		return {"ok": false, "error": "Stake cannot be negative."}
+	var mode := String(data.get("mode", "2p"))
+	if mode != "4p":
+		mode = "2p"
+	var pname := String(data.get("name", "Player")).strip_edges()
+	if pname == "":
+		pname = "Player"
+	if pname.length() > MAX_CLAIMED_NAME_LEN:
+		pname = pname.substr(0, MAX_CLAIMED_NAME_LEN)
+	return {"ok": true, "name": pname,
+		"level": clampi(int(level_raw), 1, MAX_CLAIMED_LEVEL),
+		"table": clampi(int(table_raw), 0, MAX_TABLE),
+		"stake": mini(stake, MAX_CLAIMED_STAKE), "mode": mode, "error": ""}
+
+## F13 Phase 1 — one relay-rate-limit step for a peer. `state` is the
+## peer's {window_start, count, violations} ({} for a new peer).
+## Returns {allowed, disconnect, state}. Pure, unit-tested.
+static func relay_rate_check(state: Dictionary, now: float) -> Dictionary:
+	var window_start := float(state.get("window_start", now))
+	var count := int(state.get("count", 0))
+	var violations := int(state.get("violations", 0))
+	if now - window_start >= 1.0:
+		# New window: a clean previous window forgives one past
+		# violation; an over-limit one does not.
+		if count <= RELAY_MAX_PER_SEC:
+			violations = maxi(0, violations - 1)
+		window_start = now
+		count = 1
+		return {"allowed": true, "disconnect": false,
+			"state": {"window_start": window_start, "count": count, "violations": violations}}
+	count += 1
+	if count > RELAY_MAX_PER_SEC:
+		violations += 1
+		return {"allowed": false, "disconnect": violations >= RELAY_MAX_VIOLATIONS,
+			"state": {"window_start": window_start, "count": count, "violations": violations}}
+	return {"allowed": true, "disconnect": false,
+		"state": {"window_start": window_start, "count": count, "violations": violations}}
 
 ## Pair up waiting players. 2p: two players, same mode+table, levels
 ## within ±2 (±4 after 30 s). 4p: four players on the same mode+table
@@ -218,24 +310,30 @@ func _join_invite_room(sender: int, data: Dictionary) -> void:
 	if group_id == "":
 		_send_to(sender, {"type": "invite_failed", "error": "No invite group — try again."})
 		return
-	var mode := String(data.get("mode", "2p"))
-	if mode != "4p":
-		mode = "2p"
+	# F13 Phase 1: sanitise the claim once, up front — the room table
+	# and the stored player fields all use these values, never the
+	# raw client JSON.
+	var claim := sanitize_claim(data)
+	if not bool(claim.get("ok", false)):
+		_send_to(sender, {"type": "invite_failed", "error": String(claim.get("error", "Bad invite request."))})
+		return
+	var mode := String(claim["mode"])
+	var table := int(claim["table"])
 	var expected := 4 if mode == "4p" else 2
 	if _peer_invite.has(sender):
 		return # duplicate join — already waiting
 	var room: Dictionary = _invite_rooms.get(group_id, {})
 	if room.is_empty():
 		room = {"mode": mode, "expected": expected,
-			"table": int(data.get("table", 0)), "players": [],
+			"table": table, "players": [],
 			"at": Time.get_unix_time_from_system()}
 		_invite_rooms[group_id] = room
-	if String(room.get("mode", "2p")) != mode or int(room.get("table", 0)) != int(data.get("table", 0)):
+	if String(room.get("mode", "2p")) != mode or int(room.get("table", 0)) != table:
 		_send_to(sender, {"type": "invite_failed", "error": "This invite does not match the group."})
 		return
 	var players: Array = room["players"]
-	players.append({"id": sender, "name": String(data.get("name", "Player")),
-		"level": int(data.get("level", 1)), "stake": maxi(0, int(data.get("stake", 0))),
+	players.append({"id": sender, "name": String(claim["name"]),
+		"level": int(claim["level"]), "stake": int(claim["stake"]),
 		"is_inviter": bool(data.get("is_inviter", false))})
 	_peer_invite[sender] = group_id
 	print("[Server] Invite room %s: %s joined (%d/%d)" % [group_id, data.get("name"), players.size(), expected])

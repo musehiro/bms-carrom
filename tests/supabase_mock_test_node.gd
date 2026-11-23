@@ -88,6 +88,14 @@ func _run() -> void:
 	Save.ad_count_today = 0
 	Save.ad_coins_today = 0
 	Save.interstitial_counter = 0
+	# F7: a verified account left in the save would make register_player
+	# refuse — reset the account too, so the register step is hermetic.
+	Save.account_gmail = ""
+	Save.account_id = ""
+	Save.account_verified = false
+	Save.account_created_at = ""
+	Save.account_synced_at = 0
+	Save.player_name = "Player"
 	Save.save()
 	# Start the mock.
 	var script_path := ProjectSettings.globalize_path("res://tests/mock_supabase.py")
@@ -112,9 +120,14 @@ func _run() -> void:
 	var reg := await Accounts.register_player("Test Player", "test.player@gmail.com")
 	_check("mock: register creates the local account", bool(reg.get("ok", false)) and Accounts.has_account() and Save.account_gmail == "test.player@gmail.com" and Save.player_name == "Test Player")
 	_check("mock: register does not claim the cloud yet", not bool(reg.get("cloud", true)))
-	# --- OTP: send, wrong code, right code ---
+	# --- OTP: send, resend, wrong code, right code ---
 	var sent := await Accounts.request_login_code("test.player@gmail.com")
 	_check("mock: OTP code sent", bool(sent.get("ok", false)))
+	# L5: resending reuses the pending OTP-link verifier — a fresh one
+	# would silently kill the first email's "Sign in" link.
+	var v1 := Accounts.pending_return_verifier()
+	var sent_again := await Accounts.request_login_code("test.player@gmail.com")
+	_check("mock: resend reuses the pending OTP verifier", bool(sent_again.get("ok", false)) and v1 != "" and Accounts.pending_return_verifier() == v1)
 	var wrong := await Accounts.verify_code_and_login("test.player@gmail.com", "000000", true)
 	_check("mock: wrong code rejected", not bool(wrong.get("ok", false)))
 	var right := await Accounts.verify_code_and_login("test.player@gmail.com", "123456", true)
@@ -135,6 +148,13 @@ func _run() -> void:
 	Save.xp = 0
 	var again := await Accounts.verify_code_and_login("test.player@gmail.com", "123456", false)
 	_check("mock: sign-in restores the cloud profile", bool(again.get("ok", false)) and bool(again.get("restored", false)) and Save.coins == 1000)
+	# verifyOtp leading-zero check: the 6-digit code must travel as a
+	# STRING — "012345" verifies end to end (the mock only accepts it
+	# with the zero intact; an int parse anywhere would send "12345").
+	var sent_lz := await Accounts.request_login_code("test.player@gmail.com")
+	_check("mock: OTP code re-sent for the leading-zero check", bool(sent_lz.get("ok", false)))
+	var lz := await Accounts.verify_code_and_login("test.player@gmail.com", "012345", false)
+	_check("mock: code with a leading zero verifies (string, never int)", bool(lz.get("ok", false)) and Save.coins == 1000)
 	# --- Second player + search (name only) ---
 	var p2 := SupabaseClient.profile_row("user-nimal", "nimal@gmail.com", "Nimal Perera", 1500, 1200, 10, 6, 3, 2, ["classic"], ["classic"], "classic", "classic")
 	var up2 := await Supabase.upsert_profile(p2)

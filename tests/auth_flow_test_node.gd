@@ -138,6 +138,24 @@ func _run() -> void:
 	# --- A7: RESEND CODE exists (hidden until a code is sent) ---
 	_check("auth: RESEND CODE button exists", _main._auth._resend_button != null)
 	_check("auth: RESEND CODE hidden until a code is sent", not _main._auth._resend_button.is_visible_in_tree())
+	# --- L5 (v10): switching tabs keeps a pending code ---
+	_main._auth._pending_gmail = "test.player@gmail.com"
+	_main._auth._pending_allow_create = true
+	_main._auth._code_row.visible = true
+	_main._auth._code_edit.text = "123456"
+	_main._auth._set_mode("signin")
+	await _frames(2)
+	_check("auth: tab switch keeps the pending code row", _main._auth._code_row.visible and _main._auth._pending_gmail == "test.player@gmail.com")
+	_check("auth: tab switch keeps the typed code", _main._auth._code_edit.text == "123456")
+	_check("auth: tab switch keeps the allow-create flag", _main._auth._pending_allow_create)
+	_main._auth._set_mode("register")
+	await _frames(2)
+	_check("auth: switching back keeps the pending code too", _main._auth._code_row.visible and _main._auth._pending_gmail == "test.player@gmail.com")
+	# Reset the faked pending state so the register step starts clean.
+	_main._auth._pending_gmail = ""
+	_main._auth._pending_allow_create = false
+	_main._auth._code_row.visible = false
+	_main._auth._code_edit.text = ""
 	# --- A3: register -> home ---
 	_main._auth._name_edit.text = "Test Player"
 	_main._auth._gmail_edit.text = "test.player@gmail.com"
@@ -161,8 +179,20 @@ func _run() -> void:
 	_check("invitebox: incoming invite shown", _find_label_containing(_main._home._invite_panel, "Nimal") != null)
 	_check("invitebox: ACCEPT button shown", _find_button(_main._home._invite_panel, "ACCEPT") != null)
 	_check("invitebox: DECLINE button shown", _find_button(_main._home._invite_panel, "DECLINE") != null)
-	# --- I2: ACCEPT -> stake picker ---
+	# --- I2: ACCEPT -> stake picker (F1: the Supabase accept must
+	# succeed first). No backend is configured in this test, so the
+	# accept fails and the picker must NOT open — the flow stops
+	# instead of joining a match the inviter can never start.
 	var accept := _find_button(_main._home._invite_panel, "ACCEPT")
+	accept.pressed.emit()
+	await _frames(5)
+	_check("invitebox: failed accept does not open the stake picker", _find_button_containing(_main, "FIND OPPONENT") == null)
+	# The same invite, already accepted (e.g. a re-delivered row): the
+	# double-accept path skips the PATCH and the picker opens.
+	Friends.incoming[0]["status"] = "accepted"
+	_main._home._toggle_invite_box()
+	await _frames(5)
+	accept = _find_button(_main._home._invite_panel, "ACCEPT")
 	accept.pressed.emit()
 	await _frames(5)
 	_check("invitebox: accept opens the stake picker", _find_button_containing(_main, "FIND OPPONENT") != null)

@@ -29,6 +29,10 @@ signal shot_received(data: Dictionary)
 signal state_received(data: Dictionary)
 signal opponent_left
 signal queue_failed(message: String)
+signal connection_lost # L4: the server connection dropped. Main handles
+	# it ONLY while searching; mid-match drops stay with MatchScreen's
+	# opponent_left path (queue_failed must not fire there — it would
+	# toast "search failed" over a live match).
 signal connected_to_server
 signal lan_host_found(host: Dictionary) # {name, ip, port}
 signal lan_discovery_failed(message: String)
@@ -280,6 +284,10 @@ func _on_connection_failed() -> void:
 func _on_server_disconnected() -> void:
 	_connected = false
 	opponent_left.emit()
+	# L4: also tell Main — during a search nobody handles
+	# opponent_left (no match exists yet), so without this the
+	# FINDING OPPONENT popup would spin forever.
+	connection_lost.emit()
 
 func queue_up(player_name: String, level: int, table: int, stake: int = 0, mode: String = "2p") -> void:
 	if _hosting:

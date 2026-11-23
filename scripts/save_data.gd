@@ -34,6 +34,11 @@ var solo_wins: int = 0
 var online_wins: int = 0
 var tour_wins: int = 0 # v8: World Tour (advanced bot) wins — staked, like online
 var queens_covered: int = 0
+var win_streak: int = 0 # Play Games "Hat-Trick": consecutive wins (reset on loss/draw)
+var total_coins_pocketed: int = 0 # Play Games "Sharpshooter": coins pocketed across all matches
+# F9 (match.gd): a win pot held on the win screen, persisted so killing
+# the app there does not lose it; cleared once credited/collected.
+var pending_pot: int = 0
 var owned_boards: Array = ["classic"]
 var owned_strikers: Array = ["classic"]
 var equipped_board: String = "classic"
@@ -104,6 +109,9 @@ func load_save() -> void:
 	online_wins = int(_cfg.get_value("player", "online_wins", 0))
 	tour_wins = int(_cfg.get_value("player", "tour_wins", 0))
 	queens_covered = int(_cfg.get_value("player", "queens_covered", 0))
+	win_streak = int(_cfg.get_value("player", "win_streak", 0))
+	total_coins_pocketed = int(_cfg.get_value("player", "total_coins_pocketed", 0))
+	pending_pot = int(_cfg.get_value("player", "pending_pot", 0))
 	owned_boards = _cfg.get_value("shop", "owned_boards", ["classic"])
 	owned_strikers = _cfg.get_value("shop", "owned_strikers", ["classic"])
 	equipped_board = String(_cfg.get_value("shop", "equipped_board", "classic"))
@@ -144,6 +152,9 @@ func save() -> void:
 	_cfg.set_value("player", "online_wins", online_wins)
 	_cfg.set_value("player", "tour_wins", tour_wins)
 	_cfg.set_value("player", "queens_covered", queens_covered)
+	_cfg.set_value("player", "win_streak", win_streak)
+	_cfg.set_value("player", "total_coins_pocketed", total_coins_pocketed)
+	_cfg.set_value("player", "pending_pot", pending_pot)
 	_cfg.set_value("shop", "owned_boards", owned_boards)
 	_cfg.set_value("shop", "owned_strikers", owned_strikers)
 	_cfg.set_value("shop", "equipped_board", equipped_board)

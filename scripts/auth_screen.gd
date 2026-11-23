@@ -77,6 +77,7 @@ var _paste_row: VBoxContainer
 var _recovery_row: VBoxContainer # v10: RETRY + help, shown after 60 s pending
 var _recovery_shown := false
 var _pending_gmail := ""
+var _pending_allow_create := false # the pending code was sent from the REGISTER tab (verify may create the cloud profile) or SIGN IN (must already exist) — tied to how the code was sent, not to the tab showing now
 var _busy := false
 var _google_pending := false
 var _resend_timer: Timer
@@ -424,15 +425,12 @@ func _set_mode(mode: String) -> void:
 	_mode = mode
 	_set_message(_error_label, "")
 	_set_message(_info_label, "")
-	_code_row.visible = false
-	_code_edit.text = ""
-	_pending_gmail = ""
-	_resend_timer.stop()
-	_resend_cooldown = 0
-	_resend_button.disabled = false
-	_resend_button.text = "RESEND CODE"
+	# L5: switching tabs must NOT discard a pending code — the code row,
+	# the pending Gmail, the resend cooldown and the allow-create flag
+	# all survive the switch, so a code sent on one tab can still be
+	# verified on the other. Only the tab-specific bits change.
 	_name_edit.visible = mode == "register"
-	_verify_later_button.visible = false
+	_verify_later_button.visible = mode == "register" and _code_row.visible and _pending_allow_create
 	if mode == "register":
 		_action_button.text = "REGISTER & PLAY"
 	else:
@@ -496,6 +494,7 @@ func _on_action_pressed() -> void:
 		# Cloud is configured: offer the Gmail code now (verification
 		# proves the Gmail, so a later reinstall restores for sure).
 		_pending_gmail = _gmail_edit.text.strip_edges().to_lower()
+		_pending_allow_create = true # first verification may create the cloud profile
 		var sent := await Accounts.request_login_code(_pending_gmail)
 		if bool(sent.get("ok", false)):
 			_set_message(_info_label, "We sent a 6-digit code to %s — enter it below to verify your Gmail." % _pending_gmail)
@@ -513,6 +512,7 @@ func _on_action_pressed() -> void:
 			_set_message(_error_label, String(sent2.get("error", "Could not send the code.")))
 			return
 		_pending_gmail = _gmail_edit.text.strip_edges().to_lower()
+		_pending_allow_create = false # sign-in never creates a profile
 		_set_message(_info_label, "We sent a 6-digit code to %s — enter it below." % _pending_gmail)
 		_code_row.visible = true
 		_verify_later_button.visible = false
@@ -524,7 +524,10 @@ func _on_verify_code_pressed() -> void:
 		return
 	_set_message(_error_label, "")
 	_busy = true
-	var res := await Accounts.verify_code_and_login(_pending_gmail, _code_edit.text, _mode == "register")
+	# L5: allow_create follows how the pending code was SENT (register
+	# vs sign-in), not the tab showing now — the player may have
+	# switched tabs while the code was in flight.
+	var res := await Accounts.verify_code_and_login(_pending_gmail, _code_edit.text, _pending_allow_create)
 	_busy = false
 	if not bool(res.get("ok", false)):
 		_set_message(_error_label, String(res.get("error", "Wrong code — try again.")))

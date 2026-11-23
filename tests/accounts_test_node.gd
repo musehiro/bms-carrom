@@ -22,6 +22,9 @@ func _ready() -> void:
 	_test_accounts_uuid()
 	_test_friends_groups()
 	_test_friends_expiry()
+	_test_accounts_local_profile_row()
+	_test_accounts_sign_out_and_reregister()
+	_test_supabase_bad_config()
 	print("=== %d passed, %d failed ===" % [_passed, _failed])
 	for f in _failures:
 		print("FAIL: ", f)
@@ -98,3 +101,114 @@ func _test_friends_expiry() -> void:
 	_check("v7 fr: missing timestamp never expires (unknown)", not Friends.is_expired({}))
 	var age: int = Friends.invite_age_seconds(fresh)
 	_check("v7 fr: age is about 3600 s", age >= 3500 and age <= 3700)
+
+func _test_accounts_local_profile_row() -> void:
+	# F6: the local row's updated_at is an ISO string in the same shape
+	# as the cloud's — never the old "YYYY-MM-DD HH:MM:SS" form that
+	# always lost to the cloud's "T" form on the same day.
+	# Reset ALL progress fields first: the save file may hold leftovers
+	# from earlier test runs, and the "fresh defaults" check below must
+	# start from real defaults, not whatever was on disk.
+	Save.account_synced_at = 0
+	Save.coins = 1000
+	Save.xp = 0
+	Save.matches_played = 0
+	Save.matches_won = 0
+	Save.solo_wins = 0
+	Save.online_wins = 0
+	Save.tour_wins = 0
+	Save.queens_covered = 0
+	Save.owned_boards = ["classic"]
+	Save.owned_strikers = ["classic"]
+	Save.equipped_board = "classic"
+	Save.equipped_striker = "classic"
+	Save.coins = 1500 # real progress, never synced
+	Save.save()
+	var row: Dictionary = Accounts.local_profile_row()
+	var stamp := String(row.get("updated_at", ""))
+	_check("v10 acct: local row carries an ISO updated_at", stamp.contains("T") and stamp.ends_with("+00:00"), stamp)
+	_check("v10 acct: local row keeps the local coins", int(row.get("coins", 0)) == 1500)
+	# Synced just now and nothing saved since -> no stamp (cloud wins).
+	Save.account_synced_at = int(Time.get_unix_time_from_system())
+	Save.save()
+	var row2: Dictionary = Accounts.local_profile_row()
+	_check("v10 acct: unchanged-since-sync local row has no stamp", String(row2.get("updated_at", "")) == "")
+	# Same-day, later local stamp beats the cloud row — the exact F6
+	# regression (the old space-vs-T comparison made this always lose).
+	var local := {"coins": 1200, "updated_at": "2026-11-22T15:00:00+00:00"}
+	var cloud := {"coins": 900, "updated_at": "2026-11-22T12:00:00+00:00"}
+	_check("v10 acct: same-day newer local row wins", int(Accounts.resolve_profile(local, cloud).get("coins", 0)) == 1200)
+	# Fresh-install defaults, never synced -> no stamp: a reinstall
+	# must restore the cloud progress, not overwrite it with the
+	# 1,000 starting coins.
+	Save.account_synced_at = 0
+	Save.coins = 1000
+	Save.xp = 0
+	Save.matches_played = 0
+	Save.matches_won = 0
+	Save.online_wins = 0
+	Save.tour_wins = 0
+	Save.queens_covered = 0
+	Save.owned_boards = ["classic"]
+	Save.owned_strikers = ["classic"]
+	Save.save()
+	var row3: Dictionary = Accounts.local_profile_row()
+	_check("v10 acct: fresh-default local row has no stamp", String(row3.get("updated_at", "")) == "")
+
+func _test_accounts_sign_out_and_reregister() -> void:
+	# F7: seed a rich verified account, then prove register-over-it is
+	# refused and sign-out resets everything to a fresh install.
+	Save.player_name = "Rich Player"
+	Save.account_gmail = "rich@gmail.com"
+	Save.account_id = "user-rich"
+	Save.account_verified = true
+	Save.account_synced_at = int(Time.get_unix_time_from_system())
+	Save.coins = 5000
+	Save.xp = 2500
+	Save.matches_played = 10
+	Save.matches_won = 6
+	Save.online_wins = 3
+	Save.queens_covered = 2
+	Save.owned_boards = ["classic", "bms"]
+	Save.owned_strikers = ["classic", "gold"]
+	Save.equipped_board = "bms"
+	Save.equipped_striker = "gold"
+	Save.daily_streak = 4
+	Save.ad_count_today = 3
+	Save.aim_assist_until = int(Time.get_unix_time_from_system()) + 3600
+	Save.save()
+	var refused: Dictionary = Accounts.register_player("Someone Else", "other@gmail.com")
+	_check("v10 acct: register over a verified account is refused", not bool(refused.get("ok", false)))
+	_check("v10 acct: refused register keeps the old account", Save.account_gmail == "rich@gmail.com" and Save.coins == 5000)
+	Accounts.sign_out()
+	_check("v10 acct: sign out clears the gmail + verified flag", not Accounts.has_account() and not Accounts.is_verified())
+	_check("v10 acct: sign out resets coins to starting 1000", Save.coins == 1000)
+	_check("v10 acct: sign out resets xp + stats", Save.xp == 0 and Save.matches_played == 0 and Save.matches_won == 0 and Save.online_wins == 0 and Save.queens_covered == 0)
+	_check("v10 acct: sign out resets shop to classic only", (Save.owned_boards as Array) == ["classic"] and (Save.owned_strikers as Array) == ["classic"] and Save.equipped_board == "classic" and Save.equipped_striker == "classic")
+	_check("v10 acct: sign out resets the name to Player", Save.player_name == "Player")
+	_check("v10 acct: sign out resets daily + ads state", Save.daily_streak == 0 and Save.ad_count_today == 0 and Save.aim_assist_until == 0)
+	# After sign-out, registering works again.
+	var ok: Dictionary = Accounts.register_player("New Player", "new@gmail.com")
+	_check("v10 acct: register works after sign-out", bool(ok.get("ok", false)) and Save.account_gmail == "new@gmail.com")
+	# Leave a clean, signed-out state behind (same as a fresh install).
+	Accounts.sign_out()
+
+func _test_supabase_bad_config() -> void:
+	# L8: a malformed backend_config.json falls back to local-only with
+	# no script error (JSON.parse_string returns null on bad JSON, and
+	# a JSON array is valid JSON but not a config object).
+	var bad_path := "user://test_bad_config.json"
+	var f := FileAccess.open(bad_path, FileAccess.WRITE)
+	f.store_string("{not json,,,")
+	f.close()
+	Supabase.load_config(bad_path)
+	_check("v10 supa: malformed config -> not configured, no crash", not Supabase.configured)
+	var f2 := FileAccess.open(bad_path, FileAccess.WRITE)
+	f2.store_string("[1, 2, 3]")
+	f2.close()
+	Supabase.load_config(bad_path)
+	_check("v10 supa: JSON array config -> not configured, no crash", not Supabase.configured)
+	# Restore the real config.
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(bad_path))
+	Supabase.load_config()
+	_check("v10 supa: real config reloads after the bad file", Supabase.configured)

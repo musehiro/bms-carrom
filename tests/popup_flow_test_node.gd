@@ -16,6 +16,9 @@ extends Node
 ##   F4: real tap on ONLINE opens the stake picker; quick 100 + FIND
 ##      OPPONENT starts the search popup (with the 12 s BOT fallback
 ##      visible after fast-forward)
+##   L3: the home ONLINE tile also opens the stake picker and the
+##      2P/4P choice — before the fix it jumped straight to 2-player
+##      matchmaking with no player-count choice.
 ## Diagnostics: prints button rects, mouse_filters, the control under the
 ## touch point (gui_get_hovered_control), and the popup subtree.
 ## Run headless: godot --headless --path . res://tests/popup_flow_test.tscn
@@ -236,6 +239,31 @@ func _run() -> void:
 				await _tap(_center(bot_btn))
 				print("INFO: after BOT tap: match=", _main._match)
 				_check("F4: BOT fallback starts a practice match", _main._match != null)
+	# --- L3: home ONLINE tile — stake picker, then the 2P/4P choice
+	# (same as PLAY → ONLINE; before the fix it went straight to
+	# 2-player matchmaking) ---
+	_main._show_home()
+	await _frames(5)
+	home = _main._home
+	var online_tile := _find_button(home, "ONLINE")
+	_check("L3: home ONLINE tile exists", online_tile != null)
+	if online_tile != null:
+		await _tap(_center(online_tile))
+		var quick100b := _find_button(_main, "100")
+		_check("L3: home ONLINE opens the stake picker (100)", quick100b != null)
+		if quick100b != null:
+			await _tap(_center(quick100b))
+			var find_btn2 := _find_button(_main, "FIND OPPONENT")
+			_check("L3: home stake picker has FIND OPPONENT", find_btn2 != null)
+			if find_btn2 != null:
+				await _tap(_center(find_btn2))
+				var two_btn2 := _find_button(_main, "2 PLAYERS")
+				var four_btn2 := _find_button(_main, "4 PLAYERS")
+				_check("L3: home ONLINE offers the 2P/4P choice", two_btn2 != null and four_btn2 != null)
+				if two_btn2 != null:
+					await _tap(_center(two_btn2))
+					_check("L3: 2 PLAYERS from home starts the search popup", _main._searching != null and _main._searching_active)
+					_check("L3: search stake is 100", _main._search_stake == 100)
 	_finish()
 
 func _finish() -> void:

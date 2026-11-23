@@ -175,6 +175,12 @@ func is_google_pending() -> bool:
 func is_return_pending() -> bool:
 	return _google_pending
 
+## Test helper: the PKCE verifier of the pending browser return ("" when
+## none). Lets tests prove a resend reuses the verifier (L5) instead of
+## minting a fresh one that would kill the earlier magic link.
+func pending_return_verifier() -> String:
+	return _loopback_verifier
+
 ## Seconds since the pending browser return started. -1 when nothing is
 ## pending; 999 when the return was resumed after a cold start (the
 ## start time is unknown — the browser trip already happened, so the
@@ -286,6 +292,13 @@ func register_player(raw_name: String, raw_gmail: String) -> Dictionary:
 		return {"ok": false, "error": gmail_err, "cloud": false}
 	var display_name := raw_name.strip_edges()
 	var gmail := raw_gmail.strip_edges().to_lower()
+	# F7: never silently overwrite an existing VERIFIED account — a new
+	# registration would inherit the old player's coins, level and shop
+	# and then upload them as the new account's cloud profile. The
+	# player must sign out first (which resets local progress), or sign
+	# in with the existing Gmail instead.
+	if has_account() and is_verified():
+		return {"ok": false, "error": "You're already signed in as %s — sign out first to register a different account." % Save.account_gmail, "cloud": false}
 	Save.player_name = display_name
 	Save.account_gmail = gmail
 	Save.account_id = generate_uuid()
@@ -345,11 +358,28 @@ func request_login_code(gmail: String) -> Dictionary:
 		return {"ok": false, "error": gmail_err}
 	if not Supabase.configured:
 		return {"ok": false, "error": "Sign-in with Gmail is not connected yet — register on this device for now."}
-	var otp_verifier := Supabase.random_verifier()
+	var otp_verifier := ""
+	if _google_pending and _return_kind == "otp_link":
+		# L5 (resend): reuse the pending OTP-link verifier. The code
+		# already emailed carries a PKCE challenge for THIS verifier —
+		# sending the resend with a fresh verifier would silently kill
+		# the earlier email's "Sign in" link (its code exchange would
+		# fail). Both emails' links stay usable.
+		otp_verifier = _loopback_verifier
+	else:
+		otp_verifier = Supabase.random_verifier()
 	var res := await Supabase.send_otp(gmail.strip_edges().to_lower(),
 		Supabase.LOOPBACK_REDIRECT, Supabase.pkce_challenge(otp_verifier))
 	if bool(res.get("ok", false)):
-		if not _google_pending:
+		if _google_pending and _return_kind == "otp_link":
+			# Same return, still in flight: only extend its deadline
+			# — do NOT restart the listener (that would reset the
+			# start time, drop the in-flight verifier and delete a
+			# callback file that may just have arrived).
+			_google_deadline = Time.get_unix_time_from_system() + 300.0
+			Save.pending_return_deadline = int(_google_deadline)
+			Save.save()
+		elif not _google_pending:
 			_start_return_listener("otp_link", otp_verifier)
 		otp_sent.emit(gmail.strip_edges().to_lower())
 		return {"ok": true, "error": ""}
@@ -365,6 +395,10 @@ func request_login_code(gmail: String) -> Dictionary:
 func verify_code_and_login(gmail: String, code: String, allow_create: bool = false) -> Dictionary:
 	var g := gmail.strip_edges().to_lower()
 	var c := code.strip_edges()
+	# F6: capture the local profile row FIRST — _end_google_pending()
+	# below saves the file, which would make the local profile look
+	# brand-new and always win the last-write-wins comparison.
+	var local_row := local_profile_row()
 	if c.length() != OTP_CODE_LEN or not c.is_valid_int():
 		return {"ok": false, "error": "Enter the 6-digit code from your Gmail.", "restored": false}
 	if not Supabase.configured:
@@ -393,15 +427,16 @@ func verify_code_and_login(gmail: String, code: String, allow_create: bool = fal
 		if bool(up.get("ok", false)):
 			return {"ok": true, "error": "", "restored": false}
 		return {"ok": true, "error": "Verified — cloud sync will retry.", "restored": false}
-	# Last-write-wins: if this device's local profile is newer than the
-	# cloud row (played offline while the cloud was unreachable), keep
-	# the local progress and push it to the cloud instead of overwriting
-	# it with the older cloud row.
-	var local_at := ""
-	if Save.account_synced_at > 0:
-		local_at = Time.get_datetime_string_from_unix_time(Save.account_synced_at, true)
-	var cloud_at := String(row.get("updated_at", ""))
-	if local_at != "" and cloud_at != "" and local_at > cloud_at:
+	# F6: last-write-wins via resolve_profile (accounts.gd:447-455) —
+	# the local row carries its real last-modified time as an ISO
+	# updated_at (see local_profile_row), so both sides compare
+	# like-for-like instead of "YYYY-MM-DD HH:MM:SS" against
+	# "YYYY-MM-DDTHH:MM:SS+00:00" (the old comparison made same-day
+	# newer local progress always lose). Equality is a safe identity
+	# test here: the cloud row always carries created_at (and the
+	# server id), so it can only equal the local row when the two are
+	# content-identical — in which case either branch is correct.
+	if resolve_profile(local_row, row) == local_row:
 		Save.account_verified = true
 		Save.save()
 		await _cloud_upsert()
@@ -453,6 +488,55 @@ static func resolve_profile(local_row: Dictionary, cloud_row: Dictionary) -> Dic
 	if cloud_at == "":
 		return local_row
 	return cloud_row if cloud_at >= local_at else local_row
+
+## The local profile as a Supabase-shaped row, with updated_at = the
+## local profile's REAL last-modified time as an ISO string (F6) — or
+## no updated_at at all when the local profile carries nothing newer
+## than the cloud (see _local_modified_iso). Callers must capture this
+## BEFORE any save in the login flow: a save during login would bump
+## the file's mtime and make the local profile look brand-new.
+static func local_profile_row() -> Dictionary:
+	var row := Supabase.profile_row(Save.account_id, Save.account_gmail, Save.player_name,
+		Save.coins, Save.xp, Save.matches_played, Save.matches_won, Save.online_wins,
+		Save.queens_covered, Save.owned_boards, Save.owned_strikers,
+		Save.equipped_board, Save.equipped_striker)
+	var stamp := _local_modified_iso()
+	if stamp != "":
+		row["updated_at"] = stamp
+	return row
+
+## ISO last-modified time of the local profile, or "" when the local
+## profile has nothing newer than the cloud (so resolve_profile lets
+## the cloud row win). Every coin/XP/stat/shop change saves the file
+## immediately, so the save file's mtime IS the local profile's
+## last-modified time — with two guards:
+## - synced before: the sync itself saves the file, so a mtime within
+##   1 s of the last sync is the sync's own save, not new progress;
+##   only a later save means the player played offline since syncing.
+## - never synced: a fresh install's save file is always "new", so
+##   mtime alone would let 1,000 starting coins overwrite real cloud
+##   progress on a reinstall — only count it when the local profile
+##   actually holds progress beyond the fresh-install defaults.
+static func _local_modified_iso() -> String:
+	var mtime := FileAccess.get_modified_time(Save.SAVE_PATH)
+	if mtime <= 0:
+		return ""
+	if Save.account_synced_at > 0:
+		if mtime <= Save.account_synced_at + 1:
+			return ""
+	elif not _local_has_progress():
+		return ""
+	return Time.get_datetime_string_from_unix_time(mtime, true).replace(" ", "T") + "+00:00"
+
+## True when the local profile holds anything beyond a fresh install
+## (non-starting coins, any XP/matches, or shop items beyond classic).
+static func _local_has_progress() -> bool:
+	return Save.coins != Save.STARTING_COINS or Save.xp > 0 \
+		or Save.matches_played > 0 or Save.matches_won > 0 \
+		or Save.online_wins > 0 or Save.tour_wins > 0 \
+		or Save.queens_covered > 0 \
+		or (Save.owned_boards as Array).size() > 1 \
+		or (Save.owned_strikers as Array).size() > 1
 
 # --------------------------------------------------------- Google one-tap
 
@@ -548,6 +632,9 @@ func _finish_return(code: String) -> void:
 	_loopback_done = true
 	var kind := _return_kind
 	var verifier := _loopback_verifier
+	# F6: capture the local profile row BEFORE _end_google_pending()
+	# saves (that save would make the local profile look brand-new).
+	var local_row := local_profile_row()
 	_end_google_pending()
 	var res := await Supabase.exchange_pkce_code(code, verifier)
 	if not bool(res.get("ok", false)):
@@ -560,7 +647,7 @@ func _finish_return(code: String) -> void:
 		return
 	var meta: Dictionary = user.get("user_metadata", {})
 	var gname := String(meta.get("full_name", meta.get("name", ""))).strip_edges()
-	await _complete_sign_in(gmail, gname, kind)
+	await _complete_sign_in(gmail, gname, kind, local_row)
 
 ## Finish a pending browser return from implicit-flow tokens (a pasted
 ## link with #access_token=...). The user id comes from the token; the
@@ -570,6 +657,9 @@ func _finish_return_with_tokens(tokens: Dictionary) -> void:
 		return
 	_loopback_done = true
 	var kind := _return_kind
+	# F6: capture the local profile row BEFORE _end_google_pending()
+	# saves (that save would make the local profile look brand-new).
+	var local_row := local_profile_row()
 	_end_google_pending()
 	if not Supabase.set_session_from_tokens(String(tokens.get("access_token", "")), String(tokens.get("refresh_token", ""))):
 		_emit_return_finished(false, "That sign-in link could not be read — try again, or register with your Gmail + code.", kind)
@@ -580,11 +670,15 @@ func _finish_return_with_tokens(tokens: Dictionary) -> void:
 	if gmail == "":
 		_emit_return_finished(false, "Sign-in did not return an email address.", kind)
 		return
-	await _complete_sign_in(gmail, "", kind)
+	await _complete_sign_in(gmail, "", kind, local_row)
 
 ## Shared tail of every browser-return sign-in: claim or restore the
 ## cloud profile for the Gmail, then emit the finished signal by kind.
-func _complete_sign_in(gmail: String, provider_name: String, kind: String) -> void:
+## `local_row` is the local profile captured BEFORE the return finished
+## (any save since would fake a brand-new local profile) — the same
+## last-write-wins rule as the OTP login path (F6): a newer local
+## profile is kept and pushed, otherwise the cloud row is applied.
+func _complete_sign_in(gmail: String, provider_name: String, kind: String, local_row: Dictionary) -> void:
 	# Use the provider's display name when the player has not set one
 	# of their own yet (fresh install: the default "Player").
 	if provider_name != "" and (Save.player_name == "" or Save.player_name == "Player"):
@@ -594,7 +688,13 @@ func _complete_sign_in(gmail: String, provider_name: String, kind: String) -> vo
 	if bool(got.get("ok", false)):
 		var row: Dictionary = got.get("data", {})
 		if not row.is_empty():
-			apply_cloud_profile(row, true)
+			if resolve_profile(local_row, row) == local_row:
+				Save.account_gmail = gmail
+				Save.account_verified = true
+				Save.save()
+				await _cloud_upsert()
+			else:
+				apply_cloud_profile(row, true)
 			_emit_return_finished(true, "", kind)
 			return
 	# First sign-in with this Gmail: keep the local name/coins, claim it.
@@ -609,15 +709,42 @@ func _complete_sign_in(gmail: String, provider_name: String, kind: String) -> vo
 
 # ---------------------------------------------------------------- sign out
 
-## Sign out: clears the local account and the Supabase session. The
-## game shows the register/login screen again (registration is
-## mandatory — there is no guest mode to fall back to).
+## Sign out: clears the local account AND all local progress, so the
+## next player starts from a fresh install (F7 — the old version kept
+## coins, XP, stats, shop ownership and the player name, and the next
+## registration inherited them and uploaded them as its own cloud
+## profile). Device preferences (aim guide, sound, server host) are
+## NOT progress and are kept. The cloud profile is untouched — the
+## player can sign back in with the same Gmail to restore it.
 func sign_out() -> void:
+	_end_google_pending()
 	Save.account_gmail = ""
 	Save.account_id = ""
 	Save.account_verified = false
 	Save.account_created_at = ""
 	Save.account_synced_at = 0
+	Save.player_name = "Player"
+	Save.coins = Save.STARTING_COINS
+	Save.xp = 0
+	Save.matches_played = 0
+	Save.matches_won = 0
+	Save.solo_wins = 0
+	Save.online_wins = 0
+	Save.tour_wins = 0
+	Save.queens_covered = 0
+	Save.owned_boards = ["classic"]
+	Save.owned_strikers = ["classic"]
+	Save.equipped_board = "classic"
+	Save.equipped_striker = "classic"
+	Save.daily_streak = 0
+	Save.last_daily_claim = ""
+	Save.ad_count_today = 0
+	Save.ad_coins_today = 0
+	Save.ad_date = ""
+	Save.aim_assist_until = 0
+	Save.aim_assist_ads_progress = 0
+	Save.interstitial_counter = 0
+	Save.pending_pot = 0 # F9: a win pot held on the win screen belongs to this player
 	Save.save()
 	Supabase.access_token = ""
 	Supabase.user_id = ""

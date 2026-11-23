@@ -104,6 +104,17 @@ var _opp_panel: PanelContainer
 var _my_panel: PanelContainer
 
 var _breaker_override := -1
+var _ready_done := false # F2 layer 2: true once _ready() has run — if
+	# setup()/setup_4p() runs after that, the rules state/HUD/breaker
+	# must be re-derived from the real config (see _rederive_after_setup).
+
+## The breaker for this match: the server-assigned seat when setup()
+## supplied one, else a local roll. The roll covers every seat in
+## 4p (the old `randi() % 2` could never pick seats 2/3).
+func _pick_breaker() -> int:
+	if _breaker_override >= 0:
+		return _breaker_override
+	return randi() % player_count
 
 func setup(p_mode: String, p_difficulty: int, p_table: int, p_opp_name: String, p_opp_level: int, p_net: NetClient, p_breaker: int = -1, p_your_stake: int = 0, p_opp_stake: int = 0, p_practice: bool = false) -> void:
 	mode = p_mode
@@ -120,7 +131,13 @@ func setup(p_mode: String, p_difficulty: int, p_table: int, p_opp_name: String, 
 	# Refresh the HUD now that the opponent name/level are known —
 	# _ready() built the panels with the default "Computer" before
 	# setup() ran (v8 fix: the tour panel showed "Computer Lv 1").
-	_update_hud()
+	# F2 layer 2: if _ready() already ran, re-derive FIRST — _update_hud
+	# reads team_of() off rules_state, so it must never run with a
+	# stale 2-player state under a 4-player config (pocketed[2] crash).
+	if _ready_done:
+		_rederive_after_setup()
+	else:
+		_update_hud()
 
 ## 4-player doubles setup (v6): p_players is seat-ordered
 ## [{name, level, stake, seat}]; p_your_seat is the local player's seat;
@@ -141,7 +158,52 @@ func setup_4p(p_players: Array, p_your_seat: int, p_breaker_seat: int, p_net: Ne
 	opponent_name = String(p_players[(p_your_seat + 2) % 4].get("name", "Partner")) + " (partner)"
 	opponent_level = int(p_players[(p_your_seat + 2) % 4].get("level", 1))
 	_lock_entry_stake()
+	# F2 layer 2: if _ready() already ran, re-derive FIRST (it ends
+	# with _update_hud) — see setup() for why the order matters.
+	if _ready_done:
+		_rederive_after_setup()
+	else:
+		_update_hud()
+
+## F2 layer 2 / F3: setup() ran AFTER _ready(). _ready() already built
+## a rules state, HUD and breaker roll from the DEFAULTS (2 players,
+## solo mode, locally rolled breaker) — re-derive all three from the
+## real config now, so a call site that forgot the setup-before-
+## add_child order cannot silently ship 2-player rules or a
+## client-rolled breaker. Safe to call at construction time only:
+## no shot has been taken yet, so nothing is lost by rebuilding.
+func _rederive_after_setup() -> void:
+	var breaker := _pick_breaker()
+	rules_state = CarromRules.fresh_state(breaker, player_count)
+	_place_striker_for_turn()
+	turn_time_max = _shot_time()
+	turn_time_left = turn_time_max
+	_show_breaker_message(breaker)
+	_connect_net_signals()
 	_update_hud()
+
+## Connect the net signals (guarded: _ready() already connects them
+## when setup() ran first, and a double-connect would deliver every
+## remote shot twice).
+func _connect_net_signals() -> void:
+	if net == null:
+		return
+	if not net.shot_received.is_connected(_on_remote_shot):
+		net.shot_received.connect(_on_remote_shot)
+	if not net.state_received.is_connected(_on_remote_state):
+		net.state_received.connect(_on_remote_state)
+	if not net.opponent_left.is_connected(_on_opponent_left):
+		net.opponent_left.connect(_on_opponent_left)
+
+## The "X breaks" banner (4p: the breaker seat's name + their team
+## plays white; 2p: breaker vs opponent). Shown by _ready() and again
+## by _rederive_after_setup() when the real breaker is only known late.
+func _show_breaker_message(breaker: int) -> void:
+	if player_count == 4:
+		var bname := String(players4[breaker].get("name", "Player")) if breaker < players4.size() else "Player"
+		_show_message("%s breaks — their team plays WHITE" % bname, 2.5)
+	else:
+		_show_message("Breaker plays WHITE" if breaker == 0 else "Opponent breaks — plays WHITE", 2.5)
 
 ## Lock (deduct) the entry stake now that mode + stakes are known.
 ## Called from setup()/setup_4p() — NOT from _ready(): _ready runs at
@@ -149,11 +211,12 @@ func setup_4p(p_players: Array, p_your_seat: int, p_breaker_seat: int, p_net: Ne
 ## is still "" and the stake 0 and the deduction never fired. That made
 ## every staked match free — the winner collected the full pot without
 ## ever paying in (v8 fix, caught by the tour test).
+## L6: entry_paid is set ONLY when the spend succeeds — marking it paid
+## before spending let a failed spend play a staked match for free.
 func _lock_entry_stake() -> void:
 	if _is_staked_mode() and not entry_paid:
-		entry_paid = true
-		if your_stake > 0:
-			Save.spend_coins(your_stake)
+		if your_stake <= 0 or Save.spend_coins(your_stake):
+			entry_paid = true
 
 ## v8: a match against a local computer opponent (solo practice or a
 ## World Tour bot). Both run the AI locally; only the stakes differ.
@@ -178,22 +241,30 @@ func _ready() -> void:
 	move_child(board_view, 0)
 	pieces = CarromPhysics.setup_pieces()
 	_striker = _find_piece("striker")
-	var breaker := _breaker_override if _breaker_override >= 0 else randi() % 2
+	# F3: the breaker comes from setup() (server-assigned) when it ran
+	# before add_child; only solo/tour/BOT matches roll locally.
+	var breaker := _pick_breaker()
 	rules_state = CarromRules.fresh_state(breaker, player_count)
 	board_view.pieces = pieces
 	_place_striker_for_turn()
 	turn_time_max = _shot_time()
 	turn_time_left = turn_time_max
 	_update_hud()
-	if player_count == 4:
-		var bname := String(players4[breaker].get("name", "Player")) if breaker < players4.size() else "Player"
-		_show_message("%s breaks — their team plays WHITE" % bname, 2.5)
-	else:
-		_show_message("Breaker plays WHITE" if breaker == 0 else "Opponent breaks — plays WHITE", 2.5)
-	if net:
-		net.shot_received.connect(_on_remote_shot)
-		net.state_received.connect(_on_remote_state)
-		net.opponent_left.connect(_on_opponent_left)
+	_show_breaker_message(breaker)
+	_connect_net_signals()
+	_ready_done = true
+	# F11: a fresh match starts with no missed breaks.
+	break_misses = 0
+	# F9: recover a win pot held when the app was killed on the win
+	# screen — the pot was persisted to Save, so it is never lost.
+	# (Recovered here, at the next match start; the home screen does
+	# not credit it, so a player who never plays again keeps it in
+	# Save.pending_pot until their next match.)
+	if Save.pending_pot > 0:
+		var recovered := Save.pending_pot
+		Save.pending_pot = 0
+		Save.add_coins(recovered)
+		_show_message("Recovered ◉ %d winnings from your last match!" % recovered, 3.0)
 
 func _shot_time() -> float:
 	var t := ShopData.shot_time(Save.equipped_striker)
@@ -418,12 +489,16 @@ func _reactivate(kind: String, near: Vector2) -> void:
 			p["pos"] = _free_spot_near(near)
 			return
 
-func _resolve_shot() -> void:
+## Resolve one completed stroke. from_timeout = true when the turn timer
+## expired with no shot taken — a timeout is NOT a shot (F11a/F4).
+func _resolve_shot(from_timeout: bool = false) -> void:
 	var kinds: Array = []
 	for p in _shot_pocketed:
 		kinds.append(p["kind"])
-	# Break contact check: did the striker touch any coin?
-	if is_break:
+	# Break contact check: did the striker touch any coin? A turn
+	# timeout never counts as a missed break — no shot was taken (F11a).
+	var break_passed := false
+	if is_break and not from_timeout:
 		var touched := false
 		for i in range(pieces.size()):
 			var p: Dictionary = pieces[i]
@@ -433,11 +508,19 @@ func _resolve_shot() -> void:
 					break
 		if not touched and kinds.is_empty() and not _shot_striker_pocketed:
 			break_misses += 1
-			_show_message("Break missed — striker touched nothing (%d/3)" % break_misses, 2.0)
 			if break_misses >= 3:
-				_show_message("3 missed breaks — opponent breaks", 2.5)
+				# 3 missed breaks: the break passes to the opponent and
+				# the break phase ends (is_break clears) — the counter
+				# resets so it can never climb to (4/3), (5/3)… (F11b).
+				break_misses = 0
+				is_break = false
+				break_passed = true
+				_show_message("3 missed breaks — break over, opponent's turn", 2.5)
+			else:
+				_show_message("Break missed — striker touched nothing (%d/3)" % break_misses, 2.0)
 		else:
 			is_break = false
+			break_misses = 0
 	var shooter: int = rules_state["turn"]
 	var res: Dictionary = CarromRules.resolve_shot(rules_state, kinds, _shot_striker_pocketed)
 	_apply_events(res["events"], shooter)
@@ -445,11 +528,23 @@ func _resolve_shot() -> void:
 	if bool(rules_state["over"]):
 		_show_result()
 		return
+	if break_passed:
+		# The breaker really changes: force the turn to the next seat
+		# even if this stroke's foul rules would have kept it.
+		rules_state["turn"] = (shooter + 1) % int(rules_state.get("players", player_count))
 	phase = "place"
 	_place_striker_for_turn()
 	turn_time_max = _shot_time()
 	turn_time_left = turn_time_max
-	timeouts_in_a_row = 0
+	# Timeout counters reset only on a REAL shot (F4): a timeout resolve
+	# must leave them alone, so two CONSECUTIVE timeouts can reach 2 and
+	# forfeit. A real shot by the remote player resets their counter, so
+	# only consecutive remote timeouts forfeit the opponent.
+	if not from_timeout:
+		if shooter == local_seat:
+			timeouts_in_a_row = 0
+		else:
+			remote_timeouts = 0
 	if net:
 		net.send_state(_serialize_state())
 
@@ -465,6 +560,9 @@ func _apply_events(events: Array, shooter: int) -> void:
 				if shooter == local_seat:
 					local_covered_queen = true
 					Save.queens_covered += 1
+					# Play Games: unlock "Pocket the Queen" now (native
+					# toast during the match; no-ops while signed out).
+					PlayGames.report_queen_covered()
 			"queen_early":
 				_show_message("Queen too early — back to the centre.", 2.5)
 				_reactivate("queen", CarromPhysics.BOARD_CENTER)
@@ -502,7 +600,12 @@ func _on_remote_shot(data: Dictionary) -> void:
 	if data.has("sy"):
 		_striker["pos"] = Vector2(float(data["sx"]), float(data["sy"]))
 	else:
-		_striker["pos"] = Vector2(float(data["sx"]), CarromPhysics.baseline_y(1 - local_seat))
+		# L7: the shooter's seat travels in the message — use its
+		# full baseline (left/right seats vary in x, not y). The old
+		# fallback only knew top/bottom, so a seat-2/3 shot landed
+		# on the wrong side of the board.
+		var shooter_seat := int(data.get("seat", 1 - local_seat))
+		_striker["pos"] = CarromPhysics.baseline_pos(clampi(shooter_seat, 0, 3))
 	_shoot(Vector2(float(data["dx"]), float(data["dy"])), float(data["power"]), false)
 
 func _on_remote_state(data: Dictionary) -> void:
@@ -585,11 +688,13 @@ func _tick_timer(delta: float) -> void:
 					rules_state["winner"] = local_seat
 				_show_result()
 				return
-		# Missed shot: resolve an empty stroke.
+		# Missed shot: resolve an empty stroke. This is a timeout, not a
+		# shot — _resolve_shot(true) leaves the timeout counters and the
+		# break-miss count alone (F4, F11a).
 		_shot_pocketed.clear()
 		_shot_striker_pocketed = false
 		phase = "settling"
-		_resolve_shot()
+		_resolve_shot(true)
 
 func _run_ai(delta: float) -> void:
 	if _ai_stage == 0:
@@ -622,6 +727,10 @@ func _show_result() -> void:
 		return
 	result_shown = true
 	phase = "over"
+	# F5: a result must never leave the tree paused (e.g. an opponent
+	# leaving while the pause menu is open) — the result screen runs
+	# unpaused.
+	get_tree().paused = false
 	var winner: int = rules_state["winner"]
 	# A draw is winner < 0. The rules engine never produces one yet (every
 	# board has a winner); the refund path below is implemented + tested
@@ -670,6 +779,10 @@ func _show_result() -> void:
 		_pot_pending = my_share
 		_pot_credited = false
 		_double_ads = 0
+		# F9: persist the held pot — if the app is killed on the win
+		# screen, the next match recovers it from Save.pending_pot.
+		Save.pending_pot = my_share
+		Save.save()
 	elif is_draw:
 		coins_earned = my_share # refund of own stake
 	var xp_earned := Save.XP_PER_MATCH + (Save.XP_PER_WIN if won else 0) + (Save.XP_PER_QUEEN if local_covered_queen else 0)
@@ -680,6 +793,31 @@ func _show_result() -> void:
 		Save.matches_won += 1
 	Save.interstitial_counter += 1
 	Save.save()
+	# Play Games Services: report the finished match — leaderboard score
+	# + achievement triggers. Fire-and-forget: PlayGames no-ops while
+	# signed out / offline / unconfigured, so the result screen never
+	# blocks on it. Win streak + lifetime coins pocketed are tracked
+	# here (Hat-Trick needs consecutive wins; Sharpshooter needs the
+	# lifetime coin total) — no economy change, these are counters only.
+	var my_team := CarromRules.team_of(rules_state, local_seat)
+	var my_coins := int((rules_state["pocketed"] as Array)[my_team])
+	Save.total_coins_pocketed += my_coins
+	if won:
+		Save.win_streak += 1
+	else:
+		Save.win_streak = 0
+	Save.save()
+	PlayGames.report_match_result({
+		"won": won,
+		"matches_played": Save.matches_played,
+		"matches_won": Save.matches_won,
+		"win_streak": Save.win_streak,
+		"coins_pocketed": my_coins,
+		"queen_covered": local_covered_queen,
+		"clean_sweep": won and my_coins >= 9,
+		"total_coins_pocketed": Save.total_coins_pocketed,
+		"score": PlayGames.compute_match_score(my_coins, local_covered_queen, won),
+	})
 	# Interstitial policy: only after every 3rd match.
 	var show_ad := Save.interstitial_counter % AdsConfig.INTERSTITIAL_EVERY_N_MATCHES == 0
 	if won:
@@ -888,6 +1026,7 @@ func _collect_pot_if_pending() -> void:
 		Save.add_coins(_pot_pending)
 		_pot_credited = true
 		_pot_pending = 0
+		Save.pending_pot = 0
 		Save.save()
 
 func _on_collect_pot() -> void:
@@ -945,6 +1084,7 @@ func on_double_ad_watched() -> void:
 		var doubled := _pot_pending * 2
 		_pot_credited = true
 		_pot_pending = 0
+		Save.pending_pot = 0
 		Save.add_coins(doubled)
 		Save.save()
 		if _collect_button:
@@ -978,6 +1118,14 @@ func on_solo_win_ad_watched() -> void:
 func on_solo_win_ad_failed() -> void:
 	if _solo_earn_button:
 		_solo_earn_button.disabled = false
+
+## F8: a failed "double_win" ad must re-enable the DOUBLE button (and
+## the pot-0 EARN button — it is the same _double_button) so the offer
+## is not dead for the rest of the win screen. Called by Main's
+## _on_rewarded_failed("double_win"). Mirror of on_solo_win_ad_failed.
+func on_double_ad_failed() -> void:
+	if _double_button:
+		_double_button.disabled = false
 
 ## Exit paths from the win screen: credit the base pot first if it is
 ## still held, then leave (coins are never lost by closing the screen).
@@ -1179,7 +1327,15 @@ func _build_hud() -> void:
 func _on_pause_pressed() -> void:
 	if phase == "over":
 		return
+	if get_tree().paused:
+		return
+	# F5: actually pause — freezing the tree stops _process (turn timer
+	# + AI) and _physics_process while the menu is open. The popup runs
+	# with PROCESS_MODE_ALWAYS so its buttons still work; every exit
+	# from it unpauses first.
+	get_tree().paused = true
 	var pop: Dictionary = UiKit.popup_window("PAUSED", Vector2(480, 380))
+	pop["dim"].process_mode = Node.PROCESS_MODE_ALWAYS
 	_hud.add_child(pop["dim"])
 	var box: VBoxContainer = pop["box"]
 	var resume := UiKit.gold_button("RESUME", 28)
@@ -1188,33 +1344,106 @@ func _on_pause_pressed() -> void:
 	box.add_child(resume)
 	box.add_child(sound)
 	box.add_child(forfeit)
-	resume.pressed.connect(func() -> void: pop["dim"].queue_free())
+	var close_pause := func() -> void:
+		get_tree().paused = false
+		pop["dim"].queue_free()
+	resume.pressed.connect(close_pause)
 	sound.pressed.connect(func() -> void:
 		Save.sound_on = not Save.sound_on
 		Sfx.set_enabled(Save.sound_on)
 		Save.save()
 		sound.text = "SOUND: ON" if Save.sound_on else "SOUND: OFF")
 	forfeit.pressed.connect(func() -> void:
-		pop["dim"].queue_free()
+		close_pause.call()
 		if mode == "online" and net:
 			net.send_forfeit()
 		rules_state["over"] = true
 		rules_state["winner"] = (local_seat + 1) % player_count
 		_show_result())
-	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
+	pop["close"].pressed.connect(close_pause)
 
 func _show_message(text: String, seconds: float) -> void:
 	_msg_label.text = text
 	_msg_label.visible = true
 	_msg_timer = seconds
 
+## F2 layer 2: create the missing OppRow1/OppRow2 rows when a 4p match
+## was configured after _ready() built a 2-player HUD — the same rows
+## _build_hud creates for 4p, in the same order (OppTop, rows, then
+## the stake line / dots), with the taller 4p panel geometry.
+func _ensure_opp_rows() -> void:
+	var opp_box: VBoxContainer = _opp_panel.get_node("OppBox")
+	for k in range(1, 3):
+		if opp_box.get_node_or_null("OppRow%d" % k) != null:
+			continue
+		var row := HBoxContainer.new()
+		row.name = "OppRow%d" % k
+		var nm := Label.new()
+		nm.name = "OppName%d" % k
+		nm.text = "Player"
+		nm.add_theme_font_size_override("font_size", 20)
+		nm.add_theme_color_override("font_color", UiKit.TEXT)
+		row.add_child(nm)
+		var lv := Label.new()
+		lv.name = "OppLevel%d" % k
+		lv.text = "Lv 1"
+		lv.add_theme_font_size_override("font_size", 18)
+		lv.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
+		row.add_child(lv)
+		opp_box.add_child(row)
+		opp_box.move_child(row, k)
+	_opp_panel.offset_bottom = 168
+	_turn_label.offset_top = 178
+	_timer_bar.offset_top = 218
+	_timer_bar.offset_bottom = 232
+	_assist_chip.offset_top = 238
+
 func _update_hud() -> void:
+	# F2 layer 1: setup()/setup_4p() may run before add_child now, so
+	# this is called before _ready() built the HUD — return early;
+	# _ready() calls _update_hud() again once the panels exist.
+	# (rules_state is also still empty at that point.)
+	if _hud == null or _opp_panel == null:
+		return
 	var my_team := CarromRules.team_of(rules_state, local_seat)
 	var my_color := CarromRules.own_color(rules_state, local_seat)
 	var opp_color := CarromRules.opp_color(rules_state, local_seat)
+	# F10: the stake line is built/updated here, not only in _build_hud —
+	# _ready() runs before setup(), when mode is still "solo", so the
+	# _build_hud stake line never existed for staked matches. setup()
+	# and setup_4p() both call _update_hud(), so the line appears once
+	# the mode and stakes are known, and its text stays current.
+	if _is_staked_mode():
+		# A 0-stake (friendly) match shows NO stake line at all — the
+		# v10 clean-UI rule is never a bare "◉ 0" anywhere (the win
+		# screen test checks this). Only show the line when a real
+		# pot exists.
+		var pot_total := Stakes.pot_4p(stakes4) if player_count == 4 else your_stake + opp_stake
+		var opp_box: VBoxContainer = _opp_panel.get_node("OppBox")
+		var stake_l: Label = opp_box.get_node_or_null("StakeLine")
+		if pot_total <= 0:
+			if stake_l != null:
+				stake_l.queue_free()
+		else:
+			if stake_l == null:
+				stake_l = Label.new()
+				stake_l.name = "StakeLine"
+				stake_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+				stake_l.add_theme_font_size_override("font_size", 18)
+				stake_l.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
+				opp_box.add_child(stake_l)
+				# Keep it above the dots, as _build_hud lays it out.
+				opp_box.move_child(stake_l, _opp_dots.get_index())
+			if player_count == 4:
+				stake_l.text = "Pot ◉ %d — your team's half ◉ %d" % [Stakes.pot_4p(stakes4), Stakes.payout_4p(stakes4, local_seat, "win")]
+			else:
+				stake_l.text = "Your stake ◉ %d  •  Opponent stake ◉ %d" % [your_stake, opp_stake]
 	if player_count == 4:
 		# Top panel lists the three other players in seat order, with
 		# a team tag (PARTNER = my team, OPP = the other team).
+		# F2 layer 2: the rows may not exist if _ready() built a
+		# 2-player HUD (setup ran after add_child) — create them.
+		_ensure_opp_rows()
 		var others: Array = []
 		for s in range(4):
 			if s != local_seat:

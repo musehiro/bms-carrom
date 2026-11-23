@@ -303,7 +303,31 @@ func _run() -> void:
 	await _wait_for_ads(1)
 	_check("solo: ad earned the ladder amount", Save.coins == coins5 + ladder5, "coins=%d expected=%d" % [Save.coins, coins5 + ladder5])
 	_check("solo: earn button disabled after the ad", m6._solo_earn_button != null and m6._solo_earn_button.disabled)
+	# --- Win 6 (F8, main.gd half): a FAILED double ad must not count
+	# toward the double and must not lose the pot. (The button
+	# re-enable itself needs MatchScreen.on_double_ad_failed in
+	# match.gd — assert that there once it lands.)
+	var coins6 := Save.coins
+	Save.interstitial_counter = 0
+	await _force_online_win(50, 50)
+	var m7 = _main._match
+	_check("f8: match exists", m7 != null)
+	if m7 == null:
+		_finish()
+		return
+	_check("f8: pot held (100)", m7._pot_pending == 100)
+	if m7._double_button != null:
+		m7._double_button.pressed.emit()
+		await _frames(2)
+	_check("f8: double button disabled while the ad plays", m7._double_button != null and m7._double_button.disabled)
+	_main._on_rewarded_failed("double_win")
+	await _frames(2)
+	_check("f8: failed double ad does not count as watched", m7._double_ads == 0)
+	_check("f8: pot still held after the failed ad", not m7._pot_credited and m7._pot_pending == 100 and Save.coins == coins6)
 	# Restore the sandbox save so later runs start clean.
+	# F8 leaves a 100-coin pot held (Save.pending_pot); the next run's
+	# match _ready would recover it as +100 coins, so clear it here.
+	Save.pending_pot = 0
 	Save.coins = coins0
 	Save.ad_count_today = ad_count0
 	Save.ad_coins_today = ad_coins0

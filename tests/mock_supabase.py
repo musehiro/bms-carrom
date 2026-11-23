@@ -33,6 +33,11 @@ from urllib.parse import parse_qs, urlparse
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 OTP_CODE = "123456"
+# Second accepted code, with a leading zero: proves the client sends the
+# 6-digit code as a STRING end to end (an int parse would drop the zero
+# and send "12345"). Accepted only for an email that was actually sent
+# a code, same gate as the normal code.
+OTP_CODE_LEADING_ZERO = "012345"
 PKCE_TEST_CODE = "TESTCODE"
 GOOGLE_TEST_EMAIL = "google-user@gmail.com"
 
@@ -213,7 +218,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/auth/v1/verify":
             email = str(body.get("email", "")).strip().lower()
             token = str(body.get("token", ""))
-            if STATE.otps.get(email) != token:
+            # The leading-zero code is accepted only for an email that
+            # was actually sent one (same gate as the normal code).
+            sent = STATE.otps.get(email)
+            if token != sent and not (sent is not None and token == OTP_CODE_LEADING_ZERO):
                 self._json(400, {"msg": "Invalid code — check your Gmail and try again."})
                 return
             uid = STATE.email_to_id.get(email)

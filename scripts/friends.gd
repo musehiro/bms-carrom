@@ -11,8 +11,9 @@ extends Node
 ##   server's invite room (group_id) -> the server starts the match
 ##   when both have joined. Stakes lock only at match start, as in v6.
 ##   DECLINE marks the invite declined; it disappears from the box.
-##   Ignored invites stay pending until they expire (24 h) — they never
-##   start a match on their own.
+##   Ignored invites stay pending until they expire (24 h) — and are
+##   then marked "expired" on the server (L11), so they can never
+##   block a group forever. Expired/cancelled rows fail their group.
 ##
 ## 4-player: the inviter picks up to 3 friends; one group_id covers all
 ##   three invites. The match starts when all three have accepted (the
@@ -110,21 +111,41 @@ func send_invite(to_id: String, to_name: String, stake: int) -> Dictionary:
 
 ## Send a 4-player invite to up to 3 friends (targets: [{id, name}]).
 ## Returns {ok, group_id, error}.
+## L1: every target is validated BEFORE any row is sent, and any rows
+## already sent are rolled back (cancelled) if a later POST fails — so
+## a half-created group can never leave invitees waiting forever.
 func send_group_invite(targets: Array, stake: int) -> Dictionary:
 	if targets.is_empty() or targets.size() > MAX_GROUP_TARGETS:
 		return {"ok": false, "group_id": "", "error": "Pick 1 to 3 friends for a 4-player game."}
 	if not Supabase.configured:
 		return {"ok": false, "group_id": "", "error": "Invites are not connected yet — use NEARBY to play together on the same Wi-Fi."}
-	var group_id := Accounts.generate_uuid()
 	for t in targets:
 		var to_id := String(t.get("id", ""))
+		if to_id == "":
+			return {"ok": false, "group_id": "", "error": "One of the friends has no player id — pick them again."}
 		if to_id == Save.account_id:
 			return {"ok": false, "group_id": "", "error": "You cannot invite yourself."}
+	var group_id := Accounts.generate_uuid()
+	var sent: Array = []
+	for t in targets:
+		var to_id := String(t.get("id", ""))
 		var row := Supabase.invite_row(group_id, Save.account_id, to_id, Save.player_name, String(t.get("name", "")), "4p", stake)
 		var res := await Supabase.send_invite(row)
 		if not bool(res.get("ok", false)):
-			return {"ok": false, "group_id": group_id, "error": String(res.get("error", "Could not send one of the invites."))}
-		_track_outgoing(res.get("data", row), "4p")
+			var rollback_failed := false
+			for s in sent:
+				var cancel := await Supabase.update_invite(String(s.get("id", "")), "cancelled")
+				if not bool(cancel.get("ok", false)):
+					rollback_failed = true
+			_remove_outgoing_group(group_id)
+			invites_changed.emit()
+			var err := String(res.get("error", "Could not send one of the invites."))
+			if rollback_failed:
+				err += " One invite may still be waiting — cancel it from the invite box."
+			return {"ok": false, "group_id": group_id, "error": err}
+		var created: Dictionary = res.get("data", row)
+		sent.append(created)
+		_track_outgoing(created, "4p")
 	return {"ok": true, "group_id": group_id, "error": ""}
 
 ## Accept an incoming invite. Returns {ok, invite, error}. The caller
@@ -150,7 +171,8 @@ func decline_invite(invite: Dictionary) -> Dictionary:
 	return {"ok": true, "error": ""}
 
 ## Reload pending incoming invites from the server (the Realtime
-## backstop). Returns {ok, error}.
+## backstop). Also restores sent invites / groups (L2) so a restart
+## does not lose tracking of invites sent before it. Returns {ok, error}.
 func refresh() -> Dictionary:
 	if not Supabase.configured:
 		return {"ok": false, "error": "Invites are not connected yet."}
@@ -159,10 +181,36 @@ func refresh() -> Dictionary:
 		return {"ok": false, "error": String(res.get("error", "Could not load invites."))}
 	incoming.clear()
 	for inv in res.get("data", []):
-		if not is_expired(inv):
+		if is_expired(inv):
+			# L11: mark it expired on the server instead of only
+			# hiding it — a stale pending row would keep blocking
+			# any group it belongs to.
+			await _expire_invite(inv)
+		else:
 			incoming.append(inv)
+	# L2: rebuild outgoing + groups from the server. The accepted half
+	# matters (list_outgoing_invites returns pending AND accepted):
+	# a half-accepted group can only become "ready" if its accepted
+	# rows are tracked too. Expired rows are marked, not re-tracked.
+	var out := await Supabase.list_outgoing_invites(Save.account_id)
+	if bool(out.get("ok", false)):
+		outgoing.clear()
+		groups.clear()
+		for row in out.get("data", []):
+			if is_expired(row):
+				await _expire_invite(row)
+			else:
+				_track_outgoing(row, String(row.get("mode", "2p")))
 	invites_changed.emit()
 	return {"ok": true, "error": ""}
+
+## L11: mark an expired invite "expired" on the server. Best-effort —
+## a failed PATCH leaves the row pending, still filtered from the UI.
+func _expire_invite(inv: Dictionary) -> void:
+	var inv_id := String(inv.get("id", ""))
+	if inv_id == "":
+		return
+	await Supabase.update_invite(inv_id, "expired")
 
 ## The players of a ready group, inviter first (seat 0), then invitees
 ## in invite order — [{id, name}]. Used to build the match.
@@ -173,19 +221,21 @@ static func group_players(invites: Array, inviter_id: String, inviter_name: Stri
 	return players
 
 ## Group state from its invite rows: "ready" (all accepted), "failed"
-## (any declined), "waiting" (otherwise). Pure — unit-tested.
+## (any declined, expired or cancelled — L11: an expired/cancelled row
+## fails the group instead of leaving the inviter waiting on it
+## forever), "waiting" (otherwise). Pure — unit-tested.
 static func group_state(invites: Array) -> String:
 	if invites.is_empty():
 		return "unknown"
-	var any_declined := false
+	var any_dead := false
 	var all_accepted := true
 	for inv in invites:
 		var st := String(inv.get("status", "pending"))
-		if st == "declined":
-			any_declined = true
+		if st == "declined" or st == "expired" or st == "cancelled":
+			any_dead = true
 		if st != "accepted":
 			all_accepted = false
-	if any_declined:
+	if any_dead:
 		return "failed"
 	if all_accepted:
 		return "ready"
@@ -216,7 +266,11 @@ func _on_realtime_invite(record: Dictionary) -> void:
 	var to_id := String(record.get("to_id", ""))
 	var from_id := String(record.get("from_id", ""))
 	var status := String(record.get("status", ""))
-	if to_id == Save.account_id and status == "pending" and not is_expired(record):
+	if to_id == Save.account_id and status == "pending" and is_expired(record):
+		# L11: an invite that arrived already expired — mark it on
+		# the server (fire-and-forget; the UI never shows it).
+		_expire_invite(record)
+	elif to_id == Save.account_id and status == "pending" and not is_expired(record):
 		# A new invite for me.
 		var known := false
 		for inv in incoming:
@@ -247,6 +301,12 @@ func _poll_group(group_id: String) -> void:
 		return
 	var rows: Array = res.get("data", [])
 	for row in rows:
+		if is_expired(row):
+			# L11: mark it on the server, and mirror the status
+			# locally so group_state fails the group instead of
+			# waiting on a dead invite forever.
+			await _expire_invite(row)
+			row["status"] = "expired"
 		_update_outgoing(row)
 	_check_group(group_id)
 
@@ -260,7 +320,7 @@ func _check_group(group_id: String) -> void:
 		group_ready.emit(group_id, g.get("invites", []))
 	elif state == "failed":
 		groups.erase(group_id)
-		group_failed.emit(group_id, "Someone declined the invite.")
+		group_failed.emit(group_id, "An invite expired or was declined — the group cannot start.")
 
 # ------------------------------------------------------------------ internals
 
@@ -287,3 +347,11 @@ func _remove_incoming(invite_id: String) -> void:
 	for i in range(incoming.size() - 1, -1, -1):
 		if String(incoming[i].get("id", "")) == invite_id:
 			incoming.remove_at(i)
+
+## L1: drop every tracked row of a group (used when a group invite is
+## rolled back after a mid-loop failure).
+func _remove_outgoing_group(group_id: String) -> void:
+	for i in range(outgoing.size() - 1, -1, -1):
+		if String(outgoing[i].get("group_id", "")) == group_id:
+			outgoing.remove_at(i)
+	groups.erase(group_id)

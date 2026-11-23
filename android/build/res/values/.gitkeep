@@ -1,0 +1,4 @@
+# This directory exists so the GodotPlayGameServices plugin's export step
+# can write android/build/res/values/strings.xml at export time (it does
+# FileAccess.open(WRITE) there and fails if the directory is missing).
+# Do NOT hand-write a strings.xml here — the plugin owns that file.

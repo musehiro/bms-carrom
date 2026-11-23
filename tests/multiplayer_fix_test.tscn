@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://bmscarrom multfix"]
+
+[ext_resource type="Script" path="res://tests/multiplayer_fix_test_node.gd" id="1"]
+
+[node name="MultiplayerFixTest" type="Node"]
+script = ExtResource("1")

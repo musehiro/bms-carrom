@@ -41,6 +41,7 @@ func _ready() -> void:
 	Ads.rewarded_failed.connect(_on_rewarded_failed)
 	Net.matched.connect(_on_matched)
 	Net.queue_failed.connect(_on_queue_failed)
+	Net.connection_lost.connect(_on_connection_lost) # L4
 	Net.connected_to_server.connect(_on_net_connected)
 	Net.lan_host_found.connect(_on_lan_host_found)
 	Net.lan_discovery_failed.connect(_on_lan_discovery_failed)
@@ -81,6 +82,13 @@ func _process(delta: float) -> void:
 			# Invite room: waiting for the other player(s) to join the
 			# game server. No BOT fallback — this is a match with a
 			# named friend, not random matchmaking.
+			# L4: the server drops an invite room after 180 s
+			# (INVITE_ROOM_TIMEOUT), so the popup must time out at
+			# the same point instead of spinning forever.
+			if _search_elapsed >= 180.0:
+				_close_search_popup()
+				_toast("Not everyone joined in time — ask your friend to send the invite again.")
+				return
 			if _search_status:
 				if _search_players == 4:
 					_search_status.text = "Waiting for the other players… %ds\nThe match starts when everyone has joined." % int(_search_elapsed)
@@ -119,6 +127,7 @@ func _clear() -> void:
 	_match = null
 	_auth = null
 	_searching = null
+	_toast_label = null # freed with the children above; never queue_free it again
 	_searching_active = false
 	_search_mode = ""
 
@@ -142,7 +151,10 @@ func _show_home() -> void:
 	_home = HomeScreen.new()
 	add_child(_home)
 	_home.play_solo_direct.connect(_start_solo_direct)
-	_home.play_online.connect(_start_matchmaking)
+	# L3: the home ONLINE tile used to call _start_matchmaking directly
+	# (always 2 players). Route it through the same 2p/4p choice the
+	# PLAY → ONLINE path uses, so a 4-player match can start from home.
+	_home.play_online.connect(_show_online_players)
 	_home.open_mode_choice.connect(_open_mode_choice)
 	_home.open_shop.connect(_open_shop)
 	_home.open_howto.connect(_open_howto)
@@ -168,6 +180,16 @@ func _show_home() -> void:
 # only at match start, so cancelling costs nothing.
 
 func _on_invite_accept_chosen(invite: Dictionary) -> void:
+	# F1: accept the Supabase row FIRST — until it flips to "accepted"
+	# the inviter's group can never become ready and the match never
+	# starts. Only join the server room on success. An already-accepted
+	# invite (double tap / re-delivered row) skips the PATCH: the row
+	# is already in the state we need, so it must not error the flow.
+	if String(invite.get("status", "")) != "accepted":
+		var res := await Friends.accept_invite(invite)
+		if not bool(res.get("ok", false)):
+			_toast(String(res.get("error", "Could not accept the invite.")))
+			return
 	_show_stake_picker(func(stake: int) -> void:
 		_join_invite_room(String(invite.get("group_id", "")), String(invite.get("mode", "2p")), stake, false),
 		"Accepting %s's invite — choose YOUR stake (any amount up to your balance). Winner takes the pot (both stakes)." % String(invite.get("from_name", "a friend")))
@@ -314,10 +336,12 @@ func _show_loading_then(title_text: String, sub_text: String, then: Callable) ->
 
 func _start_solo(difficulty: int) -> void:
 	_clear()
+	# F2 layer 1: configure BEFORE add_child — _ready() reads
+	# player_count/mode/_breaker_override, so setup() must run first.
 	_match = MatchScreen.new()
-	add_child(_match)
 	var names := ["Easy Bot", "Medium Bot", "Hard Bot"]
 	_match.setup("solo", difficulty, 0, names[difficulty], difficulty + 1, null)
+	add_child(_match)
 	_match.exit_to_home.connect(_show_home)
 	_match.rematch_requested.connect(_start_solo_direct)
 
@@ -364,10 +388,11 @@ func _start_tour_match(bot: Dictionary, stake: int) -> void:
 		return
 	_last_tour_stake = stake
 	_clear()
+	# F2 layer 1: configure BEFORE add_child (see _start_solo).
 	_match = MatchScreen.new()
-	add_child(_match)
 	var opp_stake := WorldTour.mirror_stake(stake)
 	_match.setup("tour", int(bot.get("skill", 3)), 0, "%s (BOT)" % String(bot.get("name", "?")), int(bot.get("level", 1)), null, -1, stake, opp_stake, false)
+	add_child(_match)
 	_match.exit_to_home.connect(_show_home)
 	# Rematch: same stake, a NEW random bot — no roster, no picker.
 	_match.rematch_requested.connect(func() -> void: _start_tour_random(_last_tour_stake))
@@ -625,8 +650,11 @@ func _on_matched(data: Dictionary) -> void:
 		return
 	_searching_active = false
 	_clear()
+	# F2 layer 1 (+ F3): configure BEFORE add_child — _ready() builds
+	# the rules state and HUD from player_count/mode and reads the
+	# server-assigned breaker; with setup() after add_child a 4p match
+	# got 2-player rules/HUD and each client rolled its own breaker.
 	_match = MatchScreen.new()
-	add_child(_match)
 	if String(data.get("mode", "2p")) == "4p" and data.has("players"):
 		# 4p doubles: the server sends the full seat-ordered roster,
 		# our seat and the breaker seat.
@@ -640,6 +668,7 @@ func _on_matched(data: Dictionary) -> void:
 		var opp_stake := int(data.get("opp_stake", 0))
 		var you_break := bool(data.get("you_break", true))
 		_match.setup("online", 0, _search_table, opp_name, opp_level, Net, 0 if you_break else 1, _search_stake, opp_stake)
+	add_child(_match)
 	_match.exit_to_home.connect(_show_home)
 	# Rematch goes back to the stake picker — the player chooses a fresh
 	# stake for every online match.
@@ -651,9 +680,10 @@ func _on_play_bot_from_search() -> void:
 	_searching_active = false
 	Net.disconnect_client()
 	_clear()
+	# F2 layer 1: configure BEFORE add_child (see _start_solo).
 	_match = MatchScreen.new()
-	add_child(_match)
 	_match.setup("solo", 1, 0, "BOT (Practice)", 1, null, -1, 0, 0, true)
+	add_child(_match)
 	_match.exit_to_home.connect(_show_home)
 	_match.rematch_requested.connect(_start_solo_direct)
 	_toast("Practice vs BOT — clearly labelled, no coins at stake.")
@@ -668,12 +698,26 @@ func _cancel_search() -> void:
 
 func _on_queue_failed(message: String) -> void:
 	if _searching_active:
-		_searching_active = false
-		_search_mode = ""
-		if _searching:
-			_searching.queue_free()
-			_searching = null
+		_close_search_popup()
 	_toast(message)
+
+## L4: the server connection dropped. Only a search in progress cares
+## — a mid-match drop is MatchScreen's opponent_left path, and must
+## not show a "search failed" toast over a live match.
+func _on_connection_lost() -> void:
+	if not _searching_active:
+		return
+	_close_search_popup()
+	_toast("Connection to the matchmaking server was lost — check your connection and try again.")
+
+## Shared search-popup teardown (queue_failed / connection_lost /
+## invite timeout): clear the flags and free the popup.
+func _close_search_popup() -> void:
+	_searching_active = false
+	_search_mode = ""
+	if _searching:
+		_searching.queue_free()
+		_searching = null
 
 # ---------------------------------------------------------------------- ads
 
@@ -768,12 +812,25 @@ func _on_rewarded_earned(reason: String, simulated: bool) -> void:
 func _on_rewarded_failed(reason: String) -> void:
 	if reason == "solo_win" and _match:
 		_match.on_solo_win_ad_failed()
+	elif reason == "double_win" and _match:
+		# F8: a failed double ad must re-enable the DOUBLE (and pot-0
+		# EARN) button, mirroring the solo-win path above — otherwise
+		# the offer is dead for the rest of the win screen. Dispatched
+		# at runtime, not as a direct call, because on_double_ad_failed
+		# lives in MatchScreen (match.gd): until that method exists
+		# this branch is a safe no-op; once it lands (mirror of
+		# on_solo_win_ad_failed) the button is re-enabled.
+		if _match.has_method("on_double_ad_failed"):
+			Callable(_match, "on_double_ad_failed").call()
 	_toast("Ad didn't load — no reward. Try again later.")
 
 # --------------------------------------------------------------------- toast
 
 func _toast(text: String) -> void:
-	if _toast_label:
+	# The old label may already be freed (e.g. _clear() freed it with
+	# the screen) — `if _toast_label` alone does NOT catch a freed
+	# instance, so check validity before queue_free (SCRIPT ERROR fix).
+	if is_instance_valid(_toast_label):
 		_toast_label.queue_free()
 	_toast_label = Label.new()
 	_toast_label.text = text
@@ -789,12 +846,17 @@ func _toast(text: String) -> void:
 	_toast_label.offset_left = -340
 	_toast_label.offset_right = 340
 	add_child(_toast_label)
+	var label := _toast_label
 	var t := Timer.new()
 	t.wait_time = 2.5
 	t.one_shot = true
 	t.timeout.connect(func() -> void:
-		if _toast_label:
-			_toast_label.queue_free()
+		# Capture the label itself: the shared _toast_label may
+		# already point at a NEWER toast by the time this fires,
+		# and freeing that one would eat the fresh message.
+		if is_instance_valid(label):
+			label.queue_free()
+		if _toast_label == label:
 			_toast_label = null)
 	add_child(t)
 	t.start()

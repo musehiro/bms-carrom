@@ -220,6 +220,23 @@ func _ready() -> void:
 	_assist_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_assist_button.pressed.connect(func() -> void: open_aim_assist.emit())
 	row.add_child(_assist_button)
+	# ---- Play Games row: native leaderboard + achievements popups ----
+	# Hidden where Play Games is unavailable (editor/desktop/headless);
+	# on Android the buttons sign in on first tap, then open the UI.
+	var pg_row := HBoxContainer.new()
+	pg_row.add_theme_constant_override("separation", 12)
+	pg_row.visible = PlayGames.is_available()
+	root.add_child(pg_row)
+	var lb_btn := UiKit.dark_button("LEADERBOARD", 22)
+	lb_btn.custom_minimum_size = Vector2(0, 56)
+	lb_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lb_btn.pressed.connect(func() -> void: PlayGames.show_leaderboard())
+	pg_row.add_child(lb_btn)
+	var ach_btn := UiKit.dark_button("ACHIEVEMENTS", 22)
+	ach_btn.custom_minimum_size = Vector2(0, 56)
+	ach_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ach_btn.pressed.connect(func() -> void: PlayGames.show_achievements())
+	pg_row.add_child(ach_btn)
 	# ---- Ad-ladder strip (visible tiers, current one highlighted) ----
 	var ladder_panel := PanelContainer.new()
 	ladder_panel.add_theme_stylebox_override("panel", UiKit.panel_style(UiKit.PANEL, Color(0.83, 0.69, 0.22, 0.35), 14, 1))

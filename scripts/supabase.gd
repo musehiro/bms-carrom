@@ -99,12 +99,22 @@ var _ws_joined := false
 func _ready() -> void:
 	load_config()
 
-func load_config() -> void:
-	if not FileAccess.file_exists(CONFIG_PATH):
+## L8: a malformed backend_config.json must fall back to local-only
+## cleanly — JSON.parse_string returns null on bad JSON (and a
+## non-Dictionary on e.g. a JSON array), so check the type BEFORE
+## touching the value; the old code called .is_empty() on the null and
+## errored out of the load. `path` is a test seam: the mock test feeds
+## a bad file to prove the fallback.
+func load_config(path: String = CONFIG_PATH) -> void:
+	if not FileAccess.file_exists(path):
 		configured = false
 		return
-	var text := FileAccess.get_file_as_string(CONFIG_PATH)
-	var data: Dictionary = JSON.parse_string(text)
+	var text := FileAccess.get_file_as_string(path)
+	var parsed: Variant = JSON.parse_string(text)
+	if not (parsed is Dictionary):
+		configured = false
+		return
+	var data: Dictionary = parsed
 	if data.is_empty():
 		configured = false
 		return
@@ -381,6 +391,21 @@ func send_invite(row: Dictionary) -> Dictionary:
 func list_incoming_invites(my_id: String) -> Dictionary:
 	var res := await _http(HTTPClient.METHOD_GET,
 		"/rest/v1/invites?select=*&to_id=eq.%s&status=eq.pending&order=created_at.desc" % my_id.uri_encode(),
+		{}, true)
+	if not bool(res["ok"]):
+		return res
+	return {"ok": true, "status": int(res["status"]),
+		"data": res["data"] if res["data"] is Array else [], "error": ""}
+
+## L2: invites I sent (pending AND accepted) — restoring them after a
+## restart is what lets pre-restart groups become ready. The accepted
+## half matters: a half-accepted group has accepted rows, and fetching
+## only pending rows would make _check_group see a group that can
+## never become "ready". RLS "invites read for parties" permits the
+## sender (from_id) to select these rows (supabase/schema.sql).
+func list_outgoing_invites(my_id: String) -> Dictionary:
+	var res := await _http(HTTPClient.METHOD_GET,
+		"/rest/v1/invites?select=*&from_id=eq.%s&status=in.(pending,accepted)&order=created_at.desc" % my_id.uri_encode(),
 		{}, true)
 	if not bool(res["ok"]):
 		return res

@@ -146,6 +146,56 @@ func _initialize() -> void:
 	_check("server invite: order puts the inviter first", int(ordered[0]["id"]) == 1 and int(ordered[1]["id"]) == 2)
 	var ordered_infos: Array = script.invite_room_players_to_infos(ordered)
 	_check("server invite: infos carry seats 0,1 in order", int(ordered_infos[0]["seat"]) == 0 and int(ordered_infos[1]["seat"]) == 1 and String(ordered_infos[0]["name"]) == "Alice" and int(ordered_infos[1]["stake"]) == 150)
+	# --- F13 Phase 1: server-side clamping + relay rate limiting ---
+	# 20. Absurd-but-numeric claims are clamped, not rejected.
+	var c1: Dictionary = script.sanitize_claim({"name": "Alice", "level": 999, "table": 7, "stake": 9999999, "mode": "2p"})
+	_check("server f13: level 999 clamps to 100", int(c1["level"]) == 100)
+	_check("server f13: stake 9999999 clamps to 1000000", int(c1["stake"]) == 1000000)
+	_check("server f13: table 7 clamps to 2", int(c1["table"]) == 2)
+	# 21. A 40-char name truncates to 32; a blank name becomes "Player".
+	var c2: Dictionary = script.sanitize_claim({"name": "A".repeat(40), "level": 5, "table": 0, "stake": 0})
+	_check("server f13: 40-char name truncates to 32", String(c2["name"]).length() == 32)
+	var c3: Dictionary = script.sanitize_claim({"name": "   ", "level": 5, "table": 0, "stake": 0})
+	_check("server f13: blank name becomes Player", String(c3["name"]) == "Player")
+	# 22. Non-numeric level/stake and negative stake are rejected.
+	_check("server f13: non-numeric level rejected", not bool(script.sanitize_claim({"name": "X", "level": "abc", "stake": 0}).get("ok", true)))
+	_check("server f13: non-numeric stake rejected", not bool(script.sanitize_claim({"name": "X", "level": 5, "stake": "lots"}).get("ok", true)))
+	_check("server f13: negative stake rejected", not bool(script.sanitize_claim({"name": "X", "level": 5, "stake": -50}).get("ok", true)))
+	# 23. Missing fields default sanely (old clients).
+	var c4: Dictionary = script.sanitize_claim({})
+	_check("server f13: missing fields default to Player/Lv 1/stake 0", String(c4["name"]) == "Player" and int(c4["level"]) == 1 and int(c4["stake"]) == 0 and bool(c4.get("ok", false)))
+	# 24. Rate limiting: 10 msgs/window pass, the 11th drops, and 5
+	# over-limit windows disconnect; a normal 3/s rate never drops.
+	var rstate := {}
+	var now2 := 1000.0
+	var first_ten_ok := true
+	var eleventh_allowed := false
+	var disconnected := false
+	for w in range(5):
+		for m in range(11):
+			var chk: Dictionary = script.relay_rate_check(rstate, now2)
+			rstate = chk["state"]
+			if w == 0 and m < 10 and not bool(chk["allowed"]):
+				first_ten_ok = false
+			if w == 0 and m == 10:
+				eleventh_allowed = bool(chk["allowed"])
+			if bool(chk.get("disconnect", false)):
+				disconnected = true
+		now2 += 1.0
+	_check("server f13: first 10 relay msgs in a window allowed", first_ten_ok)
+	_check("server f13: 11th relay msg in a window dropped", not eleventh_allowed)
+	_check("server f13: sustained flooding disconnects the peer", disconnected)
+	var legit := {}
+	var legit_ok := true
+	var t2 := 2000.0
+	for w in range(6):
+		for m in range(3):
+			var c5: Dictionary = script.relay_rate_check(legit, t2)
+			legit = c5["state"]
+			if not bool(c5["allowed"]) or bool(c5.get("disconnect", false)):
+				legit_ok = false
+		t2 += 1.0
+	_check("server f13: normal relay rate (3/s) never dropped", legit_ok)
 	print("=== %d passed, %d failed ===" % [_passed, _failed])
 	quit(0 if _failed == 0 else 1)
 
