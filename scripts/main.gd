@@ -153,6 +153,9 @@ func _show_home() -> void:
 	_home.group_invite_send_chosen.connect(_on_group_invite_send_chosen)
 	_home.refresh()
 	Ads.show_home_banner()
+	# v9: ads warm up only now (after login, on the home screen) — never
+	# before registration.
+	Ads.warm_up()
 	# Keep the cloud profile up to date (coins/XP change after matches
 	# and ads). Silent no-op when there is no session yet.
 	Accounts.sync_to_cloud()

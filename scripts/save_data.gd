@@ -50,6 +50,13 @@ var aim_assist_until: int = 0 # unix time; 0 = inactive
 var aim_assist_ads_progress: int = 0 # 0..1 ads watched toward next hour
 var interstitial_counter: int = 0 # matches since last interstitial
 var online_host: String = "127.0.0.1" # matchmaking server; set a real host in Settings
+var ads_policy_version: int = 0 # ads policy applied (v9 = 9): < 9 -> the
+# interstitial counter resets on first v9 launch, so a player who already
+# played in v7/v8 does not get a full-screen ad after their first v9 match.
+var google_pkce_verifier: String = "" # PKCE verifier of the pending Google
+# sign-in — persisted so the exchange can still complete if the app is
+# killed while the browser is open (deep-link cold start).
+var google_pkce_deadline: int = 0 # unix time; 0 = no Google sign-in pending
 
 # Account (v7, mandatory registration — NO guest mode). A player cannot
 # play without registering (display name + Gmail). The account id is the
@@ -66,6 +73,17 @@ var _cfg := ConfigFile.new()
 
 func _ready() -> void:
 	load_save()
+
+## Ads-policy migration (v9) — pure, unit-tested. A save written by an
+## older policy version resets the interstitial counter, so a player who
+## already played in v7/v8 does not get a full-screen ad after their
+## first v9 match. Returns {"counter": ..., "policy_version": ...}.
+const ADS_POLICY_VERSION := 9
+
+static func migrated_ads_policy(policy_version: int, counter: int) -> Dictionary:
+	if policy_version < ADS_POLICY_VERSION:
+		return {"counter": 0, "policy_version": ADS_POLICY_VERSION}
+	return {"counter": counter, "policy_version": policy_version}
 
 func load_save() -> void:
 	var err := _cfg.load(SAVE_PATH)
@@ -94,12 +112,18 @@ func load_save() -> void:
 	aim_assist_until = int(_cfg.get_value("ads", "aim_assist_until", 0))
 	aim_assist_ads_progress = int(_cfg.get_value("ads", "aim_assist_ads_progress", 0))
 	interstitial_counter = int(_cfg.get_value("ads", "interstitial_counter", 0))
+	ads_policy_version = int(_cfg.get_value("ads", "policy_version", 0))
+	var mig := migrated_ads_policy(ads_policy_version, interstitial_counter)
+	interstitial_counter = int(mig["counter"])
+	ads_policy_version = int(mig["policy_version"])
 	online_host = String(_cfg.get_value("online", "host", "127.0.0.1"))
 	account_gmail = String(_cfg.get_value("account", "gmail", ""))
 	account_id = String(_cfg.get_value("account", "id", ""))
 	account_verified = bool(_cfg.get_value("account", "verified", false))
 	account_created_at = String(_cfg.get_value("account", "created_at", ""))
 	account_synced_at = int(_cfg.get_value("account", "synced_at", 0))
+	google_pkce_verifier = String(_cfg.get_value("account", "google_pkce_verifier", ""))
+	google_pkce_deadline = int(_cfg.get_value("account", "google_pkce_deadline", 0))
 
 func save() -> void:
 	_cfg.set_value("player", "coins", coins)
@@ -125,12 +149,15 @@ func save() -> void:
 	_cfg.set_value("ads", "aim_assist_until", aim_assist_until)
 	_cfg.set_value("ads", "aim_assist_ads_progress", aim_assist_ads_progress)
 	_cfg.set_value("ads", "interstitial_counter", interstitial_counter)
+	_cfg.set_value("ads", "policy_version", ads_policy_version)
 	_cfg.set_value("online", "host", online_host)
 	_cfg.set_value("account", "gmail", account_gmail)
 	_cfg.set_value("account", "id", account_id)
 	_cfg.set_value("account", "verified", account_verified)
 	_cfg.set_value("account", "created_at", account_created_at)
 	_cfg.set_value("account", "synced_at", account_synced_at)
+	_cfg.set_value("account", "google_pkce_verifier", google_pkce_verifier)
+	_cfg.set_value("account", "google_pkce_deadline", google_pkce_deadline)
 	_cfg.save(SAVE_PATH)
 
 func level() -> int:

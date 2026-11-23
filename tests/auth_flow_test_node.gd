@@ -1,9 +1,17 @@
 extends Node
 
-## Auth-flow + invite-box UI test (v7). Drives the REAL Main scene:
+## Auth-flow + invite-box UI test (v9). Drives the REAL Main scene:
 ##   A1: with no account, Main opens the register/login screen FIRST
 ##       (registration is mandatory — no guest mode, no "Play as guest").
 ##   A2: no button anywhere offers guest play.
+##   A4: the Google button is Google-styled (white, "Continue with
+##       Google") and tapping it with no backend shows an error — never
+##       silently nothing.
+##   A5: the register screen is full (benefits panel + "No ads until you
+##       play" present, footer "v9.0" sits at the bottom of the screen).
+##   A6: the paste-code fallback row is hidden until a Google sign-in
+##       is pending, then it appears.
+##   A7: RESEND CODE exists (hidden until a code is sent).
 ##   A3: registering (name + Gmail, local-only — no backend here)
 ##       reaches the home screen.
 ##   I1: the invite box opens from the ✉ button and shows an incoming
@@ -29,6 +37,10 @@ func _ready() -> void:
 	Save.account_synced_at = 0
 	Save.player_name = "Player"
 	Save.save()
+	# v9: force local-only so this test is hermetic — it must not depend
+	# on backend_config.json (which is now a live, configured project)
+	# or on the network. The cloud paths are covered by the mock test.
+	Supabase.set_config("", "", "")
 	var main_scene: PackedScene = load("res://scenes/main.tscn")
 	_main = main_scene.instantiate()
 	add_child(_main)
@@ -88,6 +100,33 @@ func _run() -> void:
 	_check("auth: auth screen shown first with no account", _main._auth != null)
 	var guest_btn := _find_button_containing(_main, "GUEST")
 	_check("auth: no guest-play button anywhere", guest_btn == null)
+	# --- A4: Google button is Google-styled and never silently nothing ---
+	var google_btn := _find_button(_main._auth, "Continue with Google")
+	_check("auth: Google button says Continue with Google", google_btn != null)
+	var gsb := google_btn.get_theme_stylebox("normal") if google_btn else null
+	_check("auth: Google button is white (Google style)", gsb is StyleBoxFlat and (gsb as StyleBoxFlat).bg_color == Color.WHITE)
+	google_btn.pressed.emit()
+	await _frames(3)
+	_check("auth: Google tap with no backend shows an error", _main._auth._error_label.text != "" and _main._auth._error_label.text.contains("not connected"))
+	# --- A5: register screen is full (benefits + footer at the bottom) ---
+	_check("auth: benefits panel present", _find_label_containing(_main._auth, "saved to your account forever") != null)
+	_check("auth: free-to-play / no-ads line present", _find_label_containing(_main._auth, "No ads until you play") != null)
+	var foot := _find_label_containing(_main._auth, "BMS Carrom v9.0")
+	_check("auth: footer says v9.0", foot != null)
+	var vp_y: float = _main.get_viewport_rect().size.y
+	_check("auth: footer sits at the bottom of the screen (no dead space)", foot != null and foot.get_global_rect().end.y >= vp_y - 40.0)
+	# --- A6: paste-code fallback row only while Google is pending ---
+	var use_code := _find_button(_main._auth, "USE CODE")
+	_check("auth: paste-code row hidden until Google is pending", use_code != null and not use_code.is_visible_in_tree())
+	_main._auth._set_google_pending(true)
+	await _frames(2)
+	_check("auth: paste-code row appears while Google is pending", use_code.is_visible_in_tree())
+	_main._auth._set_google_pending(false)
+	await _frames(2)
+	_check("auth: paste-code row hides again when Google finishes", not use_code.is_visible_in_tree())
+	# --- A7: RESEND CODE exists (hidden until a code is sent) ---
+	_check("auth: RESEND CODE button exists", _main._auth._resend_button != null)
+	_check("auth: RESEND CODE hidden until a code is sent", not _main._auth._resend_button.is_visible_in_tree())
 	# --- A3: register -> home ---
 	_main._auth._name_edit.text = "Test Player"
 	_main._auth._gmail_edit.text = "test.player@gmail.com"

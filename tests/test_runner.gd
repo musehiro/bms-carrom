@@ -46,6 +46,7 @@ func _initialize() -> void:
 	_test_stakes()
 	_test_economy_v5_consts()
 	_test_supabase_pkce()
+	_test_v9_auth_callbacks()
 	_test_supabase_realtime_parse()
 	_test_supabase_rows()
 	_test_net_invite_join_message()
@@ -774,6 +775,31 @@ func _test_supabase_pkce() -> void:
 	var url := SupabaseClient.google_authorize_url("https://xyz.supabase.co", "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", "http://127.0.0.1:8765/callback")
 	_check("v7 supa: authorize URL has provider + S256 challenge", url.contains("provider=google") and url.contains("code_challenge_method=S256") and url.contains("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"))
 	_check("v7 supa: authorize URL encodes the loopback redirect", url.contains("http%3A%2F%2F127.0.0.1%3A8765%2Fcallback"))
+
+func _test_v9_auth_callbacks() -> void:
+	# Custom-scheme deep-link callback parsing (v9 Google return path).
+	_check("v9 auth: scheme callback code parsed", SupabaseClient.parse_callback_code("com.musehiro.carrom://auth-callback?code=abc123&state=x") == "abc123")
+	_check("v9 auth: loopback callback code parsed", SupabaseClient.parse_callback_code("http://127.0.0.1:8765/callback?code=xyz&state=y") == "xyz")
+	_check("v9 auth: callback without a code returns empty", SupabaseClient.parse_callback_code("com.musehiro.carrom://auth-callback?error=access_denied") == "")
+	_check("v9 auth: garbage callback returns empty", SupabaseClient.parse_callback_code("not a url at all") == "")
+	_check("v9 auth: percent-encoded code decoded", SupabaseClient.parse_callback_code("com.musehiro.carrom://auth-callback?code=a%2Fb%3Dc") == "a/b=c")
+	# Authorize URL with the custom-scheme redirect.
+	var url := SupabaseClient.google_authorize_url("https://xyz.supabase.co", "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", SupabaseClient.CUSTOM_SCHEME_REDIRECT)
+	_check("v9 auth: authorize URL has provider + S256 challenge", url.contains("provider=google") and url.contains("code_challenge_method=S256"))
+	_check("v9 auth: authorize URL encodes the custom-scheme redirect", url.contains("com.musehiro.carrom%3A%2F%2Fauth-callback"))
+	# Loopback request parsing (unchanged secondary path).
+	var AccountsScript := load("res://scripts/accounts.gd")
+	_check("v9 auth: loopback GET code parsed", String(AccountsScript._parse_loopback_code("GET /callback?code=abc123 HTTP/1.1\r\nHost: 127.0.0.1:8765\r\n\r\n")) == "abc123")
+	_check("v9 auth: loopback wrong path returns empty", String(AccountsScript._parse_loopback_code("GET /other?code=abc HTTP/1.1\r\n\r\n")) == "")
+	_check("v9 auth: loopback non-GET returns empty", String(AccountsScript._parse_loopback_code("POST /callback?code=abc HTTP/1.1\r\n\r\n")) == "")
+	# Ads-policy migration (v9): old saves reset the interstitial counter.
+	var SaveScript := load("res://scripts/save_data.gd")
+	var mig0: Dictionary = SaveScript.migrated_ads_policy(0, 5)
+	_check("v9 ads: old policy resets the interstitial counter", int(mig0.get("counter", -1)) == 0 and int(mig0.get("policy_version", -1)) == 9)
+	var mig8: Dictionary = SaveScript.migrated_ads_policy(8, 7)
+	_check("v9 ads: policy 8 also migrates", int(mig8.get("counter", -1)) == 0 and int(mig8.get("policy_version", -1)) == 9)
+	var mig9: Dictionary = SaveScript.migrated_ads_policy(9, 2)
+	_check("v9 ads: current policy keeps the counter", int(mig9.get("counter", -1)) == 2 and int(mig9.get("policy_version", -1)) == 9)
 
 func _test_supabase_realtime_parse() -> void:
 	var join_ok := SupabaseClient.parse_realtime_message(JSON.stringify({

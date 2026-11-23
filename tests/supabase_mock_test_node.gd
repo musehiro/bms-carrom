@@ -13,6 +13,11 @@ extends Node
 ##   group ready -> Realtime: connect + invite broadcast arrives in
 ##   Friends.incoming -> Google loopback: begin_google_sign_in +
 ##   GET /callback?code=TESTCODE -> google_finished ok, Gmail linked.
+##   Google deep link: begin + write user://auth_callback.txt with the
+##   custom-scheme URI -> google_finished ok (file path). Google paste:
+##   begin + finish_google_with_pasted_code(full URL / bare code) ->
+##   google_finished ok. The Google flow needs NO google_client_id
+##   (the mock config sets it to "").
 ## The local Save file is backed up and restored at the end, so the
 ## test never touches the real save. No real Supabase project, no
 ## network beyond localhost.
@@ -64,6 +69,26 @@ func _run() -> void:
 	_had_save = FileAccess.file_exists(SAVE_PATH)
 	if _had_save:
 		_saved_cfg = FileAccess.get_file_as_string(SAVE_PATH)
+	# v9: the starting-coins / restore assertions need a KNOWN starting
+	# state — the sandbox save is dirty from earlier test runs (staked
+	# matches left it at 900 coins / 14 matches), so reset the profile
+	# fields to a fresh install here. The file is restored at the end.
+	Save.coins = 1000
+	Save.xp = 0
+	Save.matches_played = 0
+	Save.matches_won = 0
+	Save.solo_wins = 0
+	Save.online_wins = 0
+	Save.tour_wins = 0
+	Save.queens_covered = 0
+	Save.owned_boards = ["classic"]
+	Save.owned_strikers = ["classic"]
+	Save.equipped_board = "classic"
+	Save.equipped_striker = "classic"
+	Save.ad_count_today = 0
+	Save.ad_coins_today = 0
+	Save.interstitial_counter = 0
+	Save.save()
 	# Start the mock.
 	var script_path := ProjectSettings.globalize_path("res://tests/mock_supabase.py")
 	_mock_pid = OS.create_process("python3", [script_path, "--port", str(MOCK_PORT)])
@@ -75,7 +100,7 @@ func _run() -> void:
 		_fail("mock Supabase server did not answer /health")
 		_finish()
 		return
-	Supabase.set_config(MOCK_URL, "test-anon-key", "test-google-client-id")
+	Supabase.set_config(MOCK_URL, "test-anon-key", "") # v9: no google_client_id needed at all
 	Supabase.access_token = ""
 	Supabase.user_id = ""
 	# --- Auth: anonymous signup (client capability) ---
@@ -162,6 +187,34 @@ func _run() -> void:
 		_check("mock: Google sign-in finished via loopback", gok)
 		_check("mock: Google Gmail linked", Save.account_gmail == "google-user@gmail.com" and Accounts.is_verified())
 		http.queue_free()
+	# --- Google deep link: begin, then the native side writes the file ---
+	var started2 := Accounts.begin_google_sign_in()
+	_check("mock: Google deep-link flow started (no client id)", started2)
+	if started2:
+		var f := FileAccess.open(Supabase.AUTH_CALLBACK_FILE, FileAccess.WRITE)
+		f.store_string("com.musehiro.carrom://auth-callback?code=TESTCODE&state=x")
+		f.close()
+		var gok2 := await _wait_for_signal(Accounts.google_finished, 5.0)
+		_check("mock: Google sign-in finished via deep-link file", gok2)
+		_check("mock: deep-link Gmail linked", Save.account_gmail == "google-user@gmail.com" and Accounts.is_verified())
+	# --- Google paste-code fallback: full URL, then a bare code ---
+	var started3 := Accounts.begin_google_sign_in()
+	_check("mock: Google paste flow started", started3)
+	if started3:
+		var pasted := Accounts.finish_google_with_pasted_code("com.musehiro.carrom://auth-callback?code=TESTCODE&state=x")
+		_check("mock: paste-code accepted while pending", pasted)
+		var gok3 := await _wait_for_signal(Accounts.google_finished, 5.0)
+		_check("mock: Google sign-in finished via pasted URL", gok3)
+	var started4 := Accounts.begin_google_sign_in()
+	_check("mock: Google bare-code flow started", started4)
+	if started4:
+		var pasted4 := Accounts.finish_google_with_pasted_code("TESTCODE")
+		_check("mock: bare code accepted while pending", pasted4)
+		var gok4 := await _wait_for_signal(Accounts.google_finished, 5.0)
+		_check("mock: Google sign-in finished via pasted bare code", gok4)
+	# --- Google paste with nothing pending is refused ---
+	var pasted5 := Accounts.finish_google_with_pasted_code("TESTCODE")
+	_check("mock: paste-code refused when nothing is pending", not pasted5)
 	Friends.stop_listening()
 	_finish()
 

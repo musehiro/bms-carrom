@@ -251,7 +251,7 @@ func _ready() -> void:
 	fill.set_corner_radius_all(7)
 	_xp_bar.add_theme_stylebox_override("fill", fill)
 	root.add_child(_xp_bar)
-	var ver := UiKit.muted_label("BMS Carrom v8.0  •  Account required  •  Free to play", 15)
+	var ver := UiKit.muted_label("BMS Carrom v9.0  •  Account required  •  Free to play", 15)
 	root.add_child(ver)
 	# ---- Banner-ad slot (bottom; the native banner covers it on Android) ----
 	var banner_slot := PanelContainer.new()

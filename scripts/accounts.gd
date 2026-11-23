@@ -44,39 +44,87 @@ var _loopback: TCPServer = null
 var _loopback_conn: StreamPeerTCP = null
 var _loopback_verifier := ""
 var _loopback_done := false
-var _loopback_deadline := 0.0
+var _google_pending := false # a Google sign-in is in flight (browser open)
+var _google_deadline := 0.0 # unix time the pending sign-in times out
+var _file_poll_accum := 0.0 # throttle for the deep-link file poll
 
-func _process(_delta: float) -> void:
-	if _loopback == null:
+func _ready() -> void:
+	# Resume a Google sign-in that was interrupted by the app being
+	# killed while the browser was open: the PKCE verifier was persisted
+	# in Save, and the deep link (if it arrived) is waiting in the file
+	# GodotApp.java wrote. The loopback listener is NOT restarted here —
+	# the deep-link file is the primary return path after a cold start.
+	if Save.google_pkce_verifier != "" and Save.google_pkce_deadline > int(Time.get_unix_time_from_system()):
+		_loopback_verifier = Save.google_pkce_verifier
+		_google_pending = true
+		_google_deadline = float(Save.google_pkce_deadline)
+		_check_pending_callback_file()
+
+func _process(delta: float) -> void:
+	if _loopback != null:
+		if _loopback_conn == null and _loopback.is_connection_available():
+			_loopback_conn = _loopback.take_connection()
+		if _loopback_conn != null:
+			var avail := _loopback_conn.get_available_bytes()
+			if avail > 0:
+				var data: Array = _loopback_conn.get_data(avail)
+				var text := (data[1] as PackedByteArray).get_string_from_utf8()
+				var code := _parse_loopback_code(text)
+				var body := "<html><body><h1>Signed in — you can close this tab and return to BMS Carrom.</h1></body></html>"
+				var resp := "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % [body.length(), body]
+				_loopback_conn.put_data(resp.to_utf8_buffer())
+				_loopback_conn.disconnect_from_host()
+				_loopback_conn = null
+				_stop_loopback()
+				if code != "":
+					_finish_google_sign_in(code)
+				else:
+					_end_google_pending()
+					google_finished.emit(false, "Google sign-in failed — the browser came back without a code. Try again, or register with your Gmail + code.")
+	if _google_pending:
+		if Time.get_unix_time_from_system() > _google_deadline:
+			_end_google_pending()
+			google_finished.emit(false, "Google sign-in timed out — try again, or register with your Gmail + code.")
+			return
+		_file_poll_accum += delta
+		if _file_poll_accum >= 0.5:
+			_file_poll_accum = 0.0
+			_check_pending_callback_file()
+
+## Deep-link return path: GodotApp.java writes the URI the browser came
+## back with (com.musehiro.carrom://auth-callback?code=...) to
+## user://auth_callback.txt. Poll for it while a Google sign-in is
+## pending and consume it exactly once.
+func _check_pending_callback_file() -> void:
+	if not _google_pending:
 		return
-	var now := Time.get_unix_time_from_system()
-	if now > _loopback_deadline:
-		_stop_loopback()
-		google_finished.emit(false, "Google sign-in timed out — try again.")
+	if not FileAccess.file_exists(Supabase.AUTH_CALLBACK_FILE):
 		return
-	if _loopback_conn == null and _loopback.is_connection_available():
-		_loopback_conn = _loopback.take_connection()
-	if _loopback_conn != null:
-		var avail := _loopback_conn.get_available_bytes()
-		if avail > 0:
-			var data: Array = _loopback_conn.get_data(avail)
-			var text := (data[1] as PackedByteArray).get_string_from_utf8()
-			var code := _parse_loopback_code(text)
-			var body := "<html><body><h1>Signed in — you can close this tab and return to BMS Carrom.</h1></body></html>"
-			var resp := "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % [body.length(), body]
-			_loopback_conn.put_data(resp.to_utf8_buffer())
-			_loopback_conn.disconnect_from_host()
-			_loopback_conn = null
-			_stop_loopback()
-			if code != "":
-				_finish_google_sign_in(code)
+	var uri := FileAccess.get_file_as_string(Supabase.AUTH_CALLBACK_FILE).strip_edges()
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(Supabase.AUTH_CALLBACK_FILE))
+	var code := Supabase.parse_callback_code(uri)
+	if code != "":
+		_finish_google_sign_in(code)
+
+func _end_google_pending() -> void:
+	_google_pending = false
+	_loopback_verifier = ""
+	_stop_loopback()
+	Save.google_pkce_verifier = ""
+	Save.google_pkce_deadline = 0
+	Save.save()
+
+func is_google_pending() -> bool:
+	return _google_pending
 
 func _stop_loopback() -> void:
 	if _loopback != null:
 		_loopback.stop()
 		_loopback = null
 	_loopback_conn = null
-	_loopback_done = false
+	# NOTE: _loopback_done is NOT reset here — it guards against a
+	# duplicate finish (loopback + deep link racing). A new sign-in
+	# resets it in begin_google_sign_in().
 
 ## Extract the ?code=... from a loopback GET request. Returns "" when
 ## the request has no code (e.g. a stray probe). Pure — unit-tested.
@@ -313,34 +361,73 @@ static func resolve_profile(local_row: Dictionary, cloud_row: Dictionary) -> Dic
 
 # --------------------------------------------------------- Google one-tap
 
-## Start Google sign-in (PKCE loopback). Opens the Supabase authorize
-## page in the browser; the reply lands on http://127.0.0.1:8765 and
-## the exchange runs automatically. Emits google_finished when done.
-## Returns false immediately when the backend (or Google provider) is
-## not configured — the caller shows the Gmail + code path instead.
+## Start Google sign-in (PKCE). Opens the Supabase authorize page in the
+## browser; the reply comes back via the custom-scheme deep link
+## (com.musehiro.carrom://auth-callback — primary on Android, delivered
+## through GodotApp.java) with the 127.0.0.1 loopback listener as a
+## secondary path. The PKCE verifier is persisted in Save so the
+## exchange can still complete after a cold start. Emits
+## google_finished when done. Returns false immediately when the
+## backend is not configured — the caller shows the Gmail + code path
+## instead. Never fails silently: a browser that cannot open, or a flow
+## that times out, emits google_finished(false, ...) with a message.
 func begin_google_sign_in() -> bool:
 	if not Supabase.configured:
 		return false
-	if Supabase.google_client_id == "":
-		return false
+	if _google_pending:
+		return true # a sign-in is already in flight — don't restart it
+	# NOTE (v9 root cause 1a): the old code returned false here when
+	# Supabase.google_client_id was empty. The OAuth client lives
+	# server-side in Supabase — the game never needs a client ID — so
+	# that gate silently killed the button. It is gone.
 	_loopback_verifier = Supabase.random_verifier()
+	_loopback_done = false
+	_google_pending = true
+	_google_deadline = Time.get_unix_time_from_system() + 300.0
+	Save.google_pkce_verifier = _loopback_verifier
+	Save.google_pkce_deadline = int(_google_deadline)
+	Save.save()
+	# A file left over from an abandoned sign-in is stale — drop it so
+	# the poll can only pick up the code for THIS sign-in.
+	if FileAccess.file_exists(Supabase.AUTH_CALLBACK_FILE):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(Supabase.AUTH_CALLBACK_FILE))
+	# Loopback listener: secondary return path. If it cannot start, the
+	# deep link still works — so this is not fatal.
 	_loopback = TCPServer.new()
 	var err := _loopback.listen(Supabase.LOOPBACK_PORT, "127.0.0.1")
 	if err != OK:
 		_loopback = null
+	var url := Supabase.google_authorize_url(Supabase.base_url, _loopback_verifier, Supabase.CUSTOM_SCHEME_REDIRECT)
+	var open_err := OS.shell_open(url)
+	if open_err != OK and OS.has_feature("android"):
+		# No browser to open — fail loudly instead of silently nothing.
+		_end_google_pending()
 		return false
-	_loopback_done = false
-	_loopback_deadline = Time.get_unix_time_from_system() + 300.0
-	var redirect_to := "http://127.0.0.1:%d%s" % [Supabase.LOOPBACK_PORT, Supabase.LOOPBACK_PATH]
-	var url := Supabase.google_authorize_url(Supabase.base_url, _loopback_verifier, redirect_to)
-	OS.shell_open(url)
+	return true
+
+## Finish a pending Google sign-in with a code the player pasted from
+## the browser address bar (fallback when the automatic return failed).
+## Accepts a bare code or a full callback URL containing ?code=....
+## Returns false when there is no pending sign-in or nothing pasted.
+func finish_google_with_pasted_code(raw: String) -> bool:
+	if not _google_pending:
+		return false
+	var text := raw.strip_edges()
+	if text == "":
+		return false
+	var code := Supabase.parse_callback_code(text)
+	if code == "":
+		code = text
+	_finish_google_sign_in(code)
 	return true
 
 func _finish_google_sign_in(code: String) -> void:
 	if _loopback_done:
 		return
 	_loopback_done = true
-	var res := await Supabase.exchange_pkce_code(code, _loopback_verifier)
+	var verifier := _loopback_verifier
+	_end_google_pending()
+	var res := await Supabase.exchange_pkce_code(code, verifier)
 	if not bool(res.get("ok", false)):
 		google_finished.emit(false, String(res.get("error", "Google sign-in failed.")))
 		return
@@ -351,6 +438,13 @@ func _finish_google_sign_in(code: String) -> void:
 	if gmail == "":
 		google_finished.emit(false, "Google did not return an email address.")
 		return
+	# Use the Google account's display name when the player has not set
+	# one of their own yet (fresh install: the default "Player").
+	var meta: Dictionary = user.get("user_metadata", {})
+	var gname := String(meta.get("full_name", meta.get("name", ""))).strip_edges()
+	if gname != "" and (Save.player_name == "" or Save.player_name == "Player"):
+		Save.player_name = gname.left(20)
+		Save.save()
 	var got := await Supabase.get_profile_by_gmail(gmail)
 	if bool(got.get("ok", false)):
 		var row: Dictionary = got.get("data", {})

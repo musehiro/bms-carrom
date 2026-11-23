@@ -46,6 +46,30 @@ const REALTIME_VSN := "1.0.0"
 const LOOPBACK_PORT := 8765
 const LOOPBACK_PATH := "/callback"
 
+## The URL Android's browser goes back to after the Google sign-in, so
+## the browser can open the game again. Registered in Supabase's Redirect
+## URLs allow-list AND as an intent filter in android/build/AndroidManifest.xml;
+## GodotApp.java writes the incoming URI to AUTH_CALLBACK_FILE for the
+## game to pick up (vanilla Godot 4.3 does not surface deep links to GDScript).
+const CUSTOM_SCHEME_REDIRECT := "com.musehiro.carrom://auth-callback"
+## File the native side writes the deep-link URI into (getFilesDir() is
+## the same directory Godot maps user:// to on Android).
+const AUTH_CALLBACK_FILE := "user://auth_callback.txt"
+
+## Extract the ?code=... from an OAuth callback URI — custom scheme
+## (com.musehiro.carrom://auth-callback?code=...) or loopback
+## (http://127.0.0.1:8765/callback?code=...). "" when there is no code.
+## Pure — unit-tested.
+static func parse_callback_code(uri: String) -> String:
+	var q := uri.find("?")
+	if q < 0:
+		return ""
+	for part in uri.substr(q + 1).split("&"):
+		var kv := part.split("=", false, 1)
+		if kv.size() == 2 and kv[0] == "code":
+			return kv[1].uri_decode()
+	return ""
+
 var configured := false
 var base_url := ""
 var anon_key := ""

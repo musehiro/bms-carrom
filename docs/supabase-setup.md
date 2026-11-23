@@ -41,15 +41,28 @@ the agent cannot do this step (it needs a Supabase dashboard login).
 3. **Authentication → URL Configuration → Redirect URLs**: add
    `http://127.0.0.1:8765/callback` (the game's Google sign-in
    loopback address — the game listens on the phone itself for the
-   reply, nothing leaves the device).
+   reply, nothing leaves the device) AND
+   `com.musehiro.carrom://auth-callback` (the custom-scheme deep
+   link the browser returns to after Google sign-in — Android routes
+   it back into the game; see `android/build/AndroidManifest.xml`).
 4. (Optional, for one-tap Google sign-in) **Authentication →
    Providers → Google**: enable it with a Google OAuth client — create
    the client in Google Cloud Console (console.cloud.google.com →
    APIs & Services → Credentials → Create Credentials → OAuth client
-   ID → Android; no card needed there either), then paste the client
-   ID + client secret into Supabase. Without this step the game's
-   "SIGN IN WITH GOOGLE" button falls back to the Gmail + code flow,
-   which works fully on its own.
+   ID → **Web application** — NOT Android: an Android client has no
+   client secret and Supabase cannot use it; no card needed there
+   either). In the Web client, add this Authorized redirect URI:
+   `https://<your-project-ref>.supabase.co/auth/v1/callback`
+   (for this project:
+   `https://hyhlhngybzwnungnshff.supabase.co/auth/v1/callback`).
+   Then paste the client ID + client secret into Supabase. Without
+   this step the game's "Continue with Google" button falls back to
+   the Gmail + code flow, which works fully on its own.
+   NOTE (2026-11-22): the Google consent screen starts in Testing
+   mode — only Gmail addresses added as test users can sign in with
+   Google until the consent screen is published to Production, which
+   needs a homepage URL + a privacy-policy URL. That is a later step;
+   the Gmail + code flow works for every player meanwhile.
 
 ## 4. Copy the keys into the game
 
@@ -59,8 +72,10 @@ the agent cannot do this step (it needs a Supabase dashboard login).
    row-level security protects the data, and the game never ships the
    `service_role` key. **Never copy the service_role key anywhere.**
 2. Open `backend_config.json` in the repo and fill in
-   `supabase_url` + `supabase_anon_key` (and `google_client_id` if
-   step 3.4 was done). See `backend_config.example.json` for the shape.
+   `supabase_url` + `supabase_anon_key`. See
+   `backend_config.example.json` for the shape. (`google_client_id`
+   is NOT needed — the OAuth client lives server-side in Supabase;
+   the game never uses a client-side client ID.)
 3. Push that one-file change — the next build (v7.1) activates cloud
    accounts, friend search and invites. Nothing else in the code
    changes: the game already contains the full client.

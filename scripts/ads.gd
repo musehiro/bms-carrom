@@ -46,13 +46,30 @@ func _ready() -> void:
 	_banner_listener.on_ad_failed_to_load = func(err: LoadAdError) -> void: print("[Ads] Home banner failed to load: ", err.message)
 	if OS.has_feature("android"):
 		MobileAds.initialize()
-		_preload_interstitial()
+		# NOTE (v9): the interstitial is NOT preloaded here any more.
+		# Preloading at startup meant a returning player could see a
+		# full-screen ad the moment they finished their first match —
+		# before they had played anything in v9. warm_up() is called
+		# from the home screen, after login, instead.
 	else:
 		print("[Ads] Non-Android build: test ads will be simulated.")
 
 func _is_plugin_live() -> bool:
 	# The native singleton only exists inside a real Android export.
 	return OS.has_feature("android")
+
+## Warm up ads after the player is logged in and on the home screen:
+## preloads the interstitial so it is instant when it is due (after
+## every 3rd completed match). Called from main._show_home() — never
+## before registration.
+func warm_up() -> void:
+	_preload_interstitial()
+
+## v9 ad gate — ZERO ads of any kind before registration. Every ad
+## entry point checks this first, so no caller can show an ad to a
+## player who has not registered yet.
+func _ads_allowed() -> bool:
+	return Accounts.has_account()
 
 # ------------------------------------------------------------------ banner
 ## Home-page banner (v5, Buddhika 2026-11-22): an anchored adaptive banner
@@ -63,6 +80,10 @@ func _is_plugin_live() -> bool:
 ## On non-Android builds this is a no-op (the placeholder proves the slot).
 
 func show_home_banner() -> void:
+	# v9: banner only on the home screen AFTER login — never before
+	# registration.
+	if not _ads_allowed():
+		return
 	if not _is_plugin_live():
 		print("[Ads] Home banner: non-Android, placeholder slot only.")
 		return
@@ -82,6 +103,11 @@ func hide_home_banner() -> void:
 # ---------------------------------------------------------------- rewarded
 
 func show_rewarded(reason: String) -> void:
+	# v9: rewarded ads only on an explicit tap AND only after
+	# registration — never before.
+	if not _ads_allowed():
+		rewarded_failed.emit(reason)
+		return
 	_rewarded_reason = reason
 	if _simulated or not _is_plugin_live():
 		_simulate_rewarded()
@@ -126,8 +152,16 @@ func _on_rewarded_show_failed(_err: AdError) -> void:
 # ------------------------------------------------------------ interstitial
 
 func maybe_show_interstitial() -> bool:
-	# Policy: only after every 3rd match. Caller checks the counter; this
-	# loads + shows one interstitial. Returns true if an ad was attempted.
+	# Policy: only after every 3rd match, and NEVER before registration.
+	# The counter gate is checked here (not only in the caller), so any
+	# caller is safe. The counter resets to 0 on the first v9 launch
+	# (Save.ads_policy_version migration), so a returning player gets
+	# three full v9 matches before the first interstitial.
+	if not _ads_allowed():
+		return false
+	if Save.interstitial_counter < AdsConfig.INTERSTITIAL_EVERY_N_MATCHES:
+		return false
+	# Loads + shows one interstitial. Returns true if an ad was attempted.
 	if _simulated or not _is_plugin_live():
 		print("[Ads] Simulated interstitial (editor/desktop).")
 		_simulate_interstitial()
