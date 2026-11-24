@@ -5,9 +5,9 @@ extends RefCounted
 ## Striker stat differences are SMALL and capped at +15% (doc 6.4).
 
 const BOARDS := [
-	{"id": "classic", "name": "Classic Wood", "desc": "Pale beech, the original.", "price": 0, "level": 1,
-		"surface": Color(0.94, 0.84, 0.68), "surface2": Color(0.90, 0.79, 0.62),
-		"frame": Color(0.50, 0.28, 0.14), "line": Color(0.52, 0.24, 0.16), "accent": Color(0.85, 0.16, 0.16)},
+	{"id": "classic", "name": "Classic Wood", "desc": "Warm honey beech, the original.", "price": 0, "level": 1,
+		"surface": Color(0.88, 0.71, 0.47), "surface2": Color(0.82, 0.64, 0.40),
+		"frame": Color(0.42, 0.22, 0.11), "line": Color(0.48, 0.22, 0.14), "accent": Color(0.85, 0.16, 0.16)},
 	{"id": "mahogany", "name": "Royal Mahogany", "desc": "Dark red-brown wood, gold lines.", "price": 1500, "level": 3,
 		"surface": Color(0.55, 0.25, 0.18), "surface2": Color(0.49, 0.21, 0.15),
 		"frame": Color(0.32, 0.12, 0.10), "line": Color(0.85, 0.68, 0.25), "accent": Color(0.85, 0.68, 0.25)},
