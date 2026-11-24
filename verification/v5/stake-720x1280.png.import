@@ -3,15 +3,11 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://dschagvoi56tu"
-path="res://.godot/imported/stake-720x1280.png-b7b914df440558998bd7ce45e05785ad.ctex"
-metadata={
-"vram_texture": false
-}
+valid=false
 
 [deps]
 
 source_file="res://verification/v5/stake-720x1280.png"
-dest_files=["res://.godot/imported/stake-720x1280.png-b7b914df440558998bd7ce45e05785ad.ctex"]
 
 [params]
 

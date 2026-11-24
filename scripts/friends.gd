@@ -11,8 +11,10 @@ extends Node
 ##   server's invite room (group_id) -> the server starts the match
 ##   when both have joined. Stakes lock only at match start, as in v6.
 ##   DECLINE marks the invite declined; it disappears from the box.
-##   Ignored invites stay pending until they expire (24 h) — and are
-##   then marked "expired" on the server (L11), so they can never
+##   The inviter can CANCEL a sent invite from the home "WAITING FOR…"
+##   list — the whole group is cancelled, so the invitees' invites
+##   disappear too. Ignored invites stay pending until they expire
+##   (24 h) — then marked "expired" on the server (L11), so they can never
 ##   block a group forever. Expired/cancelled rows fail their group.
 ##
 ## 4-player: the inviter picks up to 3 friends; one group_id covers all
@@ -35,10 +37,21 @@ signal group_failed(group_id: String, reason: String)
 const INVITE_EXPIRY_SECONDS := 24 * 3600
 const GROUP_POLL_SECONDS := 10.0
 const MAX_GROUP_TARGETS := 3
+## §11 online lobby presence: heartbeat every ~30 s on the ONE existing
+## socket (presence rows are PostgREST, not a second socket); rows older
+## than ~90 s are treated as offline. Status is "online" | "in_match".
+const PRESENCE_HEARTBEAT_SECONDS := 30.0
+const PRESENCE_OFFLINE_SECONDS := 90
+## 3-player guard (v11): matches are 2-player or 4-player doubles ONLY.
+## validate_group_targets() (below) rejects exactly-2-target groups.
 
 var incoming: Array = [] # pending invites addressed to me
 var outgoing: Array = [] # pending invites I sent
 var groups: Dictionary = {} # group_id -> {mode, invites: Array, state}
+var online_players: Array = [] # §11: last fetched live-player list
+var _presence_status := "online"
+var _presence_timer := 0.0
+var _presence_busy := false
 
 var _poll_timer := 0.0
 var _listening := false
@@ -49,6 +62,13 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if not _listening or not Supabase.configured:
 		return
+	# §11 presence heartbeat (~30 s, same cadence as the Realtime
+	# heartbeat in supabase.gd — the row carries no socket of its own).
+	# Runs on every frame, NOT behind the group-poll early-return.
+	_presence_timer += delta
+	if _presence_timer >= PRESENCE_HEARTBEAT_SECONDS and not _presence_busy:
+		_presence_timer = 0.0
+		_heartbeat_presence_async()
 	_poll_timer += delta
 	if _poll_timer < GROUP_POLL_SECONDS:
 		return
@@ -66,9 +86,13 @@ func start_listening() -> void:
 func stop_listening() -> void:
 	_listening = false
 	Supabase.disconnect_realtime()
+	# §11: going offline — drop my presence row (best-effort).
+	if Save.account_id != "":
+		Supabase.delete_presence(Save.account_id)
 	incoming.clear()
 	outgoing.clear()
 	groups.clear()
+	online_players.clear()
 
 func pending_count() -> int:
 	var n := 0
@@ -76,6 +100,61 @@ func pending_count() -> int:
 		if not is_expired(inv):
 			n += 1
 	return n
+
+# ------------------------------------------------------------ §11 presence
+# Live-player list for the online lobby: display name + level + status
+# ONLY (never Gmail, never coins — the presence table holds nothing else).
+
+## My current presence status ("online" | "in_match"). Main sets
+## "in_match" when a match starts and "online" on returning home.
+## Heartbeats immediately so the lobby list updates without waiting
+## for the next 30 s tick.
+func set_presence_status(status: String) -> void:
+	if status != "online" and status != "in_match":
+		return
+	_presence_status = status
+	_presence_timer = 0.0
+	if _listening and Supabase.configured and Save.account_id != "":
+		_heartbeat_presence_async()
+
+func _heartbeat_presence_async() -> void:
+	if _presence_busy or Save.account_id == "":
+		return
+	_presence_busy = true
+	await Supabase.heartbeat_presence(Save.account_id, Save.player_name, Save.level(), _presence_status)
+	_presence_busy = false
+
+## Fetch the live-player list (presence rows, newest first), filtered
+## to rows younger than PRESENCE_OFFLINE_SECONDS and excluding me.
+## Returns {ok, players, error} — players are [{id, display_name,
+## level, status}]. Pure filter helper below is unit-tested.
+func list_online_players() -> Dictionary:
+	if not Supabase.configured:
+		return {"ok": false, "players": [], "error": "Online lobby is not connected yet."}
+	var res := await Supabase.list_presence()
+	if not bool(res.get("ok", false)):
+		return {"ok": false, "players": [], "error": String(res.get("error", "Could not load online players."))}
+	online_players = filter_online_players(res.get("data", []), Save.account_id)
+	return {"ok": true, "players": online_players, "error": ""}
+
+## Pure filter: drop my own row, drop stale rows (>90 s), keep only
+## well-formed rows (name + level + status). Unit-tested.
+static func filter_online_players(rows: Array, my_id: String) -> Array:
+	var out: Array = []
+	for row in rows:
+		if String(row.get("id", "")) == "" or String(row.get("id", "")) == my_id:
+			continue
+		var age := SupabaseClient.iso_age_seconds(String(row.get("updated_at", "")))
+		if age < 0 or age > PRESENCE_OFFLINE_SECONDS:
+			continue
+		var status := String(row.get("status", "online"))
+		if status != "online" and status != "in_match":
+			status = "online"
+		out.append({"id": String(row.get("id", "")),
+			"display_name": String(row.get("display_name", "Player")),
+			"level": maxi(1, int(row.get("level", 1))),
+			"status": status})
+	return out
 
 # ----------------------------------------------------------------- search
 
@@ -109,22 +188,36 @@ func send_invite(to_id: String, to_name: String, stake: int) -> Dictionary:
 	_track_outgoing(created, "2p")
 	return {"ok": true, "group_id": group_id, "error": ""}
 
+## 3-player guard (v11 plan decision log, Buddhika 2026-11-23 12:33):
+## matches are 2-player or 4-player doubles ONLY — there is no
+## 3-player mode. Exactly 2 targets (3 players total) is rejected
+## here, at send time, before any row is written. The UI offers only
+## 1-or-3 picks (home invite box) and Main re-checks before sending.
+## Pure — unit-tested in tests/p2p_test.gd.
+static func validate_group_targets(targets: Array, my_id: String) -> Dictionary:
+	if targets.is_empty() or targets.size() > MAX_GROUP_TARGETS:
+		return {"ok": false, "error": "Pick 1 to 3 friends for a 4-player game."}
+	if targets.size() == 2:
+		return {"ok": false, "error": "Matches are 2 players (invite 1 friend) or 4 players (invite 3 friends) — 3-player matches are not supported."}
+	for t in targets:
+		var to_id := String(t.get("id", ""))
+		if to_id == "":
+			return {"ok": false, "error": "One of the friends has no player id — pick them again."}
+		if to_id == my_id:
+			return {"ok": false, "error": "You cannot invite yourself."}
+	return {"ok": true, "error": ""}
+
 ## Send a 4-player invite to up to 3 friends (targets: [{id, name}]).
 ## Returns {ok, group_id, error}.
 ## L1: every target is validated BEFORE any row is sent, and any rows
 ## already sent are rolled back (cancelled) if a later POST fails — so
 ## a half-created group can never leave invitees waiting forever.
 func send_group_invite(targets: Array, stake: int) -> Dictionary:
-	if targets.is_empty() or targets.size() > MAX_GROUP_TARGETS:
-		return {"ok": false, "group_id": "", "error": "Pick 1 to 3 friends for a 4-player game."}
+	var valid := validate_group_targets(targets, Save.account_id)
+	if not bool(valid.get("ok", false)):
+		return {"ok": false, "group_id": "", "error": String(valid.get("error", "Could not send the invites."))}
 	if not Supabase.configured:
 		return {"ok": false, "group_id": "", "error": "Invites are not connected yet — use NEARBY to play together on the same Wi-Fi."}
-	for t in targets:
-		var to_id := String(t.get("id", ""))
-		if to_id == "":
-			return {"ok": false, "group_id": "", "error": "One of the friends has no player id — pick them again."}
-		if to_id == Save.account_id:
-			return {"ok": false, "group_id": "", "error": "You cannot invite yourself."}
 	var group_id := Accounts.generate_uuid()
 	var sent: Array = []
 	for t in targets:
@@ -170,6 +263,43 @@ func decline_invite(invite: Dictionary) -> Dictionary:
 	invites_changed.emit()
 	return {"ok": true, "error": ""}
 
+## Cancel an invite I sent (inviter side, from the invite box's
+## "WAITING FOR…" list). Cancels the WHOLE group, not just one row:
+## a 4-player group with one friend un-invited can never become a
+## 4-player match (there is no 3-player mode), so the other rows are
+## cancelled too and the invitees' invites disappear. Each row is
+## PATCHed to "cancelled" (the L1 rollback status); the group is then
+## dropped locally so it can never fire group_ready. Returns
+## {ok, error} — best-effort: a row whose PATCH fails is reported in
+## the error instead of claiming a clean cancel.
+func cancel_invite(invite: Dictionary) -> Dictionary:
+	var group_id := String(invite.get("group_id", ""))
+	if group_id == "":
+		return {"ok": false, "error": "That invite has no group to cancel."}
+	var rows: Array = []
+	for inv in outgoing:
+		if String(inv.get("group_id", "")) == group_id:
+			rows.append(inv)
+	if rows.is_empty():
+		return {"ok": false, "error": "That invite is already gone."}
+	var failed := 0
+	# Drop the group locally FIRST: the PATCH broadcasts arrive live
+	# (Realtime) while the later rows are still being cancelled, and
+	# without this the broadcast's _check_group would fail the group
+	# and toast "an invite expired or was declined" for a cancel the
+	# inviter chose themself. A row whose PATCH fails stays pending on
+	# the server — the error below says so, and the next refresh()
+	# re-tracks it, so it can be cancelled again from the box.
+	_remove_outgoing_group(group_id)
+	for row in rows:
+		var res := await Supabase.update_invite(String(row.get("id", "")), "cancelled")
+		if not bool(res.get("ok", false)):
+			failed += 1
+	invites_changed.emit()
+	if failed > 0:
+		return {"ok": false, "error": "Cancelled, but %d invite(s) could not be updated — they may still show as waiting for the other player." % failed}
+	return {"ok": true, "error": ""}
+
 ## Reload pending incoming invites from the server (the Realtime
 ## backstop). Also restores sent invites / groups (L2) so a restart
 ## does not lose tracking of invites sent before it. Returns {ok, error}.
@@ -199,6 +329,11 @@ func refresh() -> Dictionary:
 		for row in out.get("data", []):
 			if is_expired(row):
 				await _expire_invite(row)
+			elif Save.consumed_invite_groups.has(String(row.get("group_id", ""))):
+				# v11: this group already fired group_ready (the
+				# inviter joined) — do not re-track it, or the next
+				# poll would re-fire group_ready for a dead room.
+				continue
 			else:
 				_track_outgoing(row, String(row.get("mode", "2p")))
 	invites_changed.emit()
@@ -280,6 +415,14 @@ func _on_realtime_invite(record: Dictionary) -> void:
 			incoming.append(record)
 			invite_received.emit(record)
 			invites_changed.emit()
+	elif to_id == Save.account_id and (status == "cancelled" or status == "declined" or status == "expired"):
+		# v11: the inviter cancelled the invite (or it expired) — drop
+		# it from my inbox live instead of leaving it there until the
+		# next refresh/restart.
+		var before := incoming.size()
+		_remove_incoming(String(record.get("id", "")))
+		if incoming.size() != before:
+			invites_changed.emit()
 	elif from_id == Save.account_id:
 		# One of my sent invites changed: update the group state.
 		_update_outgoing(record)
@@ -316,11 +459,27 @@ func _check_group(group_id: String) -> void:
 	var g: Dictionary = groups[group_id]
 	var state := group_state(g.get("invites", []))
 	if state == "ready":
+		# v11: consume the group BEFORE emitting — the rows stay
+		# "accepted" on the server forever, so a later refresh()
+		# must not re-track (and re-fire) this group. A group that
+		# became ready while the app was closed is NOT consumed yet,
+		# so refresh() still restores it and it fires exactly once.
+		_mark_group_consumed(group_id)
 		groups.erase(group_id)
 		group_ready.emit(group_id, g.get("invites", []))
 	elif state == "failed":
 		groups.erase(group_id)
 		group_failed.emit(group_id, "An invite expired or was declined — the group cannot start.")
+
+## v11: remember that a group already fired group_ready (persisted in
+## the save so it survives restarts). refresh() skips consumed groups.
+func _mark_group_consumed(group_id: String) -> void:
+	if group_id == "" or Save.consumed_invite_groups.has(group_id):
+		return
+	Save.consumed_invite_groups.append(group_id)
+	while Save.consumed_invite_groups.size() > 50:
+		Save.consumed_invite_groups.remove_at(0)
+	Save.save()
 
 # ------------------------------------------------------------------ internals
 

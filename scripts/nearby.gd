@@ -1,14 +1,13 @@
 class_name NearbyScreen
 extends Control
 
-## NEARBY — same-Wi-Fi play (v6). No internet server exists yet (hosting
-## needs an Oracle account + a card for verification — see
-## docs/online-server.md), so two phones on the same Wi-Fi match
+## NEARBY — same-Wi-Fi play (v6). Two phones on the same Wi-Fi match
 ## directly: one HOSTS, the other JOINS. No internet needed.
 ##
-## Also holds the internet server address field, so a future hosted
-## server IP can be entered without a new build: ONLINE will use it
-## once a server exists.
+## v11: ONLINE plays worldwide over P2P/WebRTC (see docs/p2p-online.md)
+## — no server address is needed, and this screen no longer has an
+## INTERNET SERVER field. The legacy ENet server path is kept behind
+## the transport switch in net_client.gd for one version (rollback).
 
 signal host_chosen
 signal join_chosen
@@ -50,32 +49,15 @@ func _ready() -> void:
 	join.pressed.connect(func() -> void: join_chosen.emit())
 	root.add_child(join)
 	root.add_child(UiKit.muted_label("Finds a phone on your Wi-Fi that is hosting.", 17))
-	var srv_title := UiKit.body_label("INTERNET SERVER — worldwide play (for later)", 20)
+	var srv_title := UiKit.body_label("ONLINE — WORLDWIDE PLAY", 20)
 	root.add_child(srv_title)
-	var srv_note := UiKit.muted_label("Now: %s — no worldwide server yet, so use NEARBY above. When a server exists, type its address here and tap SAVE; ONLINE will use it." % Save.online_host, 17)
-	# Autowrap is essential: without it this long line's minimum width
-	# (~1159 px) blows the whole VBox out past the screen edge.
+	# v11 (plan §3/§5): ONLINE plays over P2P/WebRTC — there is no
+	# server address any more, so the INTERNET SERVER field is gone.
+	# Save.online_host stays in the save file (compatibility) but is
+	# no longer read for ONLINE; LAN HOST/JOIN above are untouched.
+	var srv_note := UiKit.muted_label("Online: worldwide over the internet — no address needed.", 17)
 	srv_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	root.add_child(srv_note)
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 10)
-	root.add_child(row)
-	var edit := LineEdit.new()
-	edit.text = Save.online_host
-	edit.placeholder_text = "Server IP or hostname"
-	edit.add_theme_font_size_override("font_size", 22)
-	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	edit.custom_minimum_size = Vector2(0, 56)
-	row.add_child(edit)
-	var save := UiKit.dark_button("SAVE", 22)
-	save.pressed.connect(func() -> void:
-		var v := edit.text.strip_edges()
-		if v == "":
-			return
-		Save.online_host = v
-		Save.save()
-		srv_note.text = "Saved — ONLINE will use %s." % v)
-	row.add_child(save)
 	var spacer := Control.new()
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE

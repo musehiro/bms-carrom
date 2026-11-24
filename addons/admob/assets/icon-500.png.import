@@ -3,15 +3,11 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://bxdta6aj7fg1s"
-path="res://.godot/imported/icon-500.png-551469a97496c83ff13bc47c2b1cdefa.ctex"
-metadata={
-"vram_texture": false
-}
+valid=false
 
 [deps]
 
 source_file="res://addons/admob/assets/icon-500.png"
-dest_files=["res://.godot/imported/icon-500.png-551469a97496c83ff13bc47c2b1cdefa.ctex"]
 
 [params]
 

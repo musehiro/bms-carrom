@@ -17,6 +17,9 @@ signal open_howto
 signal open_aim_assist
 signal watch_ad_coins
 signal watch_ad_daily
+# v11 coin loop: the OUT OF COINS banner offers a free bot match next to
+# the ad — a broke player can play right away while earning back.
+signal play_broke_bot
 # v7 invites: the invite box lives on this screen; Main owns the stake
 # picker + the game-server join, so these signals hand the choice over.
 signal invite_accept_chosen(invite: Dictionary)
@@ -140,6 +143,11 @@ func _ready() -> void:
 	var out_ad := UiKit.gold_button("WATCH AD — EARN COINS", 22)
 	out_ad.pressed.connect(func() -> void: watch_ad_coins.emit())
 	out_v.add_child(out_ad)
+	# v11 coin loop: broke-state entry point — free bot match, same
+	# banner as the ad, so the player is never stuck with one option.
+	var out_bot := UiKit.dark_button("PLAY vs BOT — FREE", 22)
+	out_bot.pressed.connect(func() -> void: play_broke_bot.emit())
+	out_v.add_child(out_bot)
 	# ---- Hero: large labelled board ----
 	var hero := VBoxContainer.new()
 	hero.add_theme_constant_override("separation", 0)
@@ -375,6 +383,13 @@ func _open_verify_popup() -> void:
 # for a 4-player doubles invite. The panel rebuilds whenever the
 # invite state changes (Realtime / poll) while it is open.
 
+## v11: open the invite box from the PLAY menu's PLAY WITH FRIENDS
+## button (Main shows home, then calls this). No-op when it is
+## already open — never toggles it closed by accident.
+func open_invite_box() -> void:
+	if _invite_panel == null:
+		_toggle_invite_box()
+
 func _toggle_invite_box() -> void:
 	if _invite_panel != null:
 		_invite_dim.queue_free()
@@ -477,12 +492,42 @@ func _refresh_invite_box() -> void:
 					refresh())
 			row.add_child(decline)
 	# ---- Sent invites (waiting) ----
+	# Grouped by group_id (one 4-player invite = one group of 3 rows):
+	# each person shows ✓ accepted or • still waiting, and one CANCEL
+	# button abandons the whole group (Friends.cancel_invite).
 	if not Friends.outgoing.is_empty():
 		body.add_child(UiKit.muted_label("WAITING FOR…", 17))
+		var sent_groups := {}
+		var sent_order: Array = []
 		for inv in Friends.outgoing:
-			var st := String(inv.get("status", "pending"))
-			if st == "pending":
-				body.add_child(UiKit.body_label("• %s — %s" % [String(inv.get("to_name", "a player")), "4 players" if String(inv.get("mode", "2p")) == "4p" else "2 players"], 18))
+			var gid := String(inv.get("group_id", ""))
+			if gid == "":
+				continue
+			if not sent_groups.has(gid):
+				sent_groups[gid] = []
+				sent_order.append(gid)
+			(sent_groups[gid] as Array).append(inv)
+		for gid in sent_order:
+			var rows: Array = sent_groups[gid]
+			var mode_text := "4 players" if String(rows[0].get("mode", "2p")) == "4p" else "2 players"
+			var parts: Array = []
+			for inv in rows:
+				var mark := "✓" if String(inv.get("status", "pending")) == "accepted" else "•"
+				parts.append("%s %s" % [mark, String(inv.get("to_name", "a player"))])
+			var grow := HBoxContainer.new()
+			grow.add_theme_constant_override("separation", 10)
+			body.add_child(grow)
+			var glabel := UiKit.body_label("%s — %s" % [", ".join(parts), mode_text], 18)
+			glabel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			grow.add_child(glabel)
+			var first_row: Dictionary = rows[0]
+			var cancel := UiKit.dark_button("CANCEL", 18)
+			cancel.custom_minimum_size = Vector2(110, 0)
+			cancel.pressed.connect(func() -> void:
+				var res := await Friends.cancel_invite(first_row)
+				if not bool(res.get("ok", false)):
+					refresh())
+			grow.add_child(cancel)
 	# ---- Friends: search + invite ----
 	body.add_child(UiKit.title_label("FRIENDS", 24))
 	body.add_child(UiKit.muted_label("Search by display name — never by Gmail.", 16))
@@ -526,7 +571,16 @@ func _refresh_invite_box() -> void:
 			invite_send_chosen.emit(player))
 		prow.add_child(inv_btn)
 	if not _selected_4p.is_empty():
-		var send4 := UiKit.gold_button("SEND 4-PLAYER INVITE (%d)" % _selected_4p.size(), 20)
+		# 3-player guard (v11): the invite UI offers only 1-or-3
+		# picks — with exactly 2 friends picked there is no valid
+		# match (2p takes 1 friend, 4p takes 3), so the send button
+		# is disabled and the note says so. Friends.send_group_invite
+		# rejects a 2-pick group as well (defence in depth).
+		var picked_n := _selected_4p.size()
+		var send4 := UiKit.gold_button("SEND 4-PLAYER INVITE (%d)" % picked_n, 20)
+		if picked_n == 2:
+			send4.disabled = true
+			send4.text = "PICK 1 MORE FRIEND (OR REMOVE 1)"
 		send4.pressed.connect(func() -> void:
 			var picked: Array = []
 			for p in _selected_4p.values():
@@ -540,7 +594,12 @@ func _refresh_invite_box() -> void:
 			picked_names.append(String(p.get("display_name", "?")))
 		# body_label (autowrap) — a muted_label has no autowrap, so a
 		# long note would widen the whole scroll body past the panel.
-		body.add_child(UiKit.body_label("To: %s. Tap 4P on 1–3 friends, then send — the match starts when all accept. You are the fourth player." % ", ".join(picked_names), 16))
+		var pick_note := "To: %s. Tap 4P on 3 friends, then send — the match starts when all accept. You are the fourth player." % ", ".join(picked_names)
+		if picked_n == 1:
+			pick_note = "To: %s. Send a 4-player invite to 3 friends — or tap INVITE on one friend for a 1 vs 1 match. Matches are 2 or 4 players only." % ", ".join(picked_names)
+		elif picked_n == 2:
+			pick_note = "To: %s. Pick 1 more friend for doubles (3 total), or remove 1 — a 3-player match is not supported." % ", ".join(picked_names)
+		body.add_child(UiKit.body_label(pick_note, 16))
 
 func _on_search_pressed() -> void:
 	if _search_edit == null:

@@ -165,13 +165,14 @@ func _run() -> void:
 		var no_mm: bool = not _main._searching_active and _main._searching == null
 		_check("D: PLAY does not start matchmaking", no_mm)
 		await _frames(3)
-		# v3: PLAY opens the full-screen mode-choice screen (a child of
-		# Main, not a popup on home) — it must offer SOLO and ONLINE.
+		# v11: PLAY opens the three-big-button menu (a child of Main,
+		# not a popup on home) — it must offer PLAY WITH A BOT, PLAY
+		# WITH THE WORLD and PLAY WITH FRIENDS.
 		# NOTE: home is freed by _open_mode_choice, so do NOT touch it
 		# after the emit (accessing it segfaults the test runner).
-		var mode_ok := _main._mode != null and _find_button(_main._mode, "SOLO —") != null and _find_button(_main._mode, "ONLINE —") != null
+		var mode_ok := _main._mode != null and _main._mode.bot_button != null and _main._mode.world_button != null and _main._mode.friends_button != null
 		print("INFO: after PLAY pressed: searching_active=", _main._searching_active, " mode screen=", mode_ok)
-		_check("D: PLAY opens mode-choice screen", mode_ok)
+		_check("D: PLAY opens the three-button Play menu", mode_ok)
 	# --- E: online search offers a labelled-BOT fallback after ~12 s ---
 	# Isolate the timer from the Net failure path: disconnect the queue-failed
 	# handler so the search popup stays up (on a real phone the connection

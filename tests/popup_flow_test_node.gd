@@ -8,12 +8,17 @@ extends Node
 ## v10 flow: SOLO goes DIRECT to the board (short loading screen, random
 ## bot) — the difficulty popup (EASY/MEDIUM/HARD) is DELETED, and the
 ## World Tour roster is DELETED too (no choosing which bot, anywhere).
+## v11 flow: PLAY opens the THREE-BIG-BUTTON menu — PLAY WITH A BOT
+## (solo vs AI, same direct flow as v10 SOLO), PLAY WITH THE WORLD
+## (random matchmaking, same stake picker + 2P/4P choice as v10
+## ONLINE), PLAY WITH FRIENDS (invite box). The old SOLO / ONLINE
+## tiles are gone; the checks below follow the new buttons.
 ## Verifies:
-##   F1: real tap on PLAY opens the mode-choice screen (SOLO + ONLINE)
+##   F1: real tap on PLAY opens the Play menu (BOT + WORLD + FRIENDS)
 ##   F1b: real tap on BACK returns to the home screen
-##   F2: real tap on SOLO shows the loading screen (no difficulty popup)
+##   F2: real tap on PLAY WITH A BOT shows the loading screen (no difficulty popup)
 ##   F3: after the loading screen a solo match starts vs a random bot
-##   F4: real tap on ONLINE opens the stake picker; quick 100 + FIND
+##   F4: real tap on PLAY WITH THE WORLD opens the stake picker; quick 100 + FIND
 ##      OPPONENT starts the search popup (with the 12 s BOT fallback
 ##      visible after fast-forward)
 ##   L3: the home ONLINE tile also opens the stake picker and the
@@ -129,7 +134,7 @@ func _run() -> void:
 	if home == null:
 		_finish()
 		return
-	# --- F1: real tap on PLAY opens the mode-choice screen ---
+	# --- F1: real tap on PLAY opens the three-button Play menu ---
 	var play_btn := _find_button(home, "▶")
 	_check("F1: PLAY button exists", play_btn != null)
 	if play_btn == null:
@@ -137,22 +142,26 @@ func _run() -> void:
 		return
 	print("INFO: PLAY rect=", play_btn.get_global_rect())
 	await _tap(_center(play_btn))
-	var solo_btn := _find_button(_main, "SOLO —")
-	var online_btn := _find_button(_main, "ONLINE —")
-	print("INFO: after PLAY tap: solo=", solo_btn, " online=", online_btn, " mode_screen=", _main._mode, " searching_active=", _main._searching_active)
-	_check("F1: PLAY opens mode screen with SOLO", solo_btn != null)
-	_check("F1: PLAY opens mode screen with ONLINE", online_btn != null)
-	if solo_btn == null:
+	# v11: the menu names its three big buttons (BotButton / WorldButton
+	# / FriendsButton) — use them directly instead of label prefixes.
+	var bot_btn: Button = _main._mode.bot_button if _main._mode != null else null
+	var world_btn: Button = _main._mode.world_button if _main._mode != null else null
+	var friends_btn: Button = _main._mode.friends_button if _main._mode != null else null
+	print("INFO: after PLAY tap: bot=", bot_btn, " world=", world_btn, " friends=", friends_btn, " mode_screen=", _main._mode, " searching_active=", _main._searching_active)
+	_check("F1: PLAY opens the menu with PLAY WITH A BOT", bot_btn != null)
+	_check("F1: PLAY opens the menu with PLAY WITH THE WORLD", world_btn != null)
+	_check("F1: PLAY opens the menu with PLAY WITH FRIENDS", friends_btn != null)
+	if bot_btn == null:
 		print("INFO: main subtree after PLAY tap:")
 		_dump(_main, "")
 		_finish()
 		return
-	print("INFO: SOLO rect=", solo_btn.get_global_rect(), " mf=", solo_btn.mouse_filter)
-	print("INFO: ONLINE rect=", online_btn.get_global_rect(), " mf=", online_btn.mouse_filter)
+	print("INFO: BOT rect=", bot_btn.get_global_rect(), " mf=", bot_btn.mouse_filter)
+	print("INFO: WORLD rect=", world_btn.get_global_rect(), " mf=", world_btn.mouse_filter)
 	print("INFO: mode screen subtree:")
-	_dump(solo_btn.get_parent().get_parent(), "")
-	# What control does the viewport think is under the SOLO button?
-	await _hover_at(_center(solo_btn))
+	_dump(bot_btn.get_parent().get_parent(), "")
+	# What control does the viewport think is under the BOT button?
+	await _hover_at(_center(bot_btn))
 	# --- F1b: real tap on BACK returns to the home screen ---
 	var back_btn := _find_button(_main, "←")
 	_check("F1b: mode screen has BACK", back_btn != null)
@@ -163,19 +172,19 @@ func _run() -> void:
 		await _frames(3)
 		play_btn = _find_button(home, "▶")
 		await _tap(_center(play_btn))
-		solo_btn = _find_button(_main, "SOLO —")
-		online_btn = _find_button(_main, "ONLINE —")
-		_check("F1b: PLAY again reopens mode screen", solo_btn != null and online_btn != null)
-		if solo_btn == null:
+		bot_btn = _main._mode.bot_button if _main._mode != null else null
+		world_btn = _main._mode.world_button if _main._mode != null else null
+		_check("F1b: PLAY again reopens the menu", bot_btn != null and world_btn != null)
+		if bot_btn == null:
 			_finish()
 			return
-	# --- F2 (v10): real tap on SOLO shows the loading screen — NO
-	# difficulty popup, no bot choice. Straight to the board. ---
-	await _tap(_center(solo_btn))
+	# --- F2 (v10, v11): real tap on PLAY WITH A BOT shows the loading
+	# screen — NO difficulty popup, no bot choice. Straight to the board. ---
+	await _tap(_center(bot_btn))
 	var easy_btn := _find_button(_main, "EASY")
 	var med_btn := _find_button(_main, "MEDIUM")
-	print("INFO: after SOLO tap: loading=", _main._loading, " easy=", easy_btn, " medium=", med_btn, " mode screen still there=", _main._mode != null)
-	_check("F2: SOLO shows the loading screen", _main._loading != null and is_instance_valid(_main._loading) and _main._loading.visible)
+	print("INFO: after BOT tap: loading=", _main._loading, " easy=", easy_btn, " medium=", med_btn, " mode screen still there=", _main._mode != null)
+	_check("F2: PLAY WITH A BOT shows the loading screen", _main._loading != null and is_instance_valid(_main._loading) and _main._loading.visible)
 	_check("F2: no difficulty popup (EASY gone)", easy_btn == null)
 	_check("F2: no difficulty popup (MEDIUM gone)", med_btn == null)
 	if _main._loading == null:
@@ -192,21 +201,21 @@ func _run() -> void:
 	_check("F3: loading finishes and a solo match starts", _main._match != null)
 	if _main._match != null:
 		_check("F3: solo match is free (no stake)", _main._match.your_stake == 0 and _main._match.mode == "solo")
-	# --- F4: ONLINE path — stake picker, then search popup ---
+	# --- F4: PLAY WITH THE WORLD path — stake picker, then search popup ---
 	_main._show_home()
 	await _frames(5)
 	home = _main._home
 	play_btn = _find_button(home, "▶")
 	await _tap(_center(play_btn))
-	online_btn = _find_button(_main, "ONLINE —")
-	_check("F4: PLAY mode screen ONLINE exists", online_btn != null)
-	if online_btn == null:
+	world_btn = _main._mode.world_button if _main._mode != null else null
+	_check("F4: PLAY menu PLAY WITH THE WORLD exists", world_btn != null)
+	if world_btn == null:
 		_finish()
 		return
-	await _tap(_center(online_btn))
+	await _tap(_center(world_btn))
 	var quick100 := _find_button(_main, "100")
-	print("INFO: after ONLINE tap: quick100=", quick100)
-	_check("F4: ONLINE opens stake picker (100)", quick100 != null)
+	print("INFO: after WORLD tap: quick100=", quick100)
+	_check("F4: PLAY WITH THE WORLD opens stake picker (100)", quick100 != null)
 	if quick100 != null:
 		Net.queue_failed.disconnect(_main._on_queue_failed)
 		await _tap(_center(quick100))
@@ -235,8 +244,8 @@ func _run() -> void:
 			_check("F4: search offers BOT fallback after 12 s", bot_visible)
 			# Tap the BOT fallback -> practice match starts.
 			if bot_visible:
-				var bot_btn: Button = _main._search_bot_button
-				await _tap(_center(bot_btn))
+				var search_bot_btn: Button = _main._search_bot_button
+				await _tap(_center(search_bot_btn))
 				print("INFO: after BOT tap: match=", _main._match)
 				_check("F4: BOT fallback starts a practice match", _main._match != null)
 	# --- L3: home ONLINE tile — stake picker, then the 2P/4P choice

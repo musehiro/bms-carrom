@@ -25,6 +25,11 @@ var difficulty := 1 # 0 Easy, 1 Medium, 2 Hard, 3 Advanced, 4 Expert, 5 Master
 var table := 0 # online matchmaking band (from Stakes.band_for_stake): 0 <250, 1 <1000, 2 >=1000
 var your_stake := 0 # online: own stake, locked (deducted) at match start
 var opp_stake := 0 # online 2p: opponent's stake, from the server's matched message
+# F13 Phase 2 (v11): true when the server verified both stakes and put
+# them in the matched payload (verified_stakes=true) — the pot then
+# uses ONLY the server-sent stakes, never the claimed ones. False for
+# LAN / bot / tour / solo and old servers (local Stakes math applies).
+var stakes_verified := false
 var practice := false # true for the labelled BOT fallback match (zero coins)
 var opponent_name := "Computer"
 var opponent_level := 1
@@ -45,6 +50,14 @@ var _pot_credited := false
 var _double_ads := 0
 var _double_button: Button = null
 var _double_label: Label = null
+var _double_amount_label: Label = null # v11: "DOUBLE TO ◉ N" line, so a
+	# late server settlement can re-price the double offer.
+# F13 Phase 2 (v11): the server's authoritative settlement for this
+# match, when one arrives. -1 = none yet (offline / LAN / old server /
+# not settled). Stored when it arrives before the result screen and
+# applied in _show_result; applied live to the held pot otherwise.
+var _server_settlement := -1
+var _server_settlement_pot := 0
 var _collect_button: Button = null
 var _collect_amount_label: Label = null
 var _result_pop: Dictionary = {}
@@ -72,6 +85,17 @@ var turn_time_max := 20.0
 var timeouts_in_a_row := 0
 var remote_timeouts := 0
 var local_covered_queen := false
+## v11 match points (§4, per-coin formula): the LOCAL player's OWN
+## pocketed coins, net of foul returns/dues — tracked shot by shot in
+## _apply_events from the "own_pocketed" / "coins_returned" /
+## "due_paid" events (shooter == local_seat only, so a doubles
+## partner's coins never count toward MY points). _my_queen_pending
+## is true while I pocketed the queen and still owe the cover — the
+## +25 bonus is shown as "to come" until the cover lands, never
+## counted early.
+var _my_coins_pocketed := 0
+var _my_queen_pending := false
+var _points_label: Label = null
 var result_shown := false
 var entry_paid := false
 
@@ -550,14 +574,32 @@ func _resolve_shot(from_timeout: bool = false) -> void:
 
 func _apply_events(events: Array, shooter: int) -> void:
 	var own := CarromRules.own_color(rules_state, shooter)
+	# v11 match points: track MY OWN pocketed coins (net). The events
+	# carry the shooter, so remote shots (replayed locally) count only
+	# when the shooter is me. Foul returns/dues subtract again — the
+	# count is the net coins I hold at any moment, which is also what
+	# rules_state pocketed[my_team] shows for singles.
+	for e in events:
+		if int(e.get("player", -1)) != local_seat:
+			continue
+		match String(e.get("type", "")):
+			"own_pocketed":
+				_my_coins_pocketed += int(e.get("count", 0))
+			"coins_returned":
+				_my_coins_pocketed = maxi(0, _my_coins_pocketed - int(e.get("count", 0)))
+			"due_paid":
+				_my_coins_pocketed = maxi(0, _my_coins_pocketed - 1)
 	for e in events:
 		match e["type"]:
 			"queen_pocketed":
 				_show_message("QUEEN pocketed! Cover her next shot.", 2.5)
 				Sfx.pocket()
-			"queen_covered":
-				_show_message("Queen COVERED! +3 points.", 2.5)
 				if shooter == local_seat:
+					_my_queen_pending = true
+			"queen_covered":
+				_show_message("Queen COVERED! +%d points." % MatchPoints.QUEEN_BONUS, 2.5)
+				if shooter == local_seat:
+					_my_queen_pending = false
 					local_covered_queen = true
 					Save.queens_covered += 1
 					# Play Games: unlock "Pocket the Queen" now (native
@@ -568,6 +610,8 @@ func _apply_events(events: Array, shooter: int) -> void:
 				_reactivate("queen", CarromPhysics.BOARD_CENTER)
 			"queen_returned":
 				_show_message("Queen NOT covered — back to the centre.", 2.5)
+				if shooter == local_seat:
+					_my_queen_pending = false
 				_reactivate("queen", CarromPhysics.BOARD_CENTER)
 			"foul_striker":
 				_show_message("FOUL! Striker pocketed.", 2.5)
@@ -757,6 +801,24 @@ func _show_result() -> void:
 		else:
 			pot = your_stake + opp_stake
 			my_share = Stakes.payout(your_stake, opp_stake, "win" if won else ("draw" if is_draw else "loss"))
+	# F13 Phase 2: a settlement that arrived before the result screen
+	# (belt-and-braces — normally it arrives after our own report, once
+	# both sides agree) overrides the local computation for online
+	# matches. The server's payout is authoritative; the local math
+	# above is only the fallback when no settlement exists.
+	if mode == "online" and _server_settlement >= 0:
+		if player_count == 4:
+			my_share = Settlement.credit_for_outcome_4p(stakes4, local_seat, "win" if won else ("draw" if is_draw else "loss"), _server_settlement, true)
+		else:
+			my_share = Settlement.credit_for_outcome(your_stake, opp_stake, "win" if won else ("draw" if is_draw else "loss"), _server_settlement, true)
+		pot = _server_settlement_pot
+	# F13 Phase 2: report the outcome so the server can settle the pot.
+	# It pays only when both sides' reports agree (win+loss, or
+	# draw+draw); a forfeit/disconnect win reports too, but the room is
+	# already gone by then, so the server ignores it and the local win
+	# stands. Tour/solo/bot matches never report (no server, no stakes).
+	if mode == "online" and net != null:
+		net.send_result("win" if won else ("draw" if is_draw else "loss"))
 	# Economy (v5): solo vs AI is free practice — ZERO coins, win or lose.
 	# Staked modes pay the POT — but a WIN does not credit immediately:
 	# the premium win screen HOLDS the pot until the player COLLECTs it,
@@ -785,7 +847,18 @@ func _show_result() -> void:
 		Save.save()
 	elif is_draw:
 		coins_earned = my_share # refund of own stake
-	var xp_earned := Save.XP_PER_MATCH + (Save.XP_PER_WIN if won else 0) + (Save.XP_PER_QUEEN if local_covered_queen else 0)
+	# v11 match points (§4, per-coin formula): 10 pts per OWN coin
+	# pocketed + 25 for a covered queen + 50 win bonus. Computed
+	# BEFORE the XP line — points FEED the XP/level system, so an
+	# online match's XP is the base XP + the points earned. Solo/tour
+	# pay no points (and no XP from points), like they pay no coins.
+	var mp_earned := 0
+	if mode == "online":
+		mp_earned = MatchPoints.points_for_coins(_my_coins_pocketed, local_covered_queen, won)
+		Save.match_points += mp_earned
+		if is_draw:
+			Save.online_draws += 1
+	var xp_earned := Save.XP_PER_MATCH + (Save.XP_PER_WIN if won else 0) + (Save.XP_PER_QUEEN if local_covered_queen else 0) + mp_earned
 	var new_level := Save.add_xp(xp_earned)
 	Save.add_coins(coins_earned)
 	Save.matches_played += 1
@@ -817,11 +890,13 @@ func _show_result() -> void:
 		"clean_sweep": won and my_coins >= 9,
 		"total_coins_pocketed": Save.total_coins_pocketed,
 		"score": PlayGames.compute_match_score(my_coins, local_covered_queen, won),
+		"match_points": mp_earned,
+		"match_points_total": Save.match_points,
 	})
 	# Interstitial policy: only after every 3rd match.
 	var show_ad := Save.interstitial_counter % AdsConfig.INTERSTITIAL_EVERY_N_MATCHES == 0
 	if won:
-		_show_premium_win(my_share, pot, xp_earned, new_level, winner)
+		_show_premium_win(my_share, pot, xp_earned, new_level, winner, mp_earned)
 	else:
 		var lines: Array = []
 		if mode == "solo":
@@ -838,6 +913,8 @@ func _show_result() -> void:
 				else:
 					lines.append("Online loss — you lost your stake ◉ %d" % your_stake)
 		lines.append("XP: +%d" % xp_earned)
+		if mode == "online":
+			lines.append(MatchPoints.result_line(mp_earned, Save.match_points))
 		if new_level > 0:
 			lines.append("LEVEL UP! Now Lv %d · %s" % [new_level, Save.rank_name()])
 		if winner >= 0:
@@ -869,7 +946,7 @@ func _show_result() -> void:
 ## ladder steps). The stake line shows no numbers at all when the pot
 ## is 0. Clean-UI rule: no duplicate buttons — the old solo "PRACTICE
 ## WIN / TAP TO CONTINUE" button is gone (it duplicated REMATCH).
-func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, winner: int) -> void:
+func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, winner: int, mp_earned: int = 0) -> void:
 	_earn_mode = false
 	var has_pot := _is_staked_mode() and my_share > 0
 	var pop_size := Vector2(620, 780) if has_pot or not _is_staked_mode() else Vector2(620, 660)
@@ -928,6 +1005,7 @@ func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, 
 			_double_button = dbl["button"]
 			_double_button.pressed.connect(_on_double_pressed)
 			box.add_child(_double_button)
+			_double_amount_label = dbl["labels"][1] # "DOUBLE TO ◉ N" line
 			_double_label = UiKit.muted_label("2 ads double your winnings — each ad also pays the ad ladder.", 17)
 			_double_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			box.add_child(_double_label)
@@ -973,8 +1051,10 @@ func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, 
 			var capped := UiKit.muted_label("Ad limit reached today — come back tomorrow for ad coins.", 17)
 			capped.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			box.add_child(capped)
-	# Info line: XP / level / board score.
+	# Info line: XP / level / board score / match points.
 	var info := "XP: +%d" % xp_earned
+	if mode == "online":
+		info += "  •  " + MatchPoints.result_line(mp_earned, Save.match_points)
 	if new_level > 0:
 		info += "  •  LEVEL UP! Now Lv %d · %s" % [new_level, Save.rank_name()]
 	if winner >= 0:
@@ -1018,6 +1098,43 @@ func _stacked_button(lines: Array, style: String) -> Dictionary:
 		labels.append(l)
 	b.add_child(vb)
 	return {"button": b, "labels": labels}
+
+## F13 Phase 2 (v11): apply the server's authoritative settlement for
+## this online match. Called by Main when Net.settlement_received fires.
+##   * Invalid settlement (bad shape, payout outside 0..pot) — ignored;
+##     the locally held pot stands.
+##   * Result not shown yet — stored and applied in _show_result.
+##   * Win screen open with the pot still held — the held pot is
+##     RE-PRICED to the server's payout (COLLECT / DOUBLE labels updated,
+##     Save.pending_pot updated so a kill on the win screen still
+##     recovers the settled amount, not the claimed one).
+##   * Nothing held (loss, draw already refunded, already collected) —
+##     nothing to re-price; the settlement is ignored.
+func apply_server_settlement(data: Dictionary) -> void:
+	if mode != "online":
+		return
+	var parsed := Settlement.parse_settlement(data)
+	if not bool(parsed.get("ok", false)):
+		return
+	var payout := int(parsed["payout"])
+	var pot := int(parsed["pot"])
+	if not result_shown:
+		_server_settlement = payout
+		_server_settlement_pot = pot
+		return
+	if _pot_credited or _pot_pending <= 0:
+		return
+	_server_settlement = payout
+	_server_settlement_pot = pot
+	_pot_pending = payout
+	Save.pending_pot = payout
+	Save.save()
+	if _collect_amount_label:
+		_collect_amount_label.text = "◉ %d" % payout
+	if _double_amount_label:
+		_double_amount_label.text = "DOUBLE TO ◉ %d" % (payout * 2)
+	if _double_label:
+		_double_label.text = "Server settled your winnings at ◉ %d — 2 ads double them." % payout
 
 ## Credit the held pot if it has not been credited yet (base amount —
 ## used by COLLECT and by every exit path, so coins are never lost).
@@ -1081,7 +1198,10 @@ func on_double_ad_watched() -> void:
 		return
 	_double_ads += 1
 	if _double_ads >= 2:
-		var doubled := _pot_pending * 2
+		# v11: the doubling formula lives in Stakes (one formula for
+		# the win screen and the tests) — 2 ads double the SETTLED pot
+		# (which a server settlement may already have re-priced).
+		var doubled := Stakes.doubled_winnings(_pot_pending, _double_ads)
 		_pot_credited = true
 		_pot_pending = 0
 		Save.pending_pot = 0
@@ -1321,6 +1441,13 @@ func _build_hud() -> void:
 	_my_dots.color = Color(0.94, 0.92, 0.86)
 	_my_dots.custom_minimum_size = Vector2(200, 24)
 	my_box.add_child(_my_dots)
+	# v11 match points (§4): live running score beside the board
+	# score — online matches only (solo/tour pay no points). Text is
+	# set in _update_hud from _my_coins_pocketed + queen state.
+	_points_label = UiKit.muted_label("", 18)
+	_points_label.name = "PointsLine"
+	_points_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	my_box.add_child(_points_label)
 	var hint := UiKit.muted_label("Drag the striker sideways to slide • Pull back to aim • Release to shoot", 16)
 	my_box.add_child(hint)
 
@@ -1474,6 +1601,15 @@ func _update_hud() -> void:
 	_my_dots.color = Color(0.15, 0.15, 0.17) if my_color == "black" else Color(0.94, 0.92, 0.86)
 	_opp_dots.queue_redraw()
 	_my_dots.queue_redraw()
+	# v11 match points (§4): live running score in MY panel — online
+	# only. The dots above already show the TEAM count; the points
+	# line is MY OWN coins (10 each) + covered-queen bonus (25).
+	if _points_label != null:
+		if mode == "online":
+			_points_label.text = MatchPoints.live_line(_my_coins_pocketed, local_covered_queen, _my_queen_pending)
+			_points_label.visible = true
+		else:
+			_points_label.visible = false
 	var turn_seat: int = rules_state["turn"]
 	if player_count == 4:
 		var turn_name := String(players4[turn_seat].get("name", "Player")) if turn_seat < players4.size() else "Player"

@@ -3,15 +3,11 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://crwsw8kwjur6s"
-path="res://.godot/imported/howto-720x1280.png-a470f313207d14f7d314c0e66df8ceb7.ctex"
-metadata={
-"vram_texture": false
-}
+valid=false
 
 [deps]
 
 source_file="res://verification/howto-720x1280.png"
-dest_files=["res://.godot/imported/howto-720x1280.png-a470f313207d14f7d314c0e66df8ceb7.ctex"]
 
 [params]
 

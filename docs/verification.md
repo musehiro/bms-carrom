@@ -1135,3 +1135,82 @@ In `verification/v10/` (each mode at 720×1280 + 720×1640):
   The v10 loopback fix does NOT need the native code, so a missing
   deep-link in the APK is expected until the workflow fix — report
   honestly what the APK contains).
+
+## v11 verification — P2P online (2026-11-23, plan-alignment worker)
+
+Godot 4.3 headless, `~/workspace/tmp/Godot_v4.3-stable_linux.x86_64`
+(the `/tmp` copy was wiped mid-task; use the persistent path).
+Baseline (integrated tree): 902 passed / 2 pre-existing F3 popup-timer
+failures + `net_test` no-server fail. Final: **990 passed / 2 failed**
+— the same 2 pre-existing popup F3s (`popup_flow_test` 25/1,
+`popup_double_test` 5/1), zero new failures. `net_test` still fails
+with no server, by design.
+
+### What was verified headless
+
+- `--import` clean: zero SCRIPT ERROR / ERROR after placing
+  `addons/webrtc_native/` (webrtc-native 1.2.2, Linux .so only).
+  `ClassDB.class_exists` true for `WebRTCPeerConnection` /
+  `WebRTCMultiplayerPeer` / `WebRTCDataChannel`; `create_mesh(1)` +
+  `initialize` OK; exactly the spike's 3 signals (no `create_answer`).
+- `tests/p2p_test.gd` — **69/69**: 3-player guard (exactly-2-target
+  groups rejected at send time, UI + main re-check), signalling
+  shapes/parse, breaker derivation (deterministic from match id;
+  both 2p seats across 200 ids, all 4 seats across 400 ids), ICE
+  config (Google STUN + OpenRelay demo TURN defaults, malformed
+  config falls back), match-points formula (9 coins + covered queen
+  + win = 165), transport interface (P2P default, legacy switch
+  round-trip, 20 s timeout, 2 s poll, 2p/4p matched payloads),
+  Broadcast parse, presence filter (stale >90 s dropped, no Gmail /
+  coins in rows).
+- `tests/test_runner.gd` — **229/229** (was 228; the p2p suite is now
+  wired in as `_test_v11_p2p`).
+- 4p scene test — **21/21** (was 9): added §4 HUD checks (every
+  player's name + level on their side, PARTNER/OPP tags; teams are
+  seats 0,2 vs 1,3) and live "Points: 0" line, 2p + 4p. One test
+  expectation was wrong during the work (Carol seat 2 is OPP, not
+  PARTNER, when the local seat is 1) — the game was right, the test
+  was fixed.
+- Mock Supabase (`tests/mock_supabase.py`) extended with queue/match
+  RPCs, presence, and a fake Broadcast channel; verified by curl +
+  a raw WebSocket client against a locally run mock (port 18082):
+  `find_match` pairs two players, poll by `player_ids=cs.{id}`
+  returns the match, queue empties after matching, a stake above the
+  player's coins is rejected and the bad row is deleted, the ±2 / ±4
+  level window works (gap 3 fails narrow, passes widened), presence
+  upsert/list/delete works, and a Broadcast `offer` sent on
+  `realtime:carrom-match-*` is re-emitted to clients and visible via
+  the `/broadcast/<channel>` seam.
+- Full suite re-run after all changes: every standalone and scene
+  suite green except the 2 pre-existing popup F3s (see the per-file
+  table in the worker's final report).
+
+### Bugs found and fixed during v11 alignment
+
+1. **Presence heartbeat never fired.** The group-poll early return in
+   `friends.gd:_process` ran before the heartbeat code. Fixed: the
+   heartbeat runs every frame, independent of the poll return.
+2. **`_sb()` return type.** `net_client.gd`'s dynamic Supabase accessor
+   needed an explicit `-> Node` return for `:=` inference, and
+   `ClassDB.instantiate` (not `class_new`) for WebRTC objects.
+3. **Import churn.** The headless `--import` marked textures
+   `valid=false` in 26 `.import` files and touched 4 AdMob `.aar`
+   files. Reverted with `git checkout` (same convention as previous
+   workers); only intended files remain modified.
+
+### NOT verified (needs a real device / a live backend / parent)
+
+- **Live WebRTC data channel (T1/T2).** The sandbox blocks UDP, so
+  no real peer connection was ever established. Two-real-phones test
+  still required: T1 same Wi-Fi, T2 different networks.
+- **Live Supabase.** `supabase/schema-p2p.sql` was written but NOT run
+  against the live project (dashboard step). The mock RPCs mirror the
+  SQL, but the real `find_match` / `create_match_from_invites` have
+  never executed.
+- **Android webrtc-native .so.** The spike zip contains Linux `.so`
+  only. The CI workflow step that fetches the 1.2.2 release (incl.
+  Android arm64 `.so` + checksum) is a parent action; the release has
+  no armeabi-v7a build, so ONLINE must degrade on arm32.
+- **`expire_match` is best-effort.** RLS has no update policy for
+  authenticated, so the direct PATCH is expected to fail until a
+  cleanup RPC exists; periodic cleanup is the real mechanism.

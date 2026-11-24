@@ -36,6 +36,8 @@ var tour_wins: int = 0 # v8: World Tour (advanced bot) wins — staked, like onl
 var queens_covered: int = 0
 var win_streak: int = 0 # Play Games "Hat-Trick": consecutive wins (reset on loss/draw)
 var total_coins_pocketed: int = 0 # Play Games "Sharpshooter": coins pocketed across all matches
+var match_points: int = 0 # v11: lifetime ONLINE match points (win +3, draw +1, loss +0)
+var online_draws: int = 0 # v11: online draws (each pays +1 match point)
 # F9 (match.gd): a win pot held on the win screen, persisted so killing
 # the app there does not lose it; cleared once credited/collected.
 var pending_pot: int = 0
@@ -54,7 +56,13 @@ var ad_date: String = "" # YYYY-MM-DD the ad counters belong to
 var aim_assist_until: int = 0 # unix time; 0 = inactive
 var aim_assist_ads_progress: int = 0 # 0..1 ads watched toward next hour
 var interstitial_counter: int = 0 # matches since last interstitial
-var online_host: String = "127.0.0.1" # matchmaking server; set a real host in Settings
+var online_host: String = "127.0.0.1" # LEGACY (v11): the old ENet matchmaking server host. Kept in the save for compatibility; ONLINE now plays over P2P/WebRTC and no longer reads this. The legacy path stays behind the transport switch in net_client.gd for one version (rollback).
+var consumed_invite_groups: Array = [] # v11: invite group_ids whose
+## group_ready already fired (the inviter joined). refresh() skips
+## them — the rows stay "accepted" on the server forever, so without
+## this every app restart would re-fire group_ready for every
+## completed invite and re-join a dead room. Capped at 50 (trimmed
+## on append); group_ids are UUIDs, never reused.
 var ads_policy_version: int = 0 # ads policy applied (v9 = 9): < 9 -> the
 # interstitial counter resets on first v9 launch, so a player who already
 # played in v7/v8 does not get a full-screen ad after their first v9 match.
@@ -110,6 +118,8 @@ func load_save() -> void:
 	tour_wins = int(_cfg.get_value("player", "tour_wins", 0))
 	queens_covered = int(_cfg.get_value("player", "queens_covered", 0))
 	win_streak = int(_cfg.get_value("player", "win_streak", 0))
+	match_points = int(_cfg.get_value("player", "match_points", 0))
+	online_draws = int(_cfg.get_value("player", "online_draws", 0))
 	total_coins_pocketed = int(_cfg.get_value("player", "total_coins_pocketed", 0))
 	pending_pot = int(_cfg.get_value("player", "pending_pot", 0))
 	owned_boards = _cfg.get_value("shop", "owned_boards", ["classic"])
@@ -132,6 +142,7 @@ func load_save() -> void:
 	interstitial_counter = int(mig["counter"])
 	ads_policy_version = int(mig["policy_version"])
 	online_host = String(_cfg.get_value("online", "host", "127.0.0.1"))
+	consumed_invite_groups = _cfg.get_value("online", "consumed_invite_groups", [])
 	account_gmail = String(_cfg.get_value("account", "gmail", ""))
 	account_id = String(_cfg.get_value("account", "id", ""))
 	account_verified = bool(_cfg.get_value("account", "verified", false))
@@ -153,6 +164,8 @@ func save() -> void:
 	_cfg.set_value("player", "tour_wins", tour_wins)
 	_cfg.set_value("player", "queens_covered", queens_covered)
 	_cfg.set_value("player", "win_streak", win_streak)
+	_cfg.set_value("player", "match_points", match_points)
+	_cfg.set_value("player", "online_draws", online_draws)
 	_cfg.set_value("player", "total_coins_pocketed", total_coins_pocketed)
 	_cfg.set_value("player", "pending_pot", pending_pot)
 	_cfg.set_value("shop", "owned_boards", owned_boards)
@@ -172,6 +185,7 @@ func save() -> void:
 	_cfg.set_value("ads", "interstitial_counter", interstitial_counter)
 	_cfg.set_value("ads", "policy_version", ads_policy_version)
 	_cfg.set_value("online", "host", online_host)
+	_cfg.set_value("online", "consumed_invite_groups", consumed_invite_groups)
 	_cfg.set_value("account", "gmail", account_gmail)
 	_cfg.set_value("account", "id", account_id)
 	_cfg.set_value("account", "verified", account_verified)

@@ -167,7 +167,7 @@ func _run() -> void:
 	Friends.incoming = [
 		{"id": "inv-1", "group_id": "grp-1", "from_id": "p-nimal", "to_id": "me",
 			"from_name": "Nimal", "to_name": "Test Player", "mode": "2p", "stake": 100,
-			"status": "pending", "created_at": "2026-11-22T13:00:00+00:00"},
+			"status": "pending", "created_at": Time.get_datetime_string_from_system(true, false) + "+00:00"},
 	]
 	Friends.outgoing = []
 	_main._home._search_results = [

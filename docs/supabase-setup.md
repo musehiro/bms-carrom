@@ -28,6 +28,19 @@ the agent cannot do this step (it needs a Supabase dashboard login).
    mentions `auth.users`, the project is still provisioning — wait a
    minute and run it again.
 
+## 2b. Run the v11 P2P schema (online matchmaking, no server)
+
+1. In the dashboard SQL Editor, open a **New query** and paste the
+   whole contents of `supabase/schema-p2p.sql`, then click **Run**.
+2. It must report success. It creates `matchmaking_queue`, `matches`
+   and `presence`, the `find_match` + `create_match_from_invites`
+   RPCs, RLS policies, adds `matches` + `presence` to the Realtime
+   publication, and adds `profiles.match_points`.
+3. This is the step that activates v11 online play — without it, random
+   matchmaking and lobby invites fail (the game reports a matchmaking
+   error, never a crash). The old `schema.sql` tables (`profiles`,
+   `invites`) must already exist (step 2 above).
+
 ## 3. Turn on the Auth methods the game uses
 
 1. **Authentication → Providers → Email**: make sure Email is

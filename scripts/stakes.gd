@@ -75,3 +75,14 @@ static func payout_4p(stakes: Array, your_seat: int, outcome: String) -> int:
 			return share
 		_:
 			return 0
+
+## v11 — win doubling (Buddhika: winner may DOUBLE online winnings by
+## watching 2 rewarded ads). The doubled amount is the base pot x2 and
+## is credited ONLY once both ads have been watched; before that the
+## answer is 0 (not doubled yet). The extra pot comes from the ads, not
+## from the opponent — the opponent's stake is never charged twice.
+## Pure, so the win screen and the tests share exactly this math.
+static func doubled_winnings(base_pot: int, ads_watched: int) -> int:
+	if ads_watched >= 2 and base_pot > 0:
+		return base_pot * 2
+	return 0

@@ -3,8 +3,10 @@
 Play real carrom online or offline. Real physics, fair matches, fewer ads.
 
 - **Solo (offline)** vs AI — Easy / Medium / Hard, error-based AI.
-- **Online** — random matchmaking worldwide, similar level (±2, widening
-  after 30 s), winner takes the pot. Needs the server in `server/`
+- **Online** — peer-to-peer WebRTC, no server: random matchmaking
+  worldwide, similar level (±2, widening after 30 s), winner takes
+  the pot (see `docs/p2p-online.md`). The old relay server in
+  `server/` is frozen, kept only as a one-version rollback
   (see `docs/online-server.md`).
 - **Coins economy** — win matches to earn coins; coins buy 6 boards and
   7 strikers (small capped stat differences, cosmetic-first).
@@ -42,3 +44,11 @@ follows (ICF rules, Carrom Pool reference look, economy, ad policy).
   (test IDs) — built and tested locally.
 - Online client + server — built; matchmaking verified on localhost
   only. Internet play needs a hosted server (see `docs/online-server.md`).
+- **v11 — online is now P2P/WebRTC (no server).** Matchmaking +
+  signalling run on Supabase (`supabase/schema-p2p.sql` — run it in
+  the dashboard), game traffic is direct phone-to-phone; the ENet
+  relay stays frozen behind a transport switch for one version.
+  Headless suite: 990 passed / 2 pre-existing F3 popup-timer
+  failures (see `docs/p2p-online.md` + `docs/verification.md` §v11).
+  Still needs: CI fetch of the webrtc-native Android `.so`, the
+  schema run, and the two-real-phones test (T1/T2).

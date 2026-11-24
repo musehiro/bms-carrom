@@ -55,6 +55,11 @@ func _initialize() -> void:
 	_test_supabase_realtime_parse()
 	_test_supabase_rows()
 	_test_net_invite_join_message()
+	_test_v11_matchmaking()
+	_test_v11_stakes()
+	_test_v11_invites_ui()
+	_test_v11_coin_loop()
+	_test_v11_p2p()
 	print("=== %d passed, %d failed ===" % [_passed, _failed])
 	for f in _failures:
 		print("FAIL: ", f)
@@ -927,6 +932,35 @@ func _test_net_invite_join_message() -> void:
 	_check("v7 net: invite_join message shape", String(msg.get("type", "")) == "invite_join" and String(msg.get("group_id", "")) == "grp-9" and int(msg.get("stake", 0)) == 100 and not bool(msg.get("is_inviter", true)))
 	var inviter := NetClient.invite_join_message("grp-9", "Me", 3, 100, "4p", 1, true)
 	_check("v7 net: inviter flag + 4p mode carried", bool(inviter.get("is_inviter", false)) and String(inviter.get("mode", "")) == "4p" and int(inviter.get("table", -1)) == 1)
+
+# ------------------------------------------------- v11 standalone suites
+## The four v11 workers each ship a standalone SceneTree test script
+## (its own _initialize, its own counters, some needing the running
+## tree's autoloads) — they cannot be called as plain functions from
+## this runner, so each is run as a headless subprocess of this same
+## Godot binary and its exit code + "0 failed" marker are checked
+## here. One command (this file) still runs the whole suite.
+func _test_v11_matchmaking() -> void:
+	_run_suite("matchmaking", "tests/matchmaking_test.gd")
+
+func _test_v11_stakes() -> void:
+	_run_suite("stakes v11", "tests/stakes_v11_test.gd")
+
+func _test_v11_invites_ui() -> void:
+	_run_suite("invites ui", "tests/invites_ui_test.gd")
+
+func _test_v11_coin_loop() -> void:
+	_run_suite("coin loop", "tests/coin_loop_test.gd")
+
+func _test_v11_p2p() -> void:
+	_run_suite("p2p", "tests/p2p_test.gd")
+
+func _run_suite(label: String, path: String) -> void:
+	var out: Array = []
+	var code := OS.execute(OS.get_executable_path(), ["--headless", "--path", ".", "-s", path], out, true, true)
+	var blob := "" if out.is_empty() else String(out[0])
+	print(blob)
+	_check("v11 suite green: " + label, code == 0 and blob.contains("0 failed ==="), "exit=%d" % code)
 
 # ------------------------------------------------- Play Games Services
 ## Mock plugin clients (same method names as the real v3.4.0 clients,

@@ -5,7 +5,7 @@ extends Control
 ## handles the --shot=... screenshot mode used for verification.
 
 var _home: HomeScreen = null
-var _mode: ModeChoiceScreen = null
+var _mode: PlayMenuScreen = null
 var _loading: LoadingScreen = null
 var _nearby: NearbyScreen = null
 var _match: MatchScreen = null
@@ -18,9 +18,25 @@ var _search_elapsed := 0.0
 var _searching_active := false
 var _search_widened := false
 var _search_mode := "" # "internet" | "host" | "join" | "invite" — which search is running
+var _lobby: OnlineLobby = null # v11: the post-match lobby (waiting/ready) — null when no lobby is open
+var _lobby_active := false
+var _lobby_data := {} # the server `matched` payload the lobby was opened from
+var _lobby_elapsed := 0.0
+var _lobby_panel: Control = null
+var _lobby_status: Label = null
+var _lobby_countdown: Label = null
+var _lobby_ready_button: Button = null
+var _lobby_row_labels := {} # seat -> Label (refreshed on every ready/leave)
 var _invite_group_id := "" # the Supabase invite group being joined
 var _invite_is_inviter := false # I sent this invite (seat 0)
+var _online_lobby: OnlinePlayerLobby = null # §11 lobby screen (player list) — null when closed
+var _online_lobby_stake := 0 # stake chosen before the lobby opened; invites from it use this stake
+var _invite_banner: Control = null # §11 instant invite banner (top) — null when hidden
+var _invite_banner_invite := {} # the invite the banner is showing
 var _last_tour_stake := 0 # the stake of the last World Tour match (rematch reuses it)
+var _coin_loop_return := "" # v11 coin loop: "online" while a broke-panel
+# ad is in flight — when it pays and the balance covers MIN_STAKE, the
+# player is offered the return to matchmaking. "" otherwise.
 var _search_bot_button: Button = null
 var _search_status: Label = null
 var _lan_hosts_box: VBoxContainer = null # join popup: found-host buttons
@@ -40,8 +56,13 @@ func _ready() -> void:
 	Ads.rewarded_earned.connect(_on_rewarded_earned)
 	Ads.rewarded_failed.connect(_on_rewarded_failed)
 	Net.matched.connect(_on_matched)
+	Net.lobby_ready_received.connect(_on_lobby_ready_received) # v11 lobby
+	Net.opponent_left.connect(_on_lobby_opponent_left) # v11 lobby only — guarded on _lobby_active; mid-match drops stay with MatchScreen
 	Net.queue_failed.connect(_on_queue_failed)
 	Net.connection_lost.connect(_on_connection_lost) # L4
+	# F13 Phase 2 (v11): the server's authoritative payout, forwarded
+	# to the match screen (ignored when no match is running).
+	Net.settlement_received.connect(_on_settlement)
 	Net.connected_to_server.connect(_on_net_connected)
 	Net.lan_host_found.connect(_on_lan_host_found)
 	Net.lan_discovery_failed.connect(_on_lan_discovery_failed)
@@ -65,6 +86,24 @@ func _ready() -> void:
 		_show_auth()
 
 func _process(delta: float) -> void:
+	if _lobby_active:
+		# v11 lobby countdown: the match auto-starts after
+		# LOBBY_AUTO_START_SECONDS even if someone never taps READY,
+		# so a lobby can never stall forever.
+		_lobby_elapsed += delta
+		if _lobby != null:
+			if _lobby_countdown:
+				if _lobby.state == OnlineLobby.STATE_WAITING:
+					var remain := int(OnlineLobby.LOBBY_AUTO_START_SECONDS - _lobby_elapsed)
+					_lobby_countdown.text = "Match starts automatically in %ds — tap READY when you are set." % maxi(0, remain)
+				else:
+					_lobby_countdown.text = "Starting the match…"
+			if _lobby_status:
+				_lobby_status.text = _lobby.status_text()
+		if _lobby_elapsed >= OnlineLobby.LOBBY_AUTO_START_SECONDS:
+			_toast("Starting the match — not everyone tapped READY.")
+			_start_match_from_lobby()
+		return
 	if _searching_active:
 		_search_elapsed += delta
 		if _search_mode == "host":
@@ -127,6 +166,19 @@ func _clear() -> void:
 	_match = null
 	_auth = null
 	_searching = null
+	# v11: the lobby popup is a child too — never leave a dangling ref
+	# to a freed panel (the lobby functions null these themselves, but
+	# _clear can also run from paths that never touched the lobby).
+	_lobby_panel = null
+	_lobby_status = null
+	_lobby_countdown = null
+	_lobby_ready_button = null
+	_lobby_row_labels.clear()
+	# §11: the lobby screen + invite banner are children too — never
+	# leave dangling refs to freed panels.
+	_online_lobby = null
+	_invite_banner = null
+	_invite_banner_invite = {}
 	_toast_label = null # freed with the children above; never queue_free it again
 	_searching_active = false
 	_search_mode = ""
@@ -161,11 +213,15 @@ func _show_home() -> void:
 	_home.open_aim_assist.connect(_open_aim_assist)
 	_home.watch_ad_coins.connect(_on_watch_ad_coins)
 	_home.watch_ad_daily.connect(_on_watch_ad_daily)
+	# v11 coin loop: the OUT OF COINS banner's free bot match.
+	_home.play_broke_bot.connect(_start_solo_direct)
 	_home.invite_accept_chosen.connect(_on_invite_accept_chosen)
 	_home.invite_send_chosen.connect(_on_invite_send_chosen)
 	_home.group_invite_send_chosen.connect(_on_group_invite_send_chosen)
 	_home.refresh()
 	Ads.show_home_banner()
+	# §11 presence: back on home = "online" (heartbeat goes out now).
+	Friends.set_presence_status("online")
 	# v9: ads warm up only now (after login, on the home screen) — never
 	# before registration.
 	Ads.warm_up()
@@ -180,6 +236,8 @@ func _show_home() -> void:
 # only at match start, so cancelling costs nothing.
 
 func _on_invite_accept_chosen(invite: Dictionary) -> void:
+	# §11: accepting from anywhere clears the banner (if it was showing).
+	_hide_invite_banner()
 	# F1: accept the Supabase row FIRST — until it flips to "accepted"
 	# the inviter's group can never become ready and the match never
 	# starts. Only join the server room on success. An already-accepted
@@ -204,6 +262,13 @@ func _on_invite_send_chosen(player: Dictionary) -> void:
 		"Invite %s to a 1 vs 1 match — choose YOUR stake (any amount up to your balance). Winner takes the pot." % String(player.get("display_name", "?")))
 
 func _on_group_invite_send_chosen(players: Array) -> void:
+	# 3-player guard (v11): exactly 2 picks can never be a match.
+	# The home UI disables the send button at 2 picks; this is the
+	# last check before the stake picker, so a stale signal can never
+	# send a 3-player group.
+	if players.size() == 2:
+		_toast("Matches are 2 players (invite 1 friend) or 4 players (invite 3 friends) — 3-player matches are not supported.")
+		return
 	_show_stake_picker(func(stake: int) -> void:
 		var res := await Friends.send_group_invite(players, stake)
 		if bool(res.get("ok", false)):
@@ -216,6 +281,56 @@ func _on_invite_received(invite: Dictionary) -> void:
 	_toast("New invite from %s!" % String(invite.get("from_name", "a friend")))
 	if _home:
 		_home.refresh()
+	# §11 instant invite banner (top of screen): ACCEPT joins the
+	# inviter's match directly. Shown only when no match is running —
+	# mid-match invites stay in the invite box (the fallback).
+	if _match == null and _invite_banner == null:
+		_show_invite_banner(invite)
+
+## §11: the instant invite banner at the TOP of the screen.
+## "You have an invite — play together with <name>" + ACCEPT (joins
+## directly via the normal accept flow) / LATER (dismisses; the invite
+## stays in the invite box). One banner at a time; a newer invite
+## replaces it.
+func _show_invite_banner(invite: Dictionary) -> void:
+	_hide_invite_banner()
+	_invite_banner_invite = invite
+	var banner := PanelContainer.new()
+	banner.add_theme_stylebox_override("panel", UiKit.panel_style(UiKit.PANEL, UiKit.GOLD, 18, 2))
+	banner.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	banner.offset_left = 16
+	banner.offset_right = -16
+	banner.offset_top = 12
+	banner.offset_bottom = 168
+	_invite_banner = banner
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 8)
+	banner.add_child(box)
+	var label := UiKit.body_label("You have an invite — play together with %s" % String(invite.get("from_name", "a friend")), 24)
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(label)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	box.add_child(row)
+	var accept := UiKit.gold_button("ACCEPT", 26)
+	accept.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	accept.custom_minimum_size = Vector2(0, 64)
+	accept.pressed.connect(func() -> void:
+		var inv: Dictionary = _invite_banner_invite
+		_hide_invite_banner()
+		_on_invite_accept_chosen(inv))
+	row.add_child(accept)
+	var later := UiKit.dark_button("LATER", 24)
+	later.custom_minimum_size = Vector2(0, 64)
+	later.pressed.connect(_hide_invite_banner)
+	row.add_child(later)
+	add_child(banner)
+
+func _hide_invite_banner() -> void:
+	if _invite_banner != null:
+		_invite_banner.queue_free()
+		_invite_banner = null
+	_invite_banner_invite = {}
 
 func _on_group_ready(group_id: String, invites: Array) -> void:
 	# Everyone accepted my invite — I join the room as the inviter
@@ -271,9 +386,19 @@ func _join_invite_room(group_id: String, mode: String, stake: int, is_inviter: b
 		_home.add_child(_searching)
 	else:
 		add_child(_searching)
-	if Net.is_connected_to_server():
-		Net.join_invite_room(group_id, Save.player_name, Save.level(), stake, mode, _search_table, is_inviter)
+	if Net.transport == NetClient.TRANSPORT_P2P and NetClient.webrtc_available():
+		# v11 P2P: no server room — both sides resolve the match via
+		# create_match_from_invites, then connect phone-to-phone.
+		# Net emits `matched` when the mesh is up; the lobby runs as usual.
+		Net.start_p2p_invite(group_id, Save.player_name, Save.level(), stake, mode, _search_table, is_inviter)
+	elif Net.is_connected_to_server():
+		# F13 Phase 2: send the Supabase identity with the invite join
+		# so a verifying server can check the stake against the real
+		# profile. Empty when not signed in (server falls back to
+		# Phase 1 clamps / refuses when verification is enforced).
+		Net.join_invite_room(group_id, Save.player_name, Save.level(), stake, mode, _search_table, is_inviter, Supabase.user_id, Supabase.access_token)
 	else:
+		# LEGACY ENet path (transport switch rollback): the frozen server.
 		Net.connect_to_server(Save.online_host, NetClient.DEFAULT_PORT)
 
 ## Short loading screen (v10 direct play): tap -> this -> board.
@@ -354,22 +479,32 @@ func _start_solo_direct() -> void:
 # ---------------------------------------------------------- mode choice (v3, v10 direct play)
 
 func _open_mode_choice() -> void:
-	# Full-screen mode screen (like Shop), NOT a popup: the v2 PLAY popup's
-	# buttons were dead on Buddhika's phone while the X worked, and the
-	# home screen's own buttons work there — this screen is built the same
-	# plain way. The difficulty/table popups below are the ones proven to
-	# work on his phone (homepage SOLO -> EASY enters a match).
+	# v11: PLAY opens the three-big-button menu (PlayMenuScreen) — bot,
+	# world, friends — instead of the v3/v10 four-tile mode screen.
+	# Same full-screen plain-button layout (proven on Buddhika's phone),
+	# no popup overlay. World Tour + NEARBY live on as smaller buttons
+	# on the same screen, so no mode is removed.
 	_clear()
-	_mode = ModeChoiceScreen.new()
+	_mode = PlayMenuScreen.new()
 	add_child(_mode)
-	_mode.solo_chosen.connect(_start_solo_direct)
+	_mode.bot_chosen.connect(_start_solo_direct)
+	_mode.world_chosen.connect(_show_online_stake)
+	_mode.friends_chosen.connect(_open_friends_invite)
 	_mode.tour_chosen.connect(func() -> void:
 		_show_stake_picker(func(stake: int) -> void: _start_tour_random(stake),
 			"World Tour — a random advanced computer champion (BOT), near your level. Your stake is mirrored by the bot — winner takes the pot (both stakes).",
 			"WORLD TOUR — CHOOSE YOUR STAKE"))
-	_mode.online_chosen.connect(_show_online_stake)
 	_mode.nearby_chosen.connect(_open_nearby)
 	_mode.go_back.connect(_show_home)
+
+## v11: PLAY WITH FRIENDS — back home with the invite box open, so
+## the player can search by name and send a 2p or 4p invite. The box
+## is the invite flow (send -> accept -> group ready -> join room);
+## this is only the route into it.
+func _open_friends_invite() -> void:
+	_show_home()
+	if _home:
+		_home.open_invite_box()
 
 ## v10 direct World Tour: no bot list — a random advanced bot, weighted
 ## near the player's level. Stake picker first (unchanged), then
@@ -401,26 +536,131 @@ func _start_tour_match(bot: Dictionary, stake: int) -> void:
 ## stake up to their balance — no fixed tables any more. Then (v6) they
 ## choose 2 players (1 vs 1) or 4 players (doubles, 2 vs 2).
 func _show_online_stake() -> void:
+	# v11 coin loop: a broke player tapping ONLINE is routed to the
+	# broke panel (bot match + ad + friendly 0-stake) instead of a
+	# stake picker they cannot use — the loop back to matchmaking.
+	if CoinLoop.is_broke(Save.coins):
+		_show_broke_panel("online")
+		return
 	_show_stake_picker(func(stake: int) -> void: _show_online_players(stake))
 
-func _show_online_players(stake: int) -> void:
-	var pop: Dictionary = UiKit.popup_window("ONLINE — HOW MANY PLAYERS?", Vector2(560, 520))
-	add_child(pop["dim"])
+## v11 coin loop — the broke-state entry point. One panel, three ways
+## back: a free bot match (solo pays zero, always open), a rewarded ad
+## paying the normal ladder (first ad +150 — always covers MIN_STAKE),
+## or a friendly 0-stake match. When the daily ad cap is already
+## reached the ad button is replaced by the daily-bonus ad if it is
+## still claimable (it pays even at the cap); otherwise the panel says
+## so honestly and the free options stay open. `return_to` is where the
+## player goes after the ad pays ("online" = back to the stake picker).
+func _show_broke_panel(return_to: String) -> void:
+	var parent: Control = _home if _home else self
+	var plan := CoinLoop.recovery_plan(Save.coins, Save.ad_count_today, Save.ad_coins_today, Save.can_claim_daily(), Save.daily_bonus_amount())
+	var pop: Dictionary = UiKit.popup_window("OUT OF COINS", Vector2(580, 620))
+	parent.add_child(pop["dim"])
 	var box: VBoxContainer = pop["box"]
-	box.add_child(UiKit.body_label("Your stake ◉ %d. The winning team splits the whole pot." % stake, 20))
-	var b2 := UiKit.gold_button("2 PLAYERS — 1 vs 1", 26)
-	b2.pressed.connect(func() -> void:
+	box.add_child(UiKit.body_label("You're out of coins — but you're never stuck. Play a free bot match, or watch a short ad to earn coins and get back into staked matches.", 20))
+	if not bool(plan.get("can_recover_today", false)):
+		box.add_child(UiKit.body_label(String(plan.get("blocked_reason", "")), 18))
+	var bot := UiKit.gold_button("PLAY vs BOT — FREE", 24)
+	bot.pressed.connect(func() -> void:
 		pop["dim"].queue_free()
-		_start_matchmaking(stake, "", 2))
-	box.add_child(b2)
-	box.add_child(UiKit.muted_label("Classic match — you vs one opponent. Winner takes both stakes.", 17))
-	var b4 := UiKit.dark_button("4 PLAYERS — DOUBLES (2 vs 2)", 26)
-	b4.pressed.connect(func() -> void:
+		_start_solo_direct())
+	box.add_child(bot)
+	box.add_child(UiKit.muted_label("Free practice vs a random bot — no coins needed. The win screen lets you watch an ad to earn coins.", 16))
+	if bool(plan.get("via_daily_bonus", false)):
+		var daily := UiKit.gold_button("DAILY BONUS +%d — WATCH AD" % Save.daily_bonus_amount(), 24)
+		daily.pressed.connect(func() -> void:
+			pop["dim"].queue_free()
+			_coin_loop_return = return_to
+			Ads.show_rewarded("daily_bonus"))
+		box.add_child(daily)
+	elif bool(plan.get("can_recover_today", false)):
+		var reward := CoinLoop.next_ad_reward(Save.ad_count_today, Save.ad_coins_today)
+		var watch := UiKit.gold_button("WATCH AD  (+%d COINS)" % reward, 24)
+		watch.pressed.connect(func() -> void:
+			pop["dim"].queue_free()
+			_coin_loop_return = return_to
+			Ads.show_rewarded(CoinLoop.BROKE_REASON))
+		box.add_child(watch)
+		box.add_child(UiKit.muted_label("Today: ◉ %d / %d coins from ads" % [Save.ad_coins_today, Save.DAILY_AD_COIN_CAP], 18))
+	var friendly := UiKit.dark_button("FRIENDLY MATCH — 0 STAKE", 22)
+	friendly.pressed.connect(func() -> void:
 		pop["dim"].queue_free()
-		_start_matchmaking(stake, "", 4))
-	box.add_child(b4)
-	box.add_child(UiKit.muted_label("One player per side — opposite sides are partners. The winning TEAM splits all four stakes.", 17))
+		_show_online_players(0))
+	box.add_child(friendly)
+	box.add_child(UiKit.muted_label("A friendly online match costs nothing — no coins won or lost.", 16))
 	pop["close"].pressed.connect(func() -> void: pop["dim"].queue_free())
+
+func _show_online_players(stake: int) -> void:
+	# §11 online lobby: after the stake, the player sees who is online
+	# (radar + live list) and either invites someone or taps a big
+	# RANDOM button for worldwide queue matchmaking. The old 2P/4P
+	# popup is replaced by this screen — its two RANDOM buttons keep
+	# the same "2 PLAYERS" / "4 PLAYERS" labels, so the flow (stake →
+	# choose → search popup) is unchanged for the player.
+	_open_online_lobby(stake)
+
+## §11: open the online lobby screen (radar + live player list +
+## random buttons) as an overlay. The stake is already chosen; invites
+## sent from here use it (no second stake picker).
+func _open_online_lobby(stake: int) -> void:
+	_close_online_lobby()
+	_online_lobby_stake = stake
+	_online_lobby = OnlinePlayerLobby.new(stake)
+	_online_lobby.random_chosen.connect(_on_online_lobby_random)
+	_online_lobby.invite_chosen.connect(_on_online_lobby_invite)
+	_online_lobby.group_invite_chosen.connect(_on_online_lobby_group_invite)
+	_online_lobby.refresh_requested.connect(_on_online_lobby_refresh)
+	_online_lobby.go_back.connect(_close_online_lobby)
+	add_child(_online_lobby)
+
+func _close_online_lobby() -> void:
+	if _online_lobby != null:
+		_online_lobby.queue_free()
+		_online_lobby = null
+
+func _on_online_lobby_random(players: int) -> void:
+	var stake := _online_lobby_stake
+	_close_online_lobby()
+	_start_matchmaking(stake, "", players)
+
+## 2p invite from the lobby (one tap): the lobby stake is used, so
+## there is no second stake picker — the invite goes out immediately.
+func _on_online_lobby_invite(player: Dictionary) -> void:
+	var res := await Friends.send_invite(String(player.get("id", "")), String(player.get("display_name", "?")), _online_lobby_stake)
+	if bool(res.get("ok", false)):
+		_toast("Invite sent to %s!" % String(player.get("display_name", "?")))
+	else:
+		_toast(String(res.get("error", "Could not send the invite.")))
+
+## 4p invite from the lobby: same stake, same 3-player guard as the
+## home box (exactly 2 picks can never send — the lobby button is
+## disabled at 2, this is the last check).
+func _on_online_lobby_group_invite(players: Array) -> void:
+	if players.size() == 2:
+		_toast("Matches are 2 players (invite 1 friend) or 4 players (invite 3 friends) — 3-player matches are not supported.")
+		return
+	var res := await Friends.send_group_invite(players, _online_lobby_stake)
+	if bool(res.get("ok", false)):
+		_toast("4-player invite sent — the match starts when all accept!")
+	else:
+		_toast(String(res.get("error", "Could not send the invites.")))
+
+func _on_online_lobby_refresh() -> void:
+	if _online_lobby == null:
+		return
+	# No signed-in session (tests / logged-out): the lobby shows the
+	# empty state and the random buttons still work.
+	if not Supabase.configured or Supabase.user_id == "":
+		_online_lobby.set_players([])
+		return
+	var res := await Friends.list_online_players()
+	if _online_lobby == null:
+		return
+	if bool(res.get("ok", false)):
+		_online_lobby.set_players(res.get("players", []))
+	else:
+		_online_lobby.set_players(Friends.online_players)
 
 ## The same picker with a caller-chosen continuation + intro note, so
 ## the LAN flows (host/join) can reuse it with their own wording.
@@ -630,49 +870,209 @@ func _start_matchmaking(stake: int, host_ip: String = "", players: int = 2) -> v
 		_home.add_child(_searching)
 	else:
 		add_child(_searching)
-	if Net.is_connected_to_server():
-		Net.queue_up(Save.player_name, Save.level(), _search_table, _search_stake, "4p" if _search_players == 4 else "2p")
+	if Net.transport == NetClient.TRANSPORT_P2P and NetClient.webrtc_available():
+		# v11 P2P: no server — queue in Supabase, pair via find_match,
+		# connect phone-to-phone. Net emits `matched` when the mesh is
+		# up, and the lobby flow below runs unchanged.
+		Net.start_p2p_search(Save.player_name, Save.level(), _search_table, _search_stake, "4p" if _search_players == 4 else "2p")
+	elif Net.is_connected_to_server():
+		# F13 Phase 2: Supabase identity rides with the queue request
+		# (see _join_invite_room above). Empty when not signed in.
+		Net.queue_up(Save.player_name, Save.level(), _search_table, _search_stake, "4p" if _search_players == 4 else "2p", Supabase.user_id, Supabase.access_token)
 	elif host_ip != "":
 		# LAN join: connect to the discovered host, not the internet server.
 		Net.connect_to_server(host_ip, NetClient.DEFAULT_PORT)
 	else:
+		# LEGACY ENet path (transport switch rollback): the frozen server.
 		Net.connect_to_server(Save.online_host, NetClient.DEFAULT_PORT)
 
 func _on_net_connected() -> void:
 	if _searching_active:
 		if _search_mode == "invite":
-			Net.join_invite_room(_invite_group_id, Save.player_name, Save.level(), _search_stake, "4p" if _search_players == 4 else "2p", _search_table, _invite_is_inviter)
+			Net.join_invite_room(_invite_group_id, Save.player_name, Save.level(), _search_stake, "4p" if _search_players == 4 else "2p", _search_table, _invite_is_inviter, Supabase.user_id, Supabase.access_token)
 		else:
-			Net.queue_up(Save.player_name, Save.level(), _search_table, _search_stake, "4p" if _search_players == 4 else "2p")
+			Net.queue_up(Save.player_name, Save.level(), _search_table, _search_stake, "4p" if _search_players == 4 else "2p", Supabase.user_id, Supabase.access_token)
+
+## v11 random matchmaking — the ONE stable entry point the Play
+## screen's "random" button calls (UI worker): pick a stake, then
+## queue for a random opponent. `players` is 2 (singles) or 4
+## (doubles). This is just _start_matchmaking with the random
+## intent named — the server pairs two/four online players of a
+## similar level (±2, ±4 after 30 s) on the same stake band; nobody
+## picks a name, nobody picks an opponent.
+func start_random_match(stake: int, players: int = 2) -> void:
+	_start_matchmaking(stake, "", players)
 
 func _on_matched(data: Dictionary) -> void:
 	if not _searching_active:
 		return
+	# v11: a match no longer starts the instant the server pairs
+	# players — it opens the LOBBY first (roster + READY), and the
+	# MatchScreen is built only from _start_match_from_lobby, which
+	# keeps the F2/F3 setup-before-add_child contract.
+	_open_lobby(data)
+
+## v11 lobby: show the matched roster and wait for READY taps.
+## The search popup is gone; the home screen was cleared like the
+## old _on_matched did, so cancelling the lobby goes back via
+## _show_home().
+func _open_lobby(data: Dictionary) -> void:
 	_searching_active = false
 	_clear()
-	# F2 layer 1 (+ F3): configure BEFORE add_child — _ready() builds
-	# the rules state and HUD from player_count/mode and reads the
-	# server-assigned breaker; with setup() after add_child a 4p match
-	# got 2-player rules/HUD and each client rolled its own breaker.
+	_lobby_data = data
+	_lobby = OnlineLobby.from_matched(data, Save.player_name, Save.level(), _search_stake)
+	_lobby_active = true
+	_lobby_elapsed = 0.0
+	_lobby_row_labels.clear()
+	_lobby_panel = Control.new()
+	UiKit.full_rect(_lobby_panel)
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.75)
+	UiKit.full_rect(dim)
+	_lobby_panel.add_child(dim)
+	var pop: Dictionary = UiKit.popup_window("MATCH LOBBY", Vector2(560, 620))
+	_lobby_panel.add_child(pop["dim"])
+	var box: VBoxContainer = pop["box"]
+	box.add_child(UiKit.body_label("A random match was found — check the players, then tap READY. The match starts when everyone is ready.", 20))
+	_lobby_status = UiKit.body_label(_lobby.status_text(), 22)
+	box.add_child(_lobby_status)
+	for p in _lobby.players:
+		var row := UiKit.body_label(OnlineLobby.row_text(p, _lobby.mode == "4p"), 22)
+		_lobby_row_labels[int(p["seat"])] = row
+		box.add_child(row)
+	box.add_child(UiKit.body_label("Your match points: %d (%s) — 10 pts per coin you pocket, +25 for a covered queen, +%d win bonus." % [Save.match_points, MatchPoints.tier_name(Save.match_points), MatchPoints.WIN_BONUS], 18))
+	_lobby_countdown = UiKit.body_label("", 18)
+	box.add_child(_lobby_countdown)
+	_lobby_ready_button = UiKit.gold_button("I'M READY", 28)
+	_lobby_ready_button.pressed.connect(_on_lobby_ready_pressed)
+	box.add_child(_lobby_ready_button)
+	var cancel := UiKit.dark_button("CANCEL", 24)
+	cancel.pressed.connect(_cancel_lobby)
+	box.add_child(cancel)
+	pop["close"].pressed.connect(_cancel_lobby)
+	add_child(_lobby_panel)
+
+func _refresh_lobby_rows() -> void:
+	if _lobby == null:
+		return
+	for p in _lobby.players:
+		var row: Label = _lobby_row_labels.get(int(p["seat"]))
+		if row:
+			row.text = OnlineLobby.row_text(p, _lobby.mode == "4p")
+	if _lobby_status:
+		_lobby_status.text = _lobby.status_text()
+
+func _on_lobby_ready_pressed() -> void:
+	if not _lobby_active or _lobby == null:
+		return
+	_lobby.mark_ready(_lobby.your_seat)
+	Net.send_lobby_ready(_lobby.your_seat)
+	if _lobby_ready_button:
+		_lobby_ready_button.disabled = true
+		_lobby_ready_button.text = "READY — WAITING FOR OTHERS"
+	_refresh_lobby_rows()
+	_maybe_start_from_lobby()
+
+func _on_lobby_ready_received(data: Dictionary) -> void:
+	if not _lobby_active or _lobby == null:
+		return
+	var seat := OnlineLobby.ready_seat(data)
+	if seat < 0:
+		return # malformed message — ignore, never an error
+	if _lobby.mark_ready(seat):
+		_refresh_lobby_rows()
+		_maybe_start_from_lobby()
+
+func _maybe_start_from_lobby() -> void:
+	if _lobby != null and _lobby.all_ready() and _lobby.begin_start():
+		_start_match_from_lobby()
+
+## Build the MatchScreen from the stored `matched` payload — the
+## exact body the old _on_matched ran, unchanged apart from reading
+## `data` from _lobby_data. In particular the F2 layer 1 + F3
+## contract is preserved: setup()/setup_4p() BEFORE add_child, so
+## _ready() builds 4-player rules/HUD and reads the server-assigned
+## breaker instead of rolling its own.
+func _start_match_from_lobby() -> void:
+	if not _lobby_active:
+		return
+	var data: Dictionary = _lobby_data
+	_close_lobby()
+	_clear()
+	# §11 presence: a match is starting — I am "in_match" now.
+	Friends.set_presence_status("in_match")
 	_match = MatchScreen.new()
 	if String(data.get("mode", "2p")) == "4p" and data.has("players"):
 		# 4p doubles: the server sends the full seat-ordered roster,
-		# our seat and the breaker seat.
+		# our seat and the breaker seat. The roster stakes ARE the
+		# server's stakes — setup_4p already plays for them.
 		var roster: Array = data["players"]
 		var your_seat := int(data.get("your_seat", 0))
 		var breaker_seat := int(data.get("breaker_seat", 0))
 		_match.setup_4p(roster, your_seat, breaker_seat, Net)
+		_match.stakes_verified = bool(data.get("verified_stakes", false))
 	else:
 		var opp_name := String(data.get("opponent", "Player"))
 		var opp_level := int(data.get("opp_level", 1))
 		var opp_stake := int(data.get("opp_stake", 0))
 		var you_break := bool(data.get("you_break", true))
-		_match.setup("online", 0, _search_table, opp_name, opp_level, Net, 0 if you_break else 1, _search_stake, opp_stake)
+		# F13 Phase 2: when the server verified the stakes, the
+		# VERIFIED stakes win — the server-sent your_stake replaces
+		# the claimed _search_stake (they differ when the claim was
+		# wrong or the balance changed). Unverified: claimed stakes.
+		var stakes := Settlement.apply_verified_stakes(_search_stake, opp_stake,
+			int(data.get("your_stake", _search_stake)), opp_stake,
+			bool(data.get("verified_stakes", false)))
+		_match.setup("online", 0, _search_table, opp_name, opp_level, Net, 0 if you_break else 1, int(stakes["your_stake"]), int(stakes["opp_stake"]))
+		_match.stakes_verified = bool(stakes["verified"])
 	add_child(_match)
 	_match.exit_to_home.connect(_show_home)
 	# Rematch goes back to the stake picker — the player chooses a fresh
 	# stake for every online match.
 	_match.rematch_requested.connect(func() -> void: _show_online_stake())
+
+## F13 Phase 2 (v11): the server settled the finished online match.
+## Forwarded to the match screen, which re-prices the held pot (or
+## stores it for the result screen). Ignored when no match is running
+## or the match already credited the pot.
+func _on_settlement(data: Dictionary) -> void:
+	if _match:
+		_match.apply_server_settlement(data)
+
+## Leave the lobby before the match starts: tell the room (the
+## server dissolves it; the rest get opponent_left), drop the
+## connection like a cancelled search, and go home.
+func _cancel_lobby() -> void:
+	if not _lobby_active:
+		return
+	Net.send_lobby_leave()
+	Net.disconnect_client()
+	_close_lobby()
+	_show_home()
+
+## Free the lobby popup and clear lobby state (no navigation).
+func _close_lobby() -> void:
+	_lobby_active = false
+	_lobby = null
+	_lobby_data = {}
+	_lobby_elapsed = 0.0
+	_lobby_status = null
+	_lobby_countdown = null
+	_lobby_ready_button = null
+	_lobby_row_labels.clear()
+	if _lobby_panel:
+		_lobby_panel.queue_free()
+		_lobby_panel = null
+
+## A room-mate left the lobby (server dissolved the room): the match
+## never starts. Guarded on _lobby_active — mid-match disconnects
+## are MatchScreen's opponent_left path, never this one.
+func _on_lobby_opponent_left() -> void:
+	if not _lobby_active:
+		return
+	_close_lobby()
+	_show_home()
+	_toast("A player left the lobby — the match was cancelled.")
 
 func _on_play_bot_from_search() -> void:
 	# Labelled BOT match — never a fake human (design doc 3.2).
@@ -691,12 +1091,22 @@ func _on_play_bot_from_search() -> void:
 func _cancel_search() -> void:
 	_searching_active = false
 	_search_mode = ""
+	# v11 P2P: cancelling deletes the queue row so a cancelled search
+	# is never matched (Net.disconnect_client alone only clears the
+	# local objects). No-op on the legacy path.
+	if Net.is_p2p_searching():
+		Net.cancel_p2p_search()
 	Net.disconnect_client()
 	if _searching:
 		_searching.queue_free()
 		_searching = null
 
 func _on_queue_failed(message: String) -> void:
+	if _lobby_active:
+		# The match was already found (lobby open) and then the
+		# server failed — close the lobby and go home, then toast.
+		_close_lobby()
+		_show_home()
 	if _searching_active:
 		_close_search_popup()
 	_toast(message)
@@ -705,6 +1115,11 @@ func _on_queue_failed(message: String) -> void:
 ## — a mid-match drop is MatchScreen's opponent_left path, and must
 ## not show a "search failed" toast over a live match.
 func _on_connection_lost() -> void:
+	if _lobby_active:
+		_close_lobby()
+		_show_home()
+		_toast("Connection to the matchmaking server was lost — check your connection and try again.")
+		return
 	if not _searching_active:
 		return
 	_close_search_popup()
@@ -777,6 +1192,10 @@ func _on_rewarded_earned(reason: String, simulated: bool) -> void:
 		Save.record_ad_reward(0)
 	if reason == "coins":
 		_toast("+%d coins from the ad ladder!%s" % [ladder, sim] if ladder > 0 else "Daily ad limit reached — no more ad coins today.%s" % sim)
+	elif reason == "broke_coins":
+		# v11 coin loop: the broke-panel ad pays the normal ladder, like
+		# "coins" — the return to matchmaking is handled below.
+		_toast("+%d coins from the ad ladder!%s" % [ladder, sim] if ladder > 0 else "Daily ad limit reached — no more ad coins today.%s" % sim)
 	elif reason == "aim_assist":
 		Save.aim_assist_ads_progress += 1
 		if Save.aim_assist_ads_progress >= AdsConfig.AIM_ASSIST_ADS_NEEDED:
@@ -808,8 +1227,23 @@ func _on_rewarded_earned(reason: String, simulated: bool) -> void:
 	if _home:
 		_home.refresh()
 		Accounts.sync_to_cloud()
+	# v11 coin loop: the broke-panel ad paid — if the balance now covers
+	# the minimum stake, take the player back to matchmaking. The flag
+	# is only ever set by the broke panel, so a home-screen ad never
+	# hijacks the player into a stake picker.
+	if _coin_loop_return != "" and (reason == "broke_coins" or reason == "daily_bonus"):
+		var dest := _coin_loop_return
+		_coin_loop_return = ""
+		if CoinLoop.can_stake(Save.coins):
+			_toast("You're back in the game — ◉ %d coins!" % Save.coins)
+			if dest == "online":
+				_show_online_stake()
 
 func _on_rewarded_failed(reason: String) -> void:
+	if reason == "broke_coins":
+		# v11 coin loop: the recovery ad failed — no return to queue;
+		# the player stays broke and can retry from the broke panel.
+		_coin_loop_return = ""
 	if reason == "solo_win" and _match:
 		_match.on_solo_win_ad_failed()
 	elif reason == "double_win" and _match:
@@ -885,7 +1319,7 @@ func _run_shot_mode() -> void:
 			_start_solo(1)
 			_demo_aim_and_capture()
 		"playchoice":
-			# v3: PLAY opens the full-screen mode-choice screen (no popup).
+			# v11: PLAY opens the three-big-button menu (no popup).
 			_open_mode_choice()
 			_capture_after(1.0)
 		"search":

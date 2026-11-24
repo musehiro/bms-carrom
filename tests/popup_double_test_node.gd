@@ -9,6 +9,10 @@ extends Node
 ## v3 flow: PLAY -> full-screen mode screen -> SOLO -> difficulty popup
 ## -> EASY -> match. v10 flow: PLAY -> mode screen -> SOLO -> loading
 ## screen -> match (the difficulty popup is deleted; SOLO goes direct).
+## v11 flow: PLAY -> three-button menu -> PLAY WITH A BOT -> loading
+## screen -> match (same direct solo flow; the old SOLO / ONLINE
+## tiles are gone, the buttons are BotButton / WorldButton /
+## FriendsButton on the new PlayMenuScreen).
 ## (The v2 popup is gone; the mode screen is a plain full-screen layout
 ## like the home screen.)
 ## Run: xvfb-run -a -s "-screen 0 720x1640x24" godot --resolution 720x1640
@@ -116,19 +120,19 @@ func _run() -> void:
 		return
 	# Android-style tap on PLAY.
 	await _tap_android(_center(play_btn))
-	var solo_btn := _find_button(_main, "SOLO —")
-	var online_btn := _find_button(_main, "ONLINE —")
-	print("INFO: after PLAY android-tap: solo=", solo_btn, " online=", online_btn)
-	_check("PLAY opens mode screen (android tap)", solo_btn != null and online_btn != null)
-	if solo_btn == null:
+	var bot_btn: Button = _main._mode.bot_button if _main._mode != null else null
+	var world_btn: Button = _main._mode.world_button if _main._mode != null else null
+	print("INFO: after PLAY android-tap: bot=", bot_btn, " world=", world_btn)
+	_check("PLAY opens the menu (android tap)", bot_btn != null and world_btn != null)
+	if bot_btn == null:
 		_finish()
 		return
-	# Android-style tap on SOLO (v10: direct play — loading, then board).
-	await _tap_android(_center(solo_btn))
+	# Android-style tap on PLAY WITH A BOT (v10: direct play — loading, then board).
+	await _tap_android(_center(bot_btn))
 	var easy_btn := _find_button(_main, "EASY")
-	print("INFO: after SOLO android-tap: loading=", _main._loading, " easy=", easy_btn, " mode screen valid=", is_instance_valid(solo_btn))
-	_check("SOLO shows the loading screen (android tap)", _main._loading != null and is_instance_valid(_main._loading))
-	_check("SOLO has no difficulty popup (android tap)", easy_btn == null)
+	print("INFO: after BOT android-tap: loading=", _main._loading, " easy=", easy_btn, " mode screen valid=", is_instance_valid(bot_btn))
+	_check("PLAY WITH A BOT shows the loading screen (android tap)", _main._loading != null and is_instance_valid(_main._loading))
+	_check("PLAY WITH A BOT has no difficulty popup (android tap)", easy_btn == null)
 	if _main._loading == null:
 		_finish()
 		return

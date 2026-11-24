@@ -40,6 +40,10 @@ extends Node
 signal realtime_invite_changed(invite: Dictionary)
 signal realtime_connected
 signal realtime_failed(message: String)
+## v11 P2P (§1.4): a signalling message arrived on the match Broadcast
+## channel — {type: offer|answer|ice|bye, from, sdp, ...}. Emitted
+## after P2PSignalling.parse_message validation in _handle_realtime_text.
+signal broadcast_received(msg: Dictionary)
 
 const CONFIG_PATH := "res://backend_config.json"
 const REALTIME_VSN := "1.0.0"
@@ -95,6 +99,16 @@ var _ws_ref := 0
 var _ws_my_id := ""
 var _ws_heartbeat := 0.0
 var _ws_joined := false
+## v11 P2P (§1.4): the match Broadcast channel joined on THIS socket
+## ("" = none). One socket total — the invites postgres_changes channel
+## and the match Broadcast channel share this one WebSocketPeer.
+var _ws_match_channel := ""
+var _ws_match_joined := false
+
+## v11 P2P (§1.5): ICE servers from backend_config.json ("turn_servers").
+## Empty/absent = the plan defaults (Google STUN + OpenRelay demo TURN)
+## via P2PSignalling.ice_servers_from_config. Never logged.
+var turn_servers: Array = []
 
 func _ready() -> void:
 	load_config()
@@ -121,7 +135,17 @@ func load_config(path: String = CONFIG_PATH) -> void:
 	base_url = String(data.get("supabase_url", "")).strip_edges().trim_suffix("/")
 	anon_key = String(data.get("supabase_anon_key", "")).strip_edges()
 	google_client_id = String(data.get("google_client_id", "")).strip_edges()
+	# v11 P2P: ICE servers override (backend_config.json "turn_servers").
+	# Anything else (missing, wrong type, empty) falls back to the
+	# plan defaults inside ice_servers() — never a hard failure.
+	var ts: Variant = data.get("turn_servers", [])
+	turn_servers = ts if ts is Array else []
 	configured = base_url != "" and anon_key != ""
+
+## v11 P2P (§1.5): the ICE server list for WebRTCPeerConnection — the
+## configured turn_servers when valid, else the plan defaults.
+func ice_servers() -> Array:
+	return P2PSignalling.ice_servers_from_config(turn_servers)
 
 ## Test override: point the client at a mock server (tests) instead of
 ## the configured project. Pass "" to clear the override.
@@ -140,6 +164,12 @@ func _process(delta: float) -> void:
 		if not _ws_joined:
 			_ws_joined = true
 			_join_realtime_channel()
+		# v11 P2P: the match Broadcast channel joins on this same
+		# socket once it is open (join_match_channel may have been
+		# called before the socket was ready — the name is stored).
+		if _ws_match_channel != "" and not _ws_match_joined:
+			_ws_match_joined = true
+			_join_match_channel()
 		_ws_heartbeat += delta
 		if _ws_heartbeat >= 30.0:
 			_ws_heartbeat = 0.0
@@ -431,6 +461,113 @@ func update_invite(invite_id: String, status: String) -> Dictionary:
 	return {"ok": true, "status": int(res["status"]),
 		"data": rows[0] if not rows.is_empty() else {}, "error": ""}
 
+# ------------------------------------------------- v11 P2P matchmaking (plan §1.3)
+# Queue + matches rows + the find_match / create_match_from_invites
+# RPCs (supabase/schema-p2p.sql — run in the dashboard first; until
+# then these calls fail cleanly and ONLINE falls back to the legacy
+# ENet path via Net's transport switch).
+
+## Insert (or refresh) my matchmaking_queue row.
+func queue_insert(row: Dictionary) -> Dictionary:
+	var res := await _http(HTTPClient.METHOD_POST, "/rest/v1/matchmaking_queue?on_conflict=id",
+		row, true, PackedStringArray(["Prefer: return=representation,resolution=merge-duplicates"]))
+	if not bool(res["ok"]):
+		return res
+	var rows: Array = res["data"] if res["data"] is Array else []
+	return {"ok": true, "status": int(res["status"]),
+		"data": rows[0] if not rows.is_empty() else {}, "error": ""}
+
+## Delete my queue row (cancel / timeout / matched).
+func queue_delete(my_id: String) -> Dictionary:
+	return await _http(HTTPClient.METHOD_DELETE,
+		"/rest/v1/matchmaking_queue?id=eq.%s" % my_id.uri_encode(), {}, true)
+
+## The atomic pairing RPC. Returns the raw RPC dict: {matched, match_id,
+## players} or {matched:false, error?}. The caller must have queued first.
+func call_find_match(mode: String, widen: bool) -> Dictionary:
+	return await _http(HTTPClient.METHOD_POST, "/rest/v1/rpc/find_match",
+		{"p_mode": mode, "p_widen": widen}, true)
+
+## The invite-match RPC. Returns {ok, match_id, players} once every
+## invite in the group is accepted, else {ok:false}.
+func call_create_match_from_invites(group_id: String) -> Dictionary:
+	return await _http(HTTPClient.METHOD_POST, "/rest/v1/rpc/create_match_from_invites",
+		{"p_group_id": group_id}, true)
+
+## Poll for a matches row I am in (the OTHER side of a random pairing
+## learns it was matched this way — REST polling, unlimited on the free
+## tier, no Realtime messages). Returns the row dict or {}.
+func poll_match_for_me(my_id: String) -> Dictionary:
+	var res := await _http(HTTPClient.METHOD_GET,
+		"/rest/v1/matches?select=*&player_ids=cs.{%s}&status=eq.waiting" % my_id.uri_encode(),
+		{}, true)
+	if not bool(res["ok"]):
+		return {}
+	var rows: Array = res["data"] if res["data"] is Array else []
+	return rows[0] if not rows.is_empty() else {}
+
+## Poll for a matches row for an invite group (the invitee learns the
+## match id this way; the inviter gets it from the RPC return).
+func poll_match_by_group(group_id: String) -> Dictionary:
+	var res := await _http(HTTPClient.METHOD_GET,
+		"/rest/v1/matches?select=*&group_id=eq.%s&status=eq.waiting" % group_id.uri_encode(),
+		{}, true)
+	if not bool(res["ok"]):
+		return {}
+	var rows: Array = res["data"] if res["data"] is Array else []
+	return rows[0] if not rows.is_empty() else {}
+
+## Mark a matches row expired (best-effort — a dead match must not
+## linger as 'waiting'). Direct UPDATE is blocked by RLS in
+## schema-p2p.sql (no update policy for authenticated), so this is
+## expected to fail until a cleanup RPC exists; the caller ignores
+## the result. Rows older than 10 min are cleaned by the next search.
+func expire_match(match_id: String) -> Dictionary:
+	return await _http(HTTPClient.METHOD_PATCH,
+		"/rest/v1/matches?id=eq.%s" % match_id.uri_encode(),
+		{"status": "expired"}, true, PackedStringArray(["Prefer: return=representation"]))
+
+# ------------------------------------------------------- v11 presence (§11)
+# Lobby live-player list: one presence row per online player, heartbeat
+# ~30 s. Rows older than ~90 s are treated as offline (client filter).
+
+## Heartbeat my presence row (upsert by id). status: "online" | "in_match".
+func heartbeat_presence(my_id: String, display_name: String, level: int, status: String) -> Dictionary:
+	var row := {"id": my_id, "display_name": display_name, "level": level,
+		"status": status, "updated_at": Time.get_datetime_string_from_system(true, true).replace(" ", "T") + "+00:00"}
+	return await _http(HTTPClient.METHOD_POST, "/rest/v1/presence?on_conflict=id",
+		row, true, PackedStringArray(["Prefer: return=representation,resolution=merge-duplicates"]))
+
+## Delete my presence row (going offline / signing out).
+func delete_presence(my_id: String) -> Dictionary:
+	return await _http(HTTPClient.METHOD_DELETE,
+		"/rest/v1/presence?id=eq.%s" % my_id.uri_encode(), {}, true)
+
+## All presence rows, newest first. The caller filters out rows older
+## than ~90 s (presence_age_seconds) and never shows Gmail/coins —
+## the table holds name + level + status only, by design.
+func list_presence() -> Dictionary:
+	var res := await _http(HTTPClient.METHOD_GET,
+		"/rest/v1/presence?select=*&order=updated_at.desc", {}, true)
+	if not bool(res["ok"]):
+		return res
+	return {"ok": true, "status": int(res["status"]),
+		"data": res["data"] if res["data"] is Array else [], "error": ""}
+
+## Seconds since an ISO timestamp (Supabase "2026-11-22T13:00:00+00:00").
+## -1 when it cannot be parsed. Pure — used for presence staleness
+## (90 s) and invite expiry (24 h) alike.
+static func iso_age_seconds(iso: String) -> int:
+	if iso == "":
+		return -1
+	var core := iso.split("+", false, 1)[0]
+	core = core.split("Z", false, 1)[0]
+	core = core.replace("T", " ")
+	var stamp := Time.get_unix_time_from_datetime_string(core)
+	if stamp <= 0:
+		return -1
+	return int(Time.get_unix_time_from_system()) - int(stamp)
+
 # --------------------------------------------------------------- Realtime
 
 ## Subscribe to invite changes for one player (incoming invites where
@@ -482,6 +619,63 @@ func _join_realtime_channel() -> void:
 	}
 	_ws.send_text(JSON.stringify(join))
 
+## v11 P2P (§1.4): join the match Broadcast channel on the SAME socket
+## as the invites channel. Safe to call before the socket is open —
+## the channel name is stored and the join is sent from _process once
+## the socket opens. One socket total, never a second WebSocketPeer.
+func join_match_channel(match_id: String) -> void:
+	if match_id == "":
+		return
+	_ws_match_channel = P2PSignalling.channel_name(match_id)
+	_ws_match_joined = false
+	if _ws != null and _ws.get_ready_state() == WebSocketPeer.STATE_OPEN and _ws_joined:
+		_ws_match_joined = true
+		_join_match_channel()
+
+func leave_match_channel() -> void:
+	if _ws_match_channel == "" or _ws == null:
+		_ws_match_channel = ""
+		_ws_match_joined = false
+		return
+	_ws_ref += 1
+	_ws.send_text(JSON.stringify({
+		"topic": "realtime:%s" % _ws_match_channel,
+		"event": "phx_leave",
+		"payload": {},
+		"ref": str(_ws_ref),
+	}))
+	_ws_match_channel = ""
+	_ws_match_joined = false
+
+func _join_match_channel() -> void:
+	if _ws == null or _ws_match_channel == "":
+		return
+	_ws_ref += 1
+	_ws.send_text(JSON.stringify({
+		"topic": "realtime:%s" % _ws_match_channel,
+		"event": "phx_join",
+		"payload": {"config": {"broadcast": {"self": false}}},
+		"ref": str(_ws_ref),
+	}))
+
+## v11 P2P: send one signalling message on the match Broadcast channel.
+## No-op when no channel is joined (the caller joins first). Returns
+## false when there is no open socket — the caller treats that as a
+## failed connection, never a silent drop.
+func send_broadcast(msg: Dictionary) -> bool:
+	if _ws == null or _ws_match_channel == "":
+		return false
+	if _ws.get_ready_state() != WebSocketPeer.STATE_OPEN:
+		return false
+	_ws_ref += 1
+	_ws.send_text(JSON.stringify({
+		"topic": "realtime:%s" % _ws_match_channel,
+		"event": "broadcast",
+		"payload": {"event": "signal", "payload": msg},
+		"ref": str(_ws_ref),
+	}))
+	return true
+
 func _handle_realtime_text(text: String) -> void:
 	var parsed := parse_realtime_message(text)
 	if parsed.is_empty():
@@ -491,6 +685,13 @@ func _handle_realtime_text(text: String) -> void:
 			realtime_connected.emit()
 		"invite":
 			realtime_invite_changed.emit(parsed.get("record", {}))
+		"broadcast":
+			# v11 P2P: a signalling message on the match channel.
+			# Validated here (own echoes + malformed messages dropped)
+			# so Net only ever sees well-formed peer messages.
+			var msg := P2PSignalling.parse_message(parsed.get("record", {}), user_id)
+			if not msg.is_empty():
+				broadcast_received.emit(msg)
 		"heartbeat":
 			pass
 
@@ -498,7 +699,8 @@ func _handle_realtime_text(text: String) -> void:
 ## payloads. Returns {} for anything that is not a recognised message.
 ## Kinds: "joined" (our channel join was accepted), "invite" (a
 ## postgres_changes INSERT/UPDATE on invites, with the row in "record"),
-## "heartbeat" (a phx_reply to our heartbeat).
+## "broadcast" (a Broadcast "signal" on a carrom-match-* channel, with
+## the message in "record"), "heartbeat" (a phx_reply to our heartbeat).
 static func parse_realtime_message(text: String) -> Dictionary:
 	var data: Variant = JSON.parse_string(text)
 	if not (data is Dictionary):
@@ -516,6 +718,16 @@ static func parse_realtime_message(text: String) -> Dictionary:
 		if record.is_empty():
 			return {}
 		return {"kind": "invite", "record": record}
+	if event == "broadcast" and topic.begins_with("realtime:carrom-match-"):
+		# Supabase Broadcast: payload = {"event": "signal",
+		# "payload": {the signalling message}}.
+		var payload3: Dictionary = data.get("payload", {})
+		if String(payload3.get("event", "")) != "signal":
+			return {}
+		var msg: Dictionary = payload3.get("payload", {})
+		if msg.is_empty():
+			return {}
+		return {"kind": "broadcast", "record": msg}
 	return {}
 
 # ------------------------------------------------------------ pure helpers

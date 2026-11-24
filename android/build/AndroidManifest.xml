@@ -51,18 +51,6 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Google sign-in return (v9): Supabase redirects the
-                 browser to com.musehiro.carrom://auth-callback?code=...
-                 — Android routes it back to this activity
-                 (singleInstancePerTask, so onNewIntent fires), and
-                 GodotApp writes the URI to user://auth_callback.txt
-                 for the game to pick up. -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="com.musehiro.carrom" android:host="auth-callback" />
-            </intent-filter>
         </activity>
 
     </application>

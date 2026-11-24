@@ -12,6 +12,17 @@ the Godot client (scripts/supabase.gd) to run its full flow against it:
   REST:    GET/POST /rest/v1/profiles (upsert by id, filter by id/gmail)
            POST /rest/v1/rpc/search_players {q, exclude_id}
            GET/POST/PATCH /rest/v1/invites (filters: to_id/group_id/status)
+  v11 P2P: GET/POST/DELETE /rest/v1/matchmaking_queue (upsert by id)
+           GET/PATCH /rest/v1/matches (filters: player_ids cs.{id}, group_id, status)
+           POST /rest/v1/rpc/find_match {p_mode, p_widen} (atomic pairing,
+             ±2 / ±4 window, stake validated against profiles.coins)
+           POST /rest/v1/rpc/create_match_from_invites {p_group_id}
+             (idempotent; all invites must be accepted)
+           GET/POST/DELETE /rest/v1/presence (upsert by id)
+           Fake Broadcast: a "broadcast" event on a realtime:carrom-match-*
+             topic is stored + re-emitted to every WS client as a
+             broadcast signal; GET /broadcast/<channel> lists stored
+             messages (test-only seam — the real Realtime does this).
   Realtime: wss handshake on /realtime/v1/websocket; phx_join on
            realtime:public:invites is answered with phx_reply ok, and
            every invite INSERT/UPDATE is broadcast as postgres_changes.
@@ -54,6 +65,10 @@ class State:
         self.otps = {}       # email -> code
         self.profiles = {}   # id -> row dict
         self.invites = []    # list of row dicts
+        self.queue = {}      # v11: id -> matchmaking_queue row
+        self.matches = []    # v11: list of matches rows
+        self.presence = {}   # v11: id -> presence row
+        self.broadcast_log = []  # v11: [{channel, msg}] fake Broadcast store
         self.ws_clients = set()  # sockets
 
     def new_user(self, email=None):
@@ -108,6 +123,100 @@ def broadcast_invite(row, event_type: str) -> None:
         clients = list(STATE.ws_clients)
     for sock in clients:
         ws_send_text(sock, msg)
+
+
+def broadcast_signal(channel, msg):
+    """Fake Broadcast: store + re-emit a signal to every WS client."""
+    with STATE.lock:
+        STATE.broadcast_log.append({"channel": channel, "msg": msg})
+        clients = list(STATE.ws_clients)
+    wire = json.dumps({
+        "topic": "realtime:%s" % channel,
+        "event": "broadcast",
+        "payload": {"event": "signal", "payload": msg},
+        "ref": None,
+    })
+    for sock in clients:
+        ws_send_text(sock, wire)
+
+
+def find_match_impl(mode, widen):
+    """Mirror of schema-p2p.sql find_match (mock): pair the caller
+    (the single queue row that called first is 'me' — the mock has no
+    auth, so the caller is identified by the most recent queue row
+    when only one caller exists; the tests call it per-player via the
+    queue rows directly). Returns the RPC dict."""
+    with STATE.lock:
+        rows = sorted(STATE.queue.values(), key=lambda r: r["created_at"])
+    if not rows:
+        return {"matched": False, "error": "You are not in the queue."}
+    me = rows[0]
+    window = 4 if widen else 2
+    need = 3 if mode == "4p" else 1
+    others = [r for r in rows[1:]
+              if r["mode"] == mode and r["table"] == me["table"]
+              and abs(r["level"] - me["level"]) <= window]
+    if len(others) < need:
+        return {"matched": False}
+    group = [me] + others[:need]
+    for r in group:
+        prof = STATE.profiles.get(r["id"], {})
+        if r["stake"] < 0 or r["stake"] > prof.get("coins", 0):
+            with STATE.lock:
+                STATE.queue.pop(r["id"], None)
+            return {"matched": False, "error": "A player staked more coins than they own."}
+    players = [{"id": r["id"], "name": r["display_name"], "level": r["level"],
+                "stake": r["stake"], "seat": i} for i, r in enumerate(group)]
+    match_id = str(uuid.uuid4())
+    with STATE.lock:
+        STATE.matches.append({
+            "id": match_id, "group_id": None, "mode": mode,
+            "table": me["table"],
+            "player_ids": [r["id"] for r in group],
+            "players": players, "status": "waiting",
+            "created_at": now_iso()})
+        for r in group:
+            STATE.queue.pop(r["id"], None)
+    return {"matched": True, "match_id": match_id, "players": players}
+
+
+def create_match_from_invites_impl(group_id):
+    with STATE.lock:
+        existing = [m for m in STATE.matches if m.get("group_id") == group_id]
+        if existing:
+            m = existing[0]
+            return {"ok": True, "match_id": m["id"], "players": m["players"]}
+        inv_rows = sorted([r for r in STATE.invites if r["group_id"] == group_id],
+                          key=lambda r: r["created_at"])
+    if not inv_rows:
+        return {"ok": False, "error": "No invites in this group."}
+    if any(r["status"] != "accepted" for r in inv_rows):
+        return {"ok": False, "error": "Not everyone has accepted yet."}
+    inviter_id = inv_rows[0]["from_id"]
+    inviter_name = inv_rows[0]["from_name"]
+    inviter_stake = inv_rows[0]["stake"]
+    prof = STATE.profiles.get(inviter_id, {})
+    inviter_level = int(prof.get("xp", 0)) // 500 + 1
+    if inviter_stake < 0 or inviter_stake > prof.get("coins", 0):
+        return {"ok": False, "error": "The inviter staked more coins than they own."}
+    players = [{"id": inviter_id, "name": inviter_name, "level": inviter_level,
+                "stake": inviter_stake, "seat": 0}]
+    ids = [inviter_id]
+    for i, inv in enumerate(inv_rows):
+        p = STATE.profiles.get(inv["to_id"], {})
+        if inv["stake"] < 0 or inv["stake"] > p.get("coins", 0):
+            return {"ok": False, "error": "A player staked more coins than they own."}
+        players.append({"id": inv["to_id"], "name": inv["to_name"],
+                        "level": int(p.get("xp", 0)) // 500 + 1,
+                        "stake": inv["stake"], "seat": i + 1})
+        ids.append(inv["to_id"])
+    match_id = str(uuid.uuid4())
+    with STATE.lock:
+        STATE.matches.append({
+            "id": match_id, "group_id": group_id, "mode": inv_rows[0]["mode"],
+            "table": 0, "player_ids": ids, "players": players,
+            "status": "waiting", "created_at": now_iso()})
+    return {"ok": True, "match_id": match_id, "players": players}
 
 
 def ws_recv_frame(rfile):
@@ -185,6 +294,41 @@ class Handler(BaseHTTPRequestHandler):
                 rows = [r for r in rows if r.get("gmail") == gmail]
             self._json(200, rows)
             return
+        if path == "/rest/v1/matchmaking_queue":
+            query = parse_qs(parsed.query)
+            rows = list(STATE.queue.values())
+            qid = self._eq(query, "id")
+            if qid is not None:
+                rows = [r for r in rows if r["id"] == qid]
+            self._json(200, rows)
+            return
+        if path == "/rest/v1/matches":
+            query = parse_qs(parsed.query)
+            rows = list(STATE.matches)
+            # player_ids=cs.{uuid} — array-contains (the v11 poll).
+            raw_q = parsed.query
+            if "player_ids=cs.{" in raw_q:
+                want = raw_q.split("player_ids=cs.{", 1)[1].split("}", 1)[0]
+                rows = [r for r in rows if want in r.get("player_ids", [])]
+            group_id = self._eq(query, "group_id")
+            status = self._eq(query, "status")
+            if group_id is not None:
+                rows = [r for r in rows if r.get("group_id") == group_id]
+            if status is not None:
+                rows = [r for r in rows if r.get("status") == status]
+            self._json(200, rows)
+            return
+        if path == "/rest/v1/presence":
+            rows = sorted(STATE.presence.values(),
+                          key=lambda r: r.get("updated_at", ""), reverse=True)
+            self._json(200, rows)
+            return
+        if path.startswith("/broadcast/"):
+            channel = path[len("/broadcast/"):]
+            with STATE.lock:
+                msgs = [b["msg"] for b in STATE.broadcast_log if b["channel"] == channel]
+            self._json(200, msgs)
+            return
         if path == "/rest/v1/invites":
             query = parse_qs(parsed.query)
             rows = list(STATE.invites)
@@ -196,7 +340,12 @@ class Handler(BaseHTTPRequestHandler):
             if group_id is not None:
                 rows = [r for r in rows if r["group_id"] == group_id]
             if status is not None:
-                rows = [r for r in rows if r.get("status") == status]
+                # v11: list_outgoing_invites uses status=in.(pending,accepted)
+                if status.startswith("in.(") and status.endswith(")"):
+                    wanted = set(s.strip() for s in status[4:-1].split(","))
+                    rows = [r for r in rows if r.get("status") in wanted]
+                else:
+                    rows = [r for r in rows if r.get("status") == status]
             rows.sort(key=lambda r: r["created_at"], reverse="desc")
             self._json(200, rows)
             return
@@ -261,6 +410,29 @@ class Handler(BaseHTTPRequestHandler):
             out.sort(key=lambda r: r["display_name"])
             self._json(200, out[:20])
             return
+        if path == "/rest/v1/matchmaking_queue":
+            row = dict(body)
+            row.setdefault("created_at", now_iso())
+            with STATE.lock:
+                STATE.queue[row["id"]] = row
+            self._json(201, [row])
+            return
+        if path == "/rest/v1/presence":
+            row = dict(body)
+            row["updated_at"] = now_iso()
+            with STATE.lock:
+                STATE.presence[row["id"]] = row
+            self._json(201, [row])
+            return
+        if path == "/rest/v1/rpc/find_match":
+            # The mock has no auth: the caller is the oldest queue row
+            # (tests queue one player, then the other, then call).
+            self._json(200, find_match_impl(str(body.get("p_mode", "2p")),
+                                            bool(body.get("p_widen", False))))
+            return
+        if path == "/rest/v1/rpc/create_match_from_invites":
+            self._json(200, create_match_from_invites_impl(str(body.get("p_group_id", ""))))
+            return
         if path == "/rest/v1/invites":
             row = dict(body)
             row["id"] = str(uuid.uuid4())
@@ -274,8 +446,40 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(404, {"msg": "not found"})
 
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        if parsed.path == "/rest/v1/matchmaking_queue":
+            qid = self._eq(query, "id")
+            with STATE.lock:
+                STATE.queue.pop(qid, None)
+            self._json(200, [])
+            return
+        if parsed.path == "/rest/v1/presence":
+            qid = self._eq(query, "id")
+            with STATE.lock:
+                STATE.presence.pop(qid, None)
+            self._json(200, [])
+            return
+        self._json(404, {"msg": "not found"})
+
     def do_PATCH(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/rest/v1/matches":
+            query = parse_qs(parsed.query)
+            match_id = self._eq(query, "id")
+            body = self._read_body()
+            with STATE.lock:
+                for row in STATE.matches:
+                    if row["id"] == match_id:
+                        row.update(body)
+                        updated = dict(row)
+                        break
+                else:
+                    self._json(404, {"msg": "match not found"})
+                    return
+            self._json(200, [updated])
+            return
         if parsed.path == "/rest/v1/invites":
             query = parse_qs(parsed.query)
             invite_id = self._eq(query, "id")
@@ -329,6 +533,14 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 event = msg.get("event", "")
                 ref = msg.get("ref")
+                if event == "broadcast":
+                    topic = str(msg.get("topic", ""))
+                    if topic.startswith("realtime:carrom-match-"):
+                        channel = topic[len("realtime:"):]
+                        payload = msg.get("payload", {})
+                        if str(payload.get("event", "")) == "signal":
+                            broadcast_signal(channel, payload.get("payload", {}))
+                    continue
                 if event == "phx_join":
                     ws_send_text(sock, json.dumps({
                         "topic": msg.get("topic", ""), "event": "phx_reply",

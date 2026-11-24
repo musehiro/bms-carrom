@@ -1,5 +1,12 @@
 # BMS Carrom — Online Server
 
+> **FROZEN in v11 — do not extend, do not delete.** Internet play moved
+> to peer-to-peer WebRTC (see `docs/p2p-online.md`); this server is kept
+> only as the one-version rollback behind the transport switch in
+> `scripts/net_client.gd` (`use_legacy_enet()` / `TRANSPORT_LEGACY_ENET`).
+> No new features go here. The Oracle host env vars for F13 Phase 2 are
+> still open for this path, but only as rollback support.
+
 Real online multiplayer needs a server: it matches players of similar
 level, then relays their shots. The server is deliberately tiny — it does
 **not** simulate physics (both clients simulate the same shot inputs and
@@ -50,6 +57,35 @@ cheap and the server easy to run anywhere.
   leaver's seat, so clients can work out which team forfeited (partner
   left = your team loses; opponent left = your team wins).
 - LAN (below) is 2-player only in v6; 4-player needs the internet server.
+
+### Random matchmaking + lobby + match points (v11)
+- **Random matchmaking:** ONLINE → choose a game (2p singles or 4p
+  doubles) → tap to play with a random person. The client entry is
+  `NetClient.queue_random(...)` (alias of `queue_up`, same
+  `{"type":"queue",...}` message); Main's stable entry is
+  `Main.start_random_match(stake, players)`. The server pairs players
+  on the same stake band within ±2 levels (±4 after 30 s) — nobody
+  picks a name or an opponent. A search can be cancelled without
+  dropping the connection (`{"type":"leave_queue"}`).
+- **Lobby:** when the server sends `matched`, the game does NOT jump
+  straight into the match — it opens the MATCH LOBBY (roster with
+  names, levels, teams in 4p, and each player's READY state). Each
+  player taps I'M READY, which sends `{"type":"lobby_ready","seat":n}`
+  through the existing ENet relay (the server relays it to the room
+  exactly like a shot/state message — no WebRTC, no Supabase
+  signalling; the room already exists by then). The match starts
+  when everybody is ready, or automatically after 30 s (silent
+  players count as ready, so a lobby can never stall). Leaving the
+  lobby sends `{"type":"lobby_leave"}` — the server dissolves the
+  room and the rest get `opponent_left` and go home.
+- **Match points:** online matches only (solo/tour pay none). Win
+  +3, draw +1, loss +0; in doubles the whole winning team earns the
+  points. The lifetime total lives in the local save
+  (`Save.match_points`, shown on the result screen and in the lobby
+  with its tier: Contender <10, Challenger <25, Champion <50,
+  Master <100, Grand Master 100+). It is NOT synced to Supabase yet
+  — the `profiles` table has no `match_points` column, so cloud sync
+  needs a Supabase migration first.
 
 ### Win screen + doubling (v6)
 - An online win does NOT credit the pot immediately: the premium win

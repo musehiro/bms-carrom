@@ -12,6 +12,19 @@
 #       VCN -> Security Lists -> Ingress Rule, UDP, port 8910, 0.0.0.0/0.)
 #   4. Installs + starts a systemd service so the server restarts on boot.
 #
+# F13 Phase 2 (v11) — verified stakes (OPTIONAL, off by default): the
+# server verifies each player's Supabase token + coin balance before
+# matchmaking, and settles the pot itself. To enable it, ON THE VM ONLY
+# (never in this repo, never in the game) add these two lines to the
+# [Service] section below, with the REAL values from the Supabase
+# dashboard (Project Settings -> API), then `sudo systemctl restart
+# carrom-server`. The service-role key must NEVER be committed, pasted
+# into the game, or shown to anyone — it bypasses row-level security.
+#   Environment=SUPABASE_URL=https://<your-project-ref>.supabase.co
+#   Environment=SUPABASE_SERVICE_ROLE_KEY=<paste-the-service-role-key-here>
+# Without them the server runs with Phase 1 clamps only (verified in
+# the log line at startup). No key is ever printed in the server log.
+#
 # Usage:
 #   chmod +x deploy-oracle.sh
 #   ./deploy-oracle.sh
