@@ -786,6 +786,7 @@ func _show_result() -> void:
 		won = CarromRules.team_of(rules_state, winner) == CarromRules.team_of(rules_state, local_seat)
 	if won:
 		Sfx.win()
+		Sfx.cheer()
 	elif not is_draw:
 		Sfx.foul()
 	# Pot math (staked modes only: online + tour). 2p: pot = your stake +
@@ -921,7 +922,7 @@ func _show_result() -> void:
 			lines.append("Board score: %d" % CarromRules.board_score(rules_state, winner))
 		if rules_state.get("lose_reason", "") != "":
 			lines.append("Reason: %s" % String(rules_state["lose_reason"]).replace("_", " "))
-		var pop: Dictionary = UiKit.popup_window("DRAW" if is_draw else "YOU LOSE", Vector2(560, 560))
+		var pop: Dictionary = UiKit.popup_window("DRAW" if is_draw else "You Lost", Vector2(560, 560))
 		_hud.add_child(pop["dim"])
 		var box: VBoxContainer = pop["box"]
 		box.add_child(UiKit.body_label("\n".join(lines), 24))
@@ -969,6 +970,29 @@ func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, 
 	big.add_theme_constant_override("shadow_offset_x", 3)
 	big.add_theme_constant_override("shadow_offset_y", 3)
 	box.add_child(big)
+	# Win-screen honesty: a forfeit win used to look identical to a clean
+	# win. When the loser forfeited (rules_state["lose_reason"] is set),
+	# say so plainly, naming the opponent — mirroring the lose screen's
+	# "Reason:" line. Clean wins (lose_reason == "") show nothing here.
+	var lose_reason := String(rules_state.get("lose_reason", ""))
+	if lose_reason != "":
+		var reason_text := ""
+		# 4p: opponent_name is the PARTNER's name (setup_4p), and the
+		# forfeiter's seat is not recorded in rules_state — so name the
+		# other team, not a person. 2p: the forfeiter is the opponent.
+		if lose_reason == "last_coin_queen_on_board":
+			if player_count == 4:
+				reason_text = "You win — the other team pocketed their last coin with the queen still on the board."
+			else:
+				reason_text = "You win — %s pocketed their last coin with the queen still on the board." % opponent_name
+		elif lose_reason == "pocketed_opponent_last":
+			if player_count == 4:
+				reason_text = "You win — the other team pocketed your team's last coin."
+			else:
+				reason_text = "You win — %s pocketed your last coin." % opponent_name
+		else:
+			reason_text = "You win — %s (%s)." % [opponent_name, lose_reason.replace("_", " ")]
+		box.add_child(UiKit.body_label(reason_text, 20))
 	if _is_staked_mode():
 		if my_share > 0:
 			if player_count == 4:

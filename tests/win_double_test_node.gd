@@ -90,7 +90,9 @@ func _find_label_containing(root: Node, text: String) -> Label:
 	return null
 
 ## Force an online win on a fresh solo match (stakes your/opp).
-func _force_online_win(your_stake: int, opp_stake: int) -> void:
+## lose_reason, when set, forces a FORFEIT win (the opponent lost on a
+## rule) so the win screen's forfeit line can be checked.
+func _force_online_win(your_stake: int, opp_stake: int, lose_reason: String = "") -> void:
 	_main._start_solo(1)
 	var waited := 0.0
 	while waited < 9.0:
@@ -107,6 +109,7 @@ func _force_online_win(your_stake: int, opp_stake: int) -> void:
 	m.opp_stake = opp_stake
 	m.rules_state["over"] = true
 	m.rules_state["winner"] = 0
+	m.rules_state["lose_reason"] = lose_reason
 	m._show_result()
 	await _frames(3)
 
@@ -204,6 +207,7 @@ func _run() -> void:
 	_check("tour: COLLECT shows ◉ 200", _find_label(_main, "◉ 200") != null)
 	_check("tour: DOUBLE shows ◉ 400", _find_label(_main, "DOUBLE TO ◉ 400") != null)
 	_check("tour: win screen names the bot", _find_label(_main, "World Tour — you beat Arjun Mehta (BOT)") != null)
+	_check("tour: no forfeit line on a clean win", _find_label_containing(_main, "pocketed their last coin") == null and _find_label_containing(_main, "pocketed your last coin") == null)
 	_check("tour: tour_wins incremented", Save.tour_wins == tour0 + 1)
 	var ladder3 := Save.ad_next_reward()
 	_ad_earned = 0
@@ -234,8 +238,53 @@ func _run() -> void:
 	m5._show_result()
 	await _frames(3)
 	_check("tour loss: stake stays lost (no refund)", Save.coins == coins4 - 100, "coins=%d expected=%d" % [Save.coins, coins4 - 100])
+	_check("tour loss: title reads 'You Lost'", _find_label(_main, "You Lost") != null)
 	_check("tour loss: loss screen names the bot", _find_label_containing(_main, "World Tour loss — Arjun Mehta (BOT) wins your stake ◉ 100") != null)
 	_check("tour loss: tour_wins unchanged", Save.tour_wins == tour_wins_before)
+	# --- Forfeit win (win/lose fix): the bot pocketed his last coin
+	# with the queen still on the board, so the player wins on the rule.
+	# The win screen must SAY so (naming the bot) instead of looking
+	# like a clean win — and the pot still pays out exactly as usual.
+	var coinsF := Save.coins
+	var tour_winsF := Save.tour_wins
+	Save.interstitial_counter = 0
+	_main._start_tour_match(WorldTour.BOTS[0], 100)
+	await _wait_for_match()
+	var mF = _main._match
+	_check("forfeit: match exists", mF != null)
+	if mF == null:
+		_finish()
+		return
+	_check("forfeit: stake locked at match start", Save.coins == coinsF - 100)
+	mF.rules_state["over"] = true
+	mF.rules_state["winner"] = 0
+	mF.rules_state["lose_reason"] = "last_coin_queen_on_board"
+	mF._show_result()
+	await _frames(3)
+	_check("forfeit: WINNER banner still shown", _find_label(_main, "★ WINNER ★") != null)
+	_check("forfeit: win screen names the forfeit", _find_label_containing(_main, "You win — Arjun Mehta (BOT) pocketed their last coin with the queen still on the board.") != null)
+	_check("forfeit: pot held (200) like any win", mF._pot_pending == 200 and not mF._pot_credited and Save.coins == coinsF - 100)
+	_check("forfeit: tour_wins incremented", Save.tour_wins == tour_winsF + 1)
+	var homeF := _find_button(_main, "HOME")
+	_check("forfeit: HOME button found", homeF != null)
+	if homeF:
+		homeF.pressed.emit()
+		await _frames(2)
+	_check("forfeit: exit credits the base pot", Save.coins == coinsF + 100, "coins=%d expected=%d" % [Save.coins, coinsF + 100])
+	# --- Forfeit win, second reason: the bot pocketed the PLAYER's last
+	# coin. Same honesty rule, other sentence.
+	await _force_online_win(50, 50, "pocketed_opponent_last")
+	var mF2 = _main._match
+	_check("forfeit2: match exists", mF2 != null)
+	if mF2 == null:
+		_finish()
+		return
+	_check("forfeit2: win screen names the forfeit", _find_label_containing(_main, "You win — Medium Bot pocketed your last coin.") != null)
+	_check("forfeit2: pot held (100)", mF2._pot_pending == 100 and not mF2._pot_credited)
+	# Restore the held pot so later blocks start clean (same reason as
+	# the F8 restore at the end: a held pot would be recovered as coins
+	# by the next match's _ready).
+	Save.pending_pot = 0
 	# --- Win 5 (v10): tour stake 0 — NEVER a bare ◉ 0. The big button
 	# is the earn path: WATCH 2 ADS -> EARN the next two ladder steps.
 	var coins5z := Save.coins
@@ -293,6 +342,10 @@ func _run() -> void:
 	_check("solo: no duplicate PRACTICE WIN continue button (v10)", _find_label(_main, "★ PRACTICE WIN ★") == null)
 	_check("solo: no bare ◉ 0 anywhere on the win screen", _find_label_containing(_main, "◉ 0") == null)
 	_check("solo: fireworks burst on the win screen", m6._fireworks != null and m6._fireworks.particle_count() > 0)
+	var fw_shapes := {}
+	for p in m6._fireworks._particles:
+		fw_shapes[String((p as Dictionary).get("shape", "dot"))] = true
+	_check("solo: fireworks mix dots, petals and confetti", fw_shapes.has("dot") and fw_shapes.has("petal") and fw_shapes.has("rect"), str(fw_shapes.keys()))
 	var ladder5 := Save.ad_next_reward()
 	_check("solo: WATCH 1 AD offer shown", _find_label(_main, "WATCH 1 AD") != null)
 	_check("solo: EARN shows the ladder amount", _find_label(_main, "EARN ◉ %d" % ladder5) != null)

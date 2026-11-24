@@ -3,6 +3,11 @@ extends Node
 ## Sfx — autoload. Procedural wooden sounds (no audio files needed):
 ## click (striker/coin impact, pitch varies with force), thock (cushion),
 ## sink + chime (pocket), foul buzz. All generated as AudioStreamWAV.
+## The win cheer is the one file-based sound: res://audio/cheer.wav
+## (crowd cheer, supplied alongside this code) — played through the same
+## 6-player pool on the Master bus, so the mute toggle respects it.
+
+const CHEER := preload("res://audio/cheer.wav")
 
 var _players: Array = []
 var _enabled := true
@@ -69,6 +74,11 @@ func foul() -> void:
 func win() -> void:
 	_play(_tone(523.0, 0.5, 8.0), -4.0, 1.0)
 	_play(_tone(784.0, 0.5, 8.0), -6.0, 1.0)
+
+## Win cheer (crowd applause, res://audio/cheer.wav). Same pool, same
+## Master bus as every other sound — the mute toggle respects it.
+func cheer() -> void:
+	_play(CHEER, -4.0, 1.0)
 
 func tap() -> void:
 	_play(_tone(1200.0, 0.04, 120.0, 0.2), -12.0, 1.0)

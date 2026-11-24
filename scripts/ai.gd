@@ -20,6 +20,9 @@ extends RefCounted
 ##   * Defensive when ahead: ahead by 2+ coins, the AI stops chasing
 ##     the queen (she is not worth the risk) and penalises high cut
 ##     angles harder — it protects the lead instead of gambling.
+##     EXCEPTION (last-coin guard): at 8 pocketed with the queen still
+##     uncovered, the queen is the ONLY target — a plain 9th coin
+##     forfeits the board, so defending never suppresses the chase there.
 ##   * Striker safety: shots whose striker would end up near a pocket
 ##     (a foul waiting to happen) are penalised.
 ##   * Bank shots: when no direct shot exists, the AI tries a
@@ -57,24 +60,48 @@ static func choose_shot(pieces: Array, own_color: String, difficulty: int, rules
 	var opp_pocketed := int((rules_state.get("pocketed", [0, 0]) as Array)[1 - my_team])
 	var ahead_by := my_pocketed - opp_pocketed
 	var defending := ahead_by >= 2
+	# Last-coin guard (win/lose fix): pocketing your 9th coin while the
+	# queen is still uncovered LOSES the board (rules.gd: the queen must
+	# be "covered", or already covered by the opponent — then clearing
+	# your coins still wins). At 8 coins with the queen uncovered, the
+	# AI must chase the queen and NEVER take the plain 9th-coin shot.
+	# The one safe exception is a queen pending for the AI herself:
+	# pocketing an own coin on this shot COVERS her (rules.gd), so the
+	# cover shot is the winning shot, not a forfeit. A queen pending for
+	# the other side can never be the state at the AI's turn start (the
+	# shooter keeps the turn after pocketing her), but it is treated as
+	# uncovered here anyway — the safe default.
+	var queen_state := String(rules_state.get("queen", "board"))
+	var queen_pending_me := queen_state == "pending" and int(rules_state.get("queen_owner", -1)) == ai_seat
+	var last_coin_guard := my_pocketed == 8 and queen_state != "covered" and not queen_pending_me
 	# Queen pending for the AI: she MUST be covered on this shot or she
 	# goes back to the centre — covering her outranks everything.
-	var queen_pending_me := String(rules_state.get("queen", "board")) == "pending" and int(rules_state.get("queen_owner", -1)) == ai_seat
 
 	# Candidate targets: own coins, plus the queen when allowed.
 	# Defending a lead: never chase the queen — she is not worth the risk.
+	# EXCEPT under the last-coin guard: at 8 coins with the queen
+	# uncovered, the queen is the ONLY safe target — defending must never
+	# suppress queen-chasing there (a plain 9th coin forfeits the board).
 	var targets: Array = []
 	for p in pieces:
 		if not p["active"]:
 			continue
 		if p["kind"] == own_color:
-			targets.append(p)
-		elif p["kind"] == "queen" and float(cfg["queen_chase"]) > 0.0 and not defending:
-			if my_pocketed >= 1 and rules_state["queen"] == "board":
-				if randf() < float(cfg["queen_chase"]):
+			if not last_coin_guard:
+				targets.append(p)
+		elif p["kind"] == "queen" and (last_coin_guard or (float(cfg["queen_chase"]) > 0.0 and not defending)):
+			# "returned" is on the board too (she went back to the centre).
+			if my_pocketed >= 1 and (queen_state == "board" or queen_state == "returned"):
+				if last_coin_guard or randf() < float(cfg["queen_chase"]):
 					targets.append(p)
 
 	if is_break or targets.is_empty():
+		if last_coin_guard:
+			# No queen to aim at (she is off the board in this position):
+			# NEVER blast the centre cluster — a hard break could pocket
+			# the 9th coin and lose the board on the spot. Soft nudge
+			# straight down the middle instead.
+			return _apply_error({"striker_x": CarromPhysics.BOARD_CENTER.x, "dir": Vector2.DOWN, "power": 0.3}, cfg)
 		# Break: aim at the centre cluster with near-full power.
 		var sx := CarromPhysics.BOARD_CENTER.x + _gauss(30.0)
 		var from := Vector2(sx, baseline_y)

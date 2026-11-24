@@ -36,6 +36,7 @@ func _initialize() -> void:
 	_test_ai_advanced_accuracy()
 	_test_ai_queen_cover()
 	_test_ai_defensive_no_queen_chase()
+	_test_ai_last_coin_guard()
 	_test_ai_bank_shot()
 	_test_ai_striker_safety()
 	_test_shop_stats_capped()
@@ -561,6 +562,63 @@ func _test_ai_defensive_no_queen_chase() -> void:
 	_check("ai defence: ahead by 2 — AI protects the lead, aims at an own coin", _ray_target_kind(pieces, from_a2, shot_a2["dir"]) == "black", _ray_target_kind(pieces, from_a2, shot_a2["dir"]))
 	_check("ai defence: defending changes the chosen shot", absf((shot_a2["dir"] as Vector2).angle_to(shot_even["dir"] as Vector2)) > 0.1)
 
+## Win/lose fix — last-coin guard: at 8 pocketed with the queen still on
+## the board, pocketing the 9th coin LOSES (rules.gd). The AI must chase
+## the queen instead — even when defending a lead, and even on Easy
+## (queen_chase 0.0). Same board as the defence test: the queen is the
+## best target, an own coin second-best.
+func _test_ai_last_coin_guard() -> void:
+	var pieces := _tour_pieces([
+		["queen", Vector2(200, 500)],
+		["black", Vector2(500, 500)],
+	])
+	# Ahead 8-5 (defending): Hard would normally never chase the queen.
+	var guard_state := CarromRules.fresh_state(1)
+	(guard_state["pocketed"] as Array)[0] = 5
+	(guard_state["pocketed"] as Array)[1] = 8
+	var shot: Dictionary = CarromAI.choose_shot(pieces, "black", 3, guard_state, false)
+	var from := Vector2(float(shot["striker_x"]), CarromPhysics.baseline_y(1))
+	_check("ai guard: at 8 coins, defending AI still chases the queen", _ray_target_kind(pieces, from, shot["dir"]) == "queen", _ray_target_kind(pieces, from, shot["dir"]))
+	# Same state, queen "returned" (back on the centre): still the guard.
+	var returned_state := CarromRules.fresh_state(1)
+	(returned_state["pocketed"] as Array)[0] = 5
+	(returned_state["pocketed"] as Array)[1] = 8
+	returned_state["queen"] = "returned"
+	var shot_r: Dictionary = CarromAI.choose_shot(pieces, "black", 3, returned_state, false)
+	var from_r := Vector2(float(shot_r["striker_x"]), CarromPhysics.baseline_y(1))
+	_check("ai guard: queen returned — still chases the queen", _ray_target_kind(pieces, from_r, shot_r["dir"]) == "queen", _ray_target_kind(pieces, from_r, shot_r["dir"]))
+	# Easy (queen_chase 0.0, 20% outright miss): the guard must still
+	# make the queen the target. Aim error + miss chance rotate some
+	# shots off her, so this is statistical: >= 16 of 30 shots must
+	# have the queen as the first piece on the ray (a broken guard
+	# scores ~0 — Easy never targets the queen at all).
+	var queen_hits := 0
+	for i in range(30):
+		var s: Dictionary = CarromAI.choose_shot(pieces, "black", 0, guard_state, false)
+		var f := Vector2(float(s["striker_x"]), CarromPhysics.baseline_y(1))
+		if _ray_target_kind(pieces, f, s["dir"]) == "queen":
+			queen_hits += 1
+	_check("ai guard: Easy at 8 coins chases the queen (statistical)", queen_hits >= 16, "queen_hits=%d/30" % queen_hits)
+	# Guard OFF when the queen is covered: the 9th coin is the winning
+	# shot, so the AI takes the own coin — covered by the AI herself...
+	var covered_me := CarromRules.fresh_state(1)
+	(covered_me["pocketed"] as Array)[0] = 5
+	(covered_me["pocketed"] as Array)[1] = 8
+	covered_me["queen"] = "covered"
+	covered_me["queen_owner"] = 1
+	var shot_c: Dictionary = CarromAI.choose_shot(pieces, "black", 3, covered_me, false)
+	var from_c := Vector2(float(shot_c["striker_x"]), CarromPhysics.baseline_y(1))
+	_check("ai guard: queen covered by the AI — takes the winning 9th coin", _ray_target_kind(pieces, from_c, shot_c["dir"]) == "black", _ray_target_kind(pieces, from_c, shot_c["dir"]))
+	# ... and covered by the opponent (clearing your coins still wins).
+	var covered_opp := CarromRules.fresh_state(1)
+	(covered_opp["pocketed"] as Array)[0] = 5
+	(covered_opp["pocketed"] as Array)[1] = 8
+	covered_opp["queen"] = "covered"
+	covered_opp["queen_owner"] = 0
+	var shot_o: Dictionary = CarromAI.choose_shot(pieces, "black", 3, covered_opp, false)
+	var from_o := Vector2(float(shot_o["striker_x"]), CarromPhysics.baseline_y(1))
+	_check("ai guard: queen covered by the opponent — takes the winning 9th coin", _ray_target_kind(pieces, from_o, shot_o["dir"]) == "black", _ray_target_kind(pieces, from_o, shot_o["dir"]))
+
 func _test_ai_bank_shot() -> void:
 	var pockets := CarromPhysics.pocket_centers()
 	# Direct unit check: a centre target banks off a cushion.
@@ -650,7 +708,33 @@ func _scattered(pieces: Array) -> bool:
 ## Full match, AI vs AI (Hard), with the board mirrored for seat 0 (the AI
 ## picks shots from the top baseline). Validates the whole loop end to end:
 ## turns, queen cover, fouls/dues, coin returns, and a winner.
+## Win/lose fix: plays THREE matches and counts forfeit finishes — the
+## last-coin guard must make queen-forfeit finishes (bot pockets its 9th
+## coin with the queen uncovered) ~0, and opponent-last-coin finishes ~0
+## too. One match is a single sample; three is the smallest count that
+## exercises the guard's endgame repeatedly.
 func _test_full_match_ai_vs_ai() -> void:
+	var queen_forfeits := 0
+	var opp_last_forfeits := 0
+	for m in range(3):
+		var res := _play_ai_match()
+		var tag := "match %d" % (m + 1)
+		_check("match: AI vs AI finishes (%s)" % tag, bool(res["over"]), "shots=%d winner=%s pocketed=%s queen=%s" % [int(res["shots"]), str(res["winner"]), str(res["pocketed"]), str(res["queen"])])
+		_check("match: winner is a real player (%s)" % tag, int(res["winner"]) == 0 or int(res["winner"]) == 1)
+		_check("match: finished in a sane number of shots (%s)" % tag, int(res["shots"]) < 300 and int(res["shots"]) > 5, "shots=%d" % int(res["shots"]))
+		_check("match: winner cleared all 9 coins (or won on opponent's mistake) (%s)" % tag,
+			int((res["pocketed"] as Array)[int(res["winner"])]) == 9 or String(res["lose_reason"]) != "",
+			"pocketed=%s lose_reason=%s" % [str(res["pocketed"]), str(res["lose_reason"])])
+		print("INFO: full AI match %d: %d shots, %d queen returns, %d fouls, winner=%d, lose_reason=%s" % [m + 1, int(res["shots"]), int(res["queen_returns"]), int(res["fouls"]), int(res["winner"]), String(res["lose_reason"])])
+		if String(res["lose_reason"]) == "last_coin_queen_on_board":
+			queen_forfeits += 1
+		if String(res["lose_reason"]) == "pocketed_opponent_last":
+			opp_last_forfeits += 1
+	_check("match: no queen-forfeit finishes across 3 AI matches", queen_forfeits == 0, "queen_forfeits=%d" % queen_forfeits)
+	_check("match: no opponent-last-coin finishes across 3 AI matches", opp_last_forfeits == 0, "opp_last_forfeits=%d" % opp_last_forfeits)
+
+## One full AI-vs-AI match (Hard). Returns the end stats.
+func _play_ai_match() -> Dictionary:
 	var pieces := CarromPhysics.setup_pieces()
 	var state := CarromRules.fresh_state(randi() % 2)
 	var striker: Dictionary = pieces[pieces.size() - 1]
@@ -691,13 +775,10 @@ func _test_full_match_ai_vs_ai() -> void:
 				"foul_striker":
 					fouls += 1
 		shots += 1
-	_check("match: AI vs AI finishes", bool(state["over"]), "shots=%d winner=%s pocketed=%s queen=%s" % [shots, str(state["winner"]), str(state["pocketed"]), str(state["queen"])])
-	_check("match: winner is a real player", int(state["winner"]) == 0 or int(state["winner"]) == 1)
-	_check("match: finished in a sane number of shots", shots < 300 and shots > 5, "shots=%d" % shots)
-	_check("match: winner cleared all 9 coins (or won on opponent's mistake)",
-		int((state["pocketed"] as Array)[int(state["winner"])]) == 9 or String(state["lose_reason"]) != "",
-		"pocketed=%s lose_reason=%s" % [str(state["pocketed"]), str(state["lose_reason"])])
-	print("INFO: full AI match: %d shots, %d queen returns, %d fouls, winner=%d" % [shots, queen_returns, fouls, int(state["winner"])])
+	return {"shots": shots, "queen_returns": queen_returns, "fouls": fouls,
+		"over": state["over"], "winner": state["winner"],
+		"pocketed": state["pocketed"], "queen": state["queen"],
+		"lose_reason": state["lose_reason"]}
 
 func _mirror_pieces(pieces: Array) -> Array:
 	var out: Array = []
