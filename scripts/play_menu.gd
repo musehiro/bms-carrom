@@ -11,7 +11,7 @@ extends Control
 ##       then the 2p/4p choice, then the NetClient queue (Main
 ##       ._show_online_stake -> _start_matchmaking -> Net.queue_up).
 ##       This screen never touches net_client.gd.
-##   (3) PLAY WITH FRIENDS — invite friends, 2, 3 or 4 players in one
+##   (3) PLAY WITH FRIENDS — invite friends, 2 or 4 players in one
 ##       match. Routes to the invite flow: back home with the invite
 ##       box open (search by name, send a 2p or 4p invite).
 ##
@@ -74,10 +74,10 @@ func _ready() -> void:
 	world_button.custom_minimum_size = Vector2(0, 120)
 	world_button.pressed.connect(func() -> void: world_chosen.emit())
 	root.add_child(world_button)
-	# (3) Friends — pink tile, invite people you know, 2–4 players.
+	# (3) Friends — pink tile, invite people you know, 2 or 4 players.
 	# (Gold would need dark text — tile_button labels are white — so
 	# friends gets the pink tile instead; gold stays the PLAY colour.)
-	friends_button = UiKit.tile_button("✉  PLAY WITH FRIENDS\nInvite friends — 2, 3 or 4 players in one match", 28, UiKit.TILE_BALLOON)
+	friends_button = UiKit.tile_button("✉  PLAY WITH FRIENDS\nInvite friends — 2 or 4 players in one match", 28, UiKit.TILE_BALLOON)
 	friends_button.name = "FriendsButton"
 	friends_button.custom_minimum_size = Vector2(0, 120)
 	friends_button.pressed.connect(func() -> void: friends_chosen.emit())

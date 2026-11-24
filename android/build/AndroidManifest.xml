@@ -51,6 +51,24 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Google sign-in return (v9, restored v11 — the v11 commit
+                 re-installed the build template and wiped this filter):
+                 Supabase redirects the browser to
+                 com.musehiro.carrom://auth-callback?code=... — Android
+                 routes it back to this activity (singleInstancePerTask,
+                 so onNewIntent fires), and GodotApp writes the URI to
+                 user://auth_callback.txt for the game to pick up.
+                 This is the Gradle MAIN manifest (build.gradle:
+                 sourceSets main manifest.srcFile 'AndroidManifest.xml')
+                 — it is NOT overwritten by Godot's export, unlike
+                 src/debug/AndroidManifest.xml, which Godot regenerates
+                 from scratch on every export. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="com.musehiro.carrom" android:host="auth-callback" />
+            </intent-filter>
         </activity>
 
     </application>

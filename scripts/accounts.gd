@@ -23,20 +23,22 @@ extends Node
 ##     Gmail -> verify -> fetch the cloud profile -> apply it
 ##     (resolve_profile: last write wins). No cloud profile yet means
 ##     the player must register first.
-##   Google one-tap: PKCE loopback (v10 PRIMARY return path) — the
-##     game listens on http://127.0.0.1:8765/callback for Supabase's
-##     redirect, so no native plugin and no deep-link intent filter are
-##     needed; the custom-scheme deep link is the secondary path. The
-##     Supabase dashboard must allow-list BOTH redirect URLs (see
+##   Google one-tap: PKCE (v11) — on Android the browser returns via
+##     the custom-scheme deep link com.musehiro.carrom://auth-callback
+##     (intent filter in android/build/AndroidManifest.xml +
+##     GodotApp.onNewIntent writes the URI to user://auth_callback.txt,
+##     which Accounts polls while a return is pending); on
+##     desktop/editor it returns via the 127.0.0.1 loopback listener.
+##     The Supabase dashboard must allow-list BOTH redirect URLs (see
 ##     docs/supabase-setup.md). Needs the Google provider enabled in
 ##     Supabase (a Google Cloud OAuth client — no card); until then
 ##     the button explains that Gmail + code is the way in. If the
 ##     browser does not return within ~60 s, the register screen shows
 ##     RETRY + the paste-the-code row (v10 recovery UI).
-##   OTP magic link (v10): the code email also carries a "Sign in"
-##     link; the OTP request sends the loopback redirect + a PKCE
-##     challenge, so tapping the link returns ?code= to the same
-##     loopback listener and signs the player in — the 6-digit code
+##   OTP magic link (v10, v11): the code email also carries a "Sign in"
+##     link; the OTP request sends the platform redirect +
+##     a PKCE challenge, so tapping the link returns ?code= via the
+##     same return path and signs the player in — the 6-digit code
 ##     stays the primary path (the dashboard email template must show
 ##     the code {{.Token}} big and clear).
 
@@ -47,6 +49,12 @@ signal login_finished(ok: bool, message: String)
 signal google_finished(ok: bool, message: String)
 signal otp_link_finished(ok: bool, message: String)
 signal sync_finished(ok: bool)
+## v11 P0-3: the loopback listener failed to start while a browser
+## return was pending — the auth screen can read the message via
+## loopback_listener_error() instead of the player staring at a dead
+## screen. (On Android the listener is never started — the custom
+## scheme is the return path — so this never fires there.)
+signal return_listener_failed(message: String)
 
 const OTP_CODE_LEN := 6
 
@@ -54,6 +62,10 @@ var _loopback: TCPServer = null
 var _loopback_conn: StreamPeerTCP = null
 var _loopback_verifier := ""
 var _loopback_done := false
+## v11 P0-3: "" = the listener is running (or not needed on Android);
+## non-empty = listen() failed — a loud, UI-readable failure state.
+## Cleared when a listener starts OK or the pending return ends.
+var _loopback_error := ""
 var _google_pending := false # a browser return is in flight (Google or OTP link)
 var _google_deadline := 0.0 # unix time the pending return times out
 var _return_kind := "" # "google" | "otp_link" — which return is pending
@@ -64,12 +76,23 @@ func _ready() -> void:
 	# Resume a browser return that was interrupted by the app being
 	# killed while the browser was open: the PKCE verifier was
 	# persisted in Save, and the deep link (if it arrived) is waiting
-	# in the file GodotApp.java wrote. The loopback listener is NOT
-	# restarted here — the deep-link file is the primary return path
-	# after a cold start. v10 reads the unified pending_return_* slot
-	# first, then the v9 google_pkce_* slot (a v9 install's pending
-	# Google sign-in). Started-at is unknown after a cold start, so
-	# the recovery UI shows at once (elapsed() returns 999).
+	# in the file GodotApp.java wrote. v10 reads the unified
+	# pending_return_* slot first, then the v9 google_pkce_* slot (a
+	# v9 install's pending Google sign-in). Started-at is unknown
+	# after a cold start, so the recovery UI shows at once (elapsed()
+	# returns 999).
+	# v11 P0-3: on desktop/editor the loopback listener is RESTARTED
+	# here while the return is still pending — the v10 code restored
+	# the pending state but never re-listened, so a browser return
+	# after a cold start hit a dead port (ERR_CONNECTION_REFUSED).
+	# The restart reuses the PERSISTED verifier and the PERSISTED
+	# deadline — it never mints a fresh verifier (that would kill the
+	# in-flight code) and never extends the deadline. On Android
+	# there is no loopback listener to restart: the custom-scheme
+	# deep-link file poll is the return path there. The callback file
+	# is checked BEFORE the restart, so a code that already arrived
+	# is consumed (and ends the pending return) instead of the
+	# restart deleting it.
 	if Save.pending_return_verifier != "" and Save.pending_return_deadline > int(Time.get_unix_time_from_system()):
 		_loopback_verifier = Save.pending_return_verifier
 		_return_kind = Save.pending_return_kind
@@ -84,6 +107,8 @@ func _ready() -> void:
 		_google_deadline = float(Save.google_pkce_deadline)
 		_google_started_at = 0.0
 		_check_pending_callback_file()
+	if _google_pending and not OS.has_feature("android"):
+		_restart_loopback_listener()
 
 func _process(delta: float) -> void:
 	if _loopback != null:
@@ -161,6 +186,7 @@ func _end_google_pending() -> void:
 	_google_pending = false
 	_return_kind = ""
 	_loopback_verifier = ""
+	_loopback_error = ""
 	_stop_loopback()
 	Save.google_pkce_verifier = ""
 	Save.google_pkce_deadline = 0
@@ -180,6 +206,15 @@ func is_return_pending() -> bool:
 ## minting a fresh one that would kill the earlier magic link.
 func pending_return_verifier() -> String:
 	return _loopback_verifier
+
+## v11 P0-3: the loopback-listener failure state the auth screen can
+## read. "" = the listener is running, or no listener is needed
+## (Android — the custom scheme is the return path). Non-empty =
+## listen() failed while a browser return was pending: the return
+## cannot arrive on the loopback, so the UI must say so (and offer
+## the paste-the-code recovery) instead of waiting silently.
+func loopback_listener_error() -> String:
+	return _loopback_error
 
 ## Seconds since the pending browser return started. -1 when nothing is
 ## pending; 999 when the return was resumed after a cold start (the
@@ -346,9 +381,10 @@ func _cloud_upsert() -> Dictionary:
 
 ## Send the 6-digit login code to a Gmail. Fails fast when Supabase is
 ## not configured yet (the player then registers locally instead).
-## The OTP request carries the loopback redirect + a PKCE challenge
-## (v10): the email's "Sign in" link then returns ?code= to the game's
-## loopback listener, so tapping the link signs the player in — the
+## The OTP request carries the platform redirect + a PKCE challenge
+## (v10/v11): the email's "Sign in" link then returns ?code= via the
+## platform return path (custom scheme on Android, loopback listener
+## on desktop/editor), so tapping the link signs the player in — the
 ## 6-digit code in the same email stays the primary path. The listener
 ## only starts when no Google return is already pending (one pending
 ## return at a time; the Google verifier must not be clobbered).
@@ -369,7 +405,7 @@ func request_login_code(gmail: String) -> Dictionary:
 	else:
 		otp_verifier = Supabase.random_verifier()
 	var res := await Supabase.send_otp(gmail.strip_edges().to_lower(),
-		Supabase.LOOPBACK_REDIRECT, Supabase.pkce_challenge(otp_verifier))
+		Supabase.auth_redirect_url(), Supabase.pkce_challenge(otp_verifier))
 	if bool(res.get("ok", false)):
 		if _google_pending and _return_kind == "otp_link":
 			# Same return, still in flight: only extend its deadline
@@ -541,15 +577,16 @@ static func _local_has_progress() -> bool:
 # --------------------------------------------------------- Google one-tap
 
 ## Start Google sign-in (PKCE). Opens the Supabase authorize page in the
-## browser; the reply comes back via the 127.0.0.1 loopback listener
-## (v10 PRIMARY — pure GDScript, works in the CI-built APK) with the
-## custom-scheme deep link as a secondary path (the file poll). The
-## PKCE verifier is persisted in Save so the exchange can still
-## complete after a cold start. Emits google_finished when done.
-## Returns false immediately when the backend is not configured — the
-## caller shows the Gmail + code path instead. Never fails silently: a
-## browser that cannot open, or a flow that times out, emits
-## google_finished(false, ...) with a message.
+## browser; the reply comes back via the platform return path (v11):
+## the custom-scheme deep link on Android, the 127.0.0.1 loopback
+## listener on desktop/editor — with the deep-link file poll as the
+## Android path after a cold start. The PKCE verifier is persisted in
+## Save so the exchange can still complete after a cold start. Emits
+## google_finished when done. Returns false immediately when the
+## backend is not configured — the caller shows the Gmail + code path
+## instead. Never fails silently: a browser that cannot open, or a
+## flow that times out, emits google_finished(false, ...) with a
+## message.
 func begin_google_sign_in() -> bool:
 	if not Supabase.configured:
 		return false
@@ -568,7 +605,7 @@ func begin_google_sign_in() -> bool:
 	# that gate silently killed the button. It is gone.
 	var verifier := Supabase.random_verifier()
 	_start_return_listener("google", verifier)
-	var url := Supabase.google_authorize_url(Supabase.base_url, verifier, Supabase.LOOPBACK_REDIRECT)
+	var url := Supabase.google_authorize_url(Supabase.base_url, verifier, Supabase.auth_redirect_url())
 	var open_err := OS.shell_open(url)
 	if open_err != OK and OS.has_feature("android"):
 		# No browser to open — fail loudly instead of silently nothing.
@@ -577,14 +614,21 @@ func begin_google_sign_in() -> bool:
 	return true
 
 ## Shared setup for a pending browser return (Google or OTP link):
-## fresh verifier, 300 s deadline, loopback listener, persisted so a
-## cold start can still finish. A file left over from an abandoned
-## return is stale — drop it so the poll can only pick up the code for
-## THIS return. The listener failing to start is not fatal — the
-## deep-link file poll still works.
+## fresh verifier, 300 s deadline, persisted so a cold start can
+## still finish. A file left over from an abandoned return is stale —
+## drop it so the poll can only pick up the code for THIS return.
+## The loopback listener only starts on desktop/editor: on Android
+## the custom-scheme deep link is the return path (the game is
+## backgrounded while the browser is open and Android may kill it,
+## so a live socket cannot be relied on). v11 P0-3: when the listener
+## IS the return path and listen() fails, that failure is LOUD —
+## _loopback_error is set (loopback_listener_error()), push_error
+## logs it, and return_listener_failed fires — never the old silent
+## "not fatal" path that left the player waiting on a dead port.
 func _start_return_listener(kind: String, verifier: String) -> void:
 	_loopback_verifier = verifier
 	_loopback_done = false
+	_loopback_error = ""
 	_return_kind = kind
 	_google_pending = true
 	_google_deadline = Time.get_unix_time_from_system() + 300.0
@@ -595,10 +639,45 @@ func _start_return_listener(kind: String, verifier: String) -> void:
 	Save.save()
 	if FileAccess.file_exists(Supabase.AUTH_CALLBACK_FILE):
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(Supabase.AUTH_CALLBACK_FILE))
+	if not OS.has_feature("android"):
+		_start_loopback()
+
+## v11 P0-3: restart the loopback listener for a return resumed
+## after a cold start (_ready()). Reuses the PERSISTED verifier and
+## the PERSISTED deadline — it touches neither, writes nothing to
+## Save, and does NOT delete the callback file (a code that arrived
+## while the app was dead must survive). Never mints a fresh verifier:
+## the in-flight code was issued against the persisted one, and a
+## fresh verifier would make its exchange fail. Desktop/editor only —
+## Android has no loopback listener (custom scheme instead). A failed
+## listen() fails LOUD via _start_loopback().
+func _restart_loopback_listener() -> void:
+	if not _google_pending:
+		return
+	if OS.has_feature("android"):
+		return
+	if _loopback != null:
+		return
+	_start_loopback()
+
+## Bind the loopback TCPServer. Returns OK on success. On failure the
+## listener is left null AND the failure is surfaced loudly:
+## _loopback_error (readable via loopback_listener_error()), a
+## push_error log line, and the return_listener_failed signal — so the
+## auth screen can tell the player the automatic return is down and
+## offer the paste-the-code recovery instead of waiting silently.
+func _start_loopback() -> Error:
+	_stop_loopback()
 	_loopback = TCPServer.new()
 	var err := _loopback.listen(Supabase.LOOPBACK_PORT, "127.0.0.1")
 	if err != OK:
 		_loopback = null
+		_loopback_error = "Could not listen for the browser return (port %d: %s) — the automatic sign-in return is down. Paste the code from your browser address bar instead." % [Supabase.LOOPBACK_PORT, error_string(err)]
+		push_error(_loopback_error)
+		return_listener_failed.emit(_loopback_error)
+		return err
+	_loopback_error = ""
+	return OK
 
 ## Finish a pending browser return with a code the player pasted from
 ## the browser address bar (fallback when the automatic return failed).

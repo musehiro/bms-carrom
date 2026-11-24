@@ -67,11 +67,19 @@ the agent cannot do this step (it needs a Supabase dashboard login).
    `com.musehiro.carrom://auth-callback` (the custom-scheme deep
    link the browser returns to after Google sign-in — Android routes
    it back into the game; see `android/build/AndroidManifest.xml`).
-   NOTE (v10, 2026-11-23): the LOOPBACK is now the game's primary
-   return (it needs no native code, so it works in the CI-built APK);
-   the custom scheme is secondary (file poll) until the export
-   workflow is fixed to install the Android build template. Both
-   must stay listed — the OTP magic link uses the loopback too.
+   NOTE (v11, 2026-11-24): the CUSTOM SCHEME is now the game's
+   primary return on Android — the game uses it as `redirect_to`
+   there (see `Supabase.auth_redirect_url()`), the intent filter is
+   in `android/build/AndroidManifest.xml`, and `GodotApp.java`
+   writes the returned URI to `user://auth_callback.txt`. The
+   LOOPBACK is desktop/editor only (the game listens on the phone
+   itself there). Both must stay listed — the OTP magic link uses
+   the same per-platform redirect as Google sign-in. (v10 had this
+   backwards — loopback primary, custom scheme secondary — because
+   the built APK then lacked the native code; the v11 fix restores
+   the intent filter + `onNewIntent`, and the v11 commit had wiped
+   the filter from the manifest when the build template was
+   re-installed.)
 4. (Optional, for one-tap Google sign-in) **Authentication →
    Providers → Google**: enable it with a Google OAuth client — create
    the client in Google Cloud Console (console.cloud.google.com →

@@ -202,7 +202,7 @@ func _test_play_menu_buttons() -> void:
 	_check("play menu: bot button says BOT", joined.contains("BOT"))
 	_check("play menu: world button says WORLD", joined.contains("WORLD"))
 	_check("play menu: friends button says FRIENDS", joined.contains("FRIENDS"))
-	_check("play menu: friends button says 2, 3 or 4 players", joined.contains("2, 3 or 4 players"))
+	_check("play menu: friends button says 2 or 4 players", joined.contains("2 or 4 players"))
 	_check("play menu: World Tour still reachable (secondary)", joined.contains("WORLD TOUR"))
 	_check("play menu: NEARBY still reachable (secondary)", joined.contains("NEARBY"))
 	scr.free()

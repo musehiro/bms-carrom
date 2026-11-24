@@ -111,8 +111,8 @@ func _run() -> void:
 	# --- A5: register screen is full (benefits + footer at the bottom) ---
 	_check("auth: benefits panel present", _find_label_containing(_main._auth, "saved to your account forever") != null)
 	_check("auth: free-to-play / no-ads line present", _find_label_containing(_main._auth, "No ads until you play") != null)
-	var foot := _find_label_containing(_main._auth, "BMS Carrom v10.0")
-	_check("auth: footer says v10.0", foot != null)
+	var foot := _find_label_containing(_main._auth, "BMS Carrom 1.0")
+	_check("auth: footer says 1.0", foot != null)
 	var vp_y: float = _main.get_viewport_rect().size.y
 	_check("auth: footer sits at the bottom of the screen (no dead space)", foot != null and foot.get_global_rect().end.y >= vp_y - 40.0)
 	# --- A6: paste-code fallback row only while Google is pending ---

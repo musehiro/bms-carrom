@@ -2,12 +2,28 @@ class_name HomeScreen
 extends Control
 
 ## Homepage (v5, design doc 8): top bar (avatar + level, coins, sound),
-## OUT OF COINS banner (only at zero coins), hero with a LARGE labelled
-## board (the homepage logo — board only, no title text — now teaching
-## the parts: Striker, White coin, Black coin, Queen, Pocket, Base line,
-## Centre circle, Diagonal), big PLAY, SOLO / ONLINE, SHOP / HOW TO PLAY /
-## AIM-ASSIST row, ad-ladder strip, daily bonus + free coins, level bar,
-## version, and a banner-ad slot at the very bottom.
+## OUT OF COINS banner (only at zero coins), hero with a LARGE clean
+## board (the homepage logo — board only, no title text, no tutorial
+## labels; the labelled-board tutorial moved to HOW TO PLAY, P1-3),
+## big PLAY as the single primary, SOLO / ONLINE as secondary buttons,
+## SHOP / HOW TO PLAY / AIM-ASSIST row, ad-ladder strip, daily bonus +
+## free coins in one row, level bar, version, and a banner-ad slot at
+## the very bottom.
+##
+## P1-3 declutter (2026-11-24): PLAY is the only primary action. The
+## old big SOLO / ONLINE tiles are gone — same entries, now plain
+## secondary dark pills in the grouped row below PLAY (and PLAY's mode
+## menu offers them too). SHOP / HOW TO PLAY / AIM-ASSIST and
+## LEADERBOARD / ACHIEVEMENTS stay as secondary dark pills; DAILY
+## BONUS + FREE COINS share one row. Nothing is removed, only
+## re-ordered — every feature stays reachable. One button language:
+## gold primary + blue secondary pills (UiKit); no tile style on home.
+
+## P2-1: the game's version — ONE constant, the APK's real version
+## (project.godot version/name "1.0", versionCode 2). Both footers
+## (here and AuthScreen) read HomeScreen.APP_VERSION; never hardcode
+## a version string in a label again.
+const APP_VERSION := "1.0"
 
 signal play_solo_direct
 signal play_online(stake: int)
@@ -148,7 +164,12 @@ func _ready() -> void:
 	var out_bot := UiKit.dark_button("PLAY vs BOT — FREE", 22)
 	out_bot.pressed.connect(func() -> void: play_broke_bot.emit())
 	out_v.add_child(out_bot)
-	# ---- Hero: large labelled board ----
+	# ---- Hero: large CLEAN board (P1-3) ----
+	# No tutorial labels on home any more — the board is the hero and
+	# should be clean. New players learn the parts in HOW TO PLAY,
+	# which shows this same board with labels. The hero shows the real
+	# starting setup (queen + rings + striker), not the sparse diagram
+	# set the labels needed.
 	var hero := VBoxContainer.new()
 	hero.add_theme_constant_override("separation", 0)
 	# The hero takes the leftover height so the board centres in the
@@ -165,8 +186,10 @@ func _ready() -> void:
 	hero.add_child(divider)
 	# Board size adapts to the real viewport height so the screen fills
 	# at both 720x1280 and 720x1640: up to 680 px wide (full width).
+	# P1-3: chrome 720 (was 740) — the demoted SOLO/ONLINE row and the
+	# merged bonus row freed ~90 px, so the board grows a little.
 	var vp := get_viewport_rect().size
-	var chrome := 740.0 + (72.0 if Save.coins == 0 else 0.0)
+	var chrome := 720.0 + (72.0 if Save.coins == 0 else 0.0)
 	var board_px := clampf(minf(vp.x - 40.0, vp.y - chrome), 360.0, 680.0)
 	var s := board_px / 680.0
 	var center := CenterContainer.new()
@@ -181,8 +204,8 @@ func _ready() -> void:
 	mini.board_id = Save.equipped_board
 	mini.striker_id = Save.equipped_striker
 	mini.draw_backdrop = false
-	mini.show_labels = true
-	mini.pieces = _diagram_pieces()
+	mini.show_labels = false # P1-3: labels live in HOW TO PLAY only
+	mini.pieces = CarromPhysics.setup_pieces()
 	mini.position = Vector2(-20, -250) * s
 	mini.scale = Vector2(s, s)
 	board_holder.add_child(mini)
@@ -195,17 +218,23 @@ func _ready() -> void:
 	# button layout, which works on his phone. No popup overlay here.
 	play.pressed.connect(func() -> void: open_mode_choice.emit())
 	root.add_child(play)
-	# ---- SOLO / ONLINE — big chunky 3D tiles (v10, Nana's pairs) ----
+	# ---- SOLO / ONLINE — secondary row (P1-3 declutter) ----
+	# PLAY above is the single primary. These two stay reachable here
+	# as plain secondary dark pills — the same style as the SHOP /
+	# HOW TO PLAY row below, not big tiles — and PLAY's mode menu
+	# offers them too. Text still starts with SOLO / ONLINE (the
+	# popup-flow test L3 finds ONLINE by prefix, and Main's
+	# play_solo_direct / play_online wiring is unchanged).
 	var modes := HBoxContainer.new()
 	modes.add_theme_constant_override("separation", 12)
 	root.add_child(modes)
-	var solo := UiKit.tile_button("SOLO\nvs AI — offline", 24, UiKit.TILE_PHONICS)
-	solo.custom_minimum_size = Vector2(0, 84)
+	var solo := UiKit.dark_button("SOLO — vs AI (offline)", 22)
+	solo.custom_minimum_size = Vector2(0, 56)
 	solo.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	solo.pressed.connect(_on_solo_pressed)
 	modes.add_child(solo)
-	var online := UiKit.tile_button("ONLINE\nvs real players", 24, UiKit.TILE_SPELLING)
-	online.custom_minimum_size = Vector2(0, 84)
+	var online := UiKit.dark_button("ONLINE — vs real players", 22)
+	online.custom_minimum_size = Vector2(0, 56)
 	online.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	online.pressed.connect(_on_online_pressed)
 	modes.add_child(online)
@@ -252,15 +281,25 @@ func _ready() -> void:
 	_ladder_box = VBoxContainer.new()
 	_ladder_box.add_theme_constant_override("separation", 6)
 	ladder_panel.add_child(_ladder_box)
-	# ---- Daily + free coins ----
+	# ---- Daily + free coins — ONE grouped row (P1-3) ----
+	# Two stacked full-width bonus bars shouted as loud as PLAY; side
+	# by side they stay reachable and take one row, not two. Texts are
+	# kept short on purpose: each button is half-width now, and the
+	# custom button draws its label unclipped, so a long label would
+	# spill past the button face.
+	var bonus_row := HBoxContainer.new()
+	bonus_row.add_theme_constant_override("separation", 12)
+	root.add_child(bonus_row)
 	_daily_button = UiKit.gold_button("DAILY BONUS", 22)
 	_daily_button.custom_minimum_size = Vector2(0, 52)
+	_daily_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_daily_button.pressed.connect(func() -> void: watch_ad_daily.emit())
-	root.add_child(_daily_button)
+	bonus_row.add_child(_daily_button)
 	_free_coins_button = UiKit.dark_button("FREE COINS", 20)
 	_free_coins_button.custom_minimum_size = Vector2(0, 52)
+	_free_coins_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_free_coins_button.pressed.connect(func() -> void: watch_ad_coins.emit())
-	root.add_child(_free_coins_button)
+	bonus_row.add_child(_free_coins_button)
 	# ---- Level bar + version ----
 	_xp_bar = ProgressBar.new()
 	_xp_bar.min_value = 0
@@ -276,7 +315,7 @@ func _ready() -> void:
 	fill.set_corner_radius_all(7)
 	_xp_bar.add_theme_stylebox_override("fill", fill)
 	root.add_child(_xp_bar)
-	var ver := UiKit.muted_label("BMS Carrom v10.0  •  Account required  •  Free to play", 15)
+	var ver := UiKit.muted_label("BMS Carrom " + APP_VERSION + "  •  Account required  •  Free to play", 15)
 	root.add_child(ver)
 	# ---- Banner-ad slot (bottom; the native banner covers it on Android) ----
 	var banner_slot := PanelContainer.new()
@@ -293,17 +332,6 @@ func _ready() -> void:
 	banner_v.add_child(ad_sub)
 	refresh()
 
-## The home diagram pieces: a sparse set so every label points cleanly —
-## queen at the centre, one white coin, one black coin, striker on the
-## bottom baseline (NOT the standard cluster, which would hide the labels).
-func _diagram_pieces() -> Array:
-	var pieces: Array = []
-	pieces.append(CarromPhysics.make_piece("queen", CarromPhysics.BOARD_CENTER))
-	pieces.append(CarromPhysics.make_piece("white", Vector2(240, 450)))
-	pieces.append(CarromPhysics.make_piece("black", Vector2(480, 720)))
-	pieces.append(CarromPhysics.make_piece("striker", Vector2(CarromPhysics.BOARD_CENTER.x, CarromPhysics.baseline_y(0))))
-	return pieces
-
 func refresh() -> void:
 	_coins_label.text = "◉ %s" % _fmt(Save.coins)
 	_level_label.text = "Lv %d · %s" % [Save.level(), Save.rank_name()]
@@ -316,14 +344,14 @@ func refresh() -> void:
 	_out_box.visible = Save.coins == 0
 	if Save.can_claim_daily():
 		_daily_button.visible = true
-		_daily_button.text = "DAILY BONUS +%d — WATCH AD TO CLAIM" % Save.daily_bonus_amount()
+		_daily_button.text = "DAILY BONUS +%d" % Save.daily_bonus_amount()
 	else:
 		_daily_button.visible = false
 	if Save.ad_cap_reached():
-		_free_coins_button.text = "AD LIMIT REACHED — COME BACK TOMORROW"
+		_free_coins_button.text = "AD LIMIT REACHED"
 		_free_coins_button.disabled = true
 	else:
-		_free_coins_button.text = "FREE COINS +%d  (watch a short ad)" % Save.ad_next_reward()
+		_free_coins_button.text = "FREE COINS +%d — WATCH AD" % Save.ad_next_reward()
 		_free_coins_button.disabled = false
 	if Save.aim_assist_active():
 		var left := Save.aim_assist_remaining_sec()

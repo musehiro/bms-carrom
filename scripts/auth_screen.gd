@@ -27,14 +27,14 @@ extends Control
 ##     cloud profile for that Gmail.
 ##   CONTINUE WITH GOOGLE — one-tap (PKCE). Tap -> the system browser
 ##     opens the Google account picker -> tap an account -> registered,
-##     nothing typed. The browser returns via the 127.0.0.1 loopback
-##     listener (v10 PRIMARY — pure GDScript, works in the built APK)
-##     with the custom-scheme deep link as a fallback; a paste-the-code
-##     row covers the case where the automatic return fails, and after
-##     ~60 s a RETRY button appears too. Every failure shows an error
-##     — never silently nothing. The OTP email's "Sign in" link uses
-##     the same loopback return (v10), so tapping it signs the player
-##     in — the 6-digit code stays the primary path.
+##     nothing typed. The browser returns via the custom-scheme deep link
+##     on Android (v11 PRIMARY — intent filter + GodotApp.onNewIntent)
+##     and via the 127.0.0.1 loopback listener on desktop/editor; a
+##     paste-the-code row covers the case where the automatic return
+##     fails, and after ~60 s a RETRY button appears too. Every failure
+##     shows an error — never silently nothing. The OTP email's "Sign
+##     in" link uses the same platform return, so tapping it signs the
+##     player in — the 6-digit code stays the primary path.
 ##
 ## The logo is JUST the carrom board (BoardView, no text — logo rule).
 
@@ -320,7 +320,9 @@ func _ready() -> void:
 	free.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	free.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
 	bcols.add_child(free)
-	var foot := UiKit.muted_label("BMS Carrom v10.0 • Account required • Free to play", 16)
+	# P2-1: version from the single HomeScreen.APP_VERSION constant
+	# ("1.0" — the APK's real version), never a hardcoded string.
+	var foot := UiKit.muted_label("BMS Carrom " + HomeScreen.APP_VERSION + " • Account required • Free to play", 16)
 	foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	root.add_child(foot)
 	# Resend cooldown timer.
@@ -329,12 +331,21 @@ func _ready() -> void:
 	_resend_timer.timeout.connect(_on_resend_tick)
 	add_child(_resend_timer)
 	Accounts.otp_link_finished.connect(_on_otp_link_finished)
+	# v11 P0-3: the loopback listener failed to start while a browser
+	# return was pending — surface it in the UI (see
+	# _on_return_listener_failed) instead of a dead screen.
+	Accounts.return_listener_failed.connect(_on_return_listener_failed)
 	_set_mode("register")
 	# A Google sign-in may already be pending (cold start after the
 	# browser opened): show the pending state, not a blank screen.
 	if Accounts.is_google_pending():
 		_set_google_pending(true)
 		_set_message(_info_label, "Finishing your Google sign-in — one moment…")
+	# v11 P0-3: the loopback restart may already have failed before
+	# this screen existed (cold start) — surface it now; the signal
+	# above only covers failures after this screen connects.
+	if Accounts.loopback_listener_error() != "":
+		_on_return_listener_failed(Accounts.loopback_listener_error())
 
 func _logo_pieces() -> Array:
 	var pieces: Array = []
@@ -566,6 +577,15 @@ func _on_otp_link_finished(ok: bool, message: String) -> void:
 			signed_in.emit()
 	else:
 		_set_message(_error_label, message)
+
+## v11 P0-3: the loopback listener failed to start while a browser
+## return was pending — say so plainly and show the paste-the-code
+## lifeline at once, instead of leaving the player on a dead screen.
+## (On Android this never fires — the custom scheme is the return path.)
+func _on_return_listener_failed(message: String) -> void:
+	_set_message(_error_label, message)
+	_paste_row.visible = true
+	_paste_edit.grab_focus()
 
 ## RETRY (v10 recovery): cancel the dead pending return and open
 ## Google again. The player never has to stare at a stuck screen.

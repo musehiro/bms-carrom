@@ -51,26 +51,37 @@ const LOOPBACK_PORT := 8765
 const LOOPBACK_PATH := "/callback"
 
 ## The loopback URL the browser returns to after a Google sign-in or an
-## OTP magic-link tap (v10 PRIMARY return path). Pure GDScript TCPServer
-## — no native code, no intent filter — so it works in the CI-built APK
-## where the custom-scheme native code is missing (see
-## docs/verification.md v10 root cause 1). Must be allow-listed in
-## Supabase Dashboard -> Authentication -> URL Configuration ->
-## Redirect URLs (it was added in v7 — verify it is still listed).
+## OTP magic-link tap — DESKTOP / EDITOR ONLY (v11). Pure GDScript
+## TCPServer — no native code, no intent filter — so it works in the
+## editor and on desktop, where the game process stays alive with a
+## live socket. It can NOT be relied on on Android: opening the
+## browser backgrounds the game and Android routinely kills it, so the
+## loopback port is dead by the time the browser returns (v11 user
+## report: ERR_CONNECTION_REFUSED on 127.0.0.1:8765). Must stay
+## allow-listed in Supabase Dashboard -> Authentication -> URL
+## Configuration -> Redirect URLs (desktop/editor sign-ins use it).
 const LOOPBACK_REDIRECT := "http://127.0.0.1:8765/callback"
 
-## The URL Android's browser goes back to after the Google sign-in, so
-## the browser can open the game again. Registered in Supabase's Redirect
-## URLs allow-list AND as an intent filter in android/build/AndroidManifest.xml;
-## GodotApp.java writes the incoming URI to AUTH_CALLBACK_FILE for the
-## game to pick up (vanilla Godot 4.3 does not surface deep links to GDScript).
-## SECONDARY return path in v10 (the loopback above is primary): the
-## built APK does not contain the native intent-filter code, so the deep
-## link only works once the export is fixed (see docs/verification.md).
+## The URL Android's browser goes back to after a Google sign-in or an
+## OTP magic-link tap — the PRIMARY return path on Android (v11).
+## Registered in Supabase's Redirect URLs allow-list AND as an intent
+## filter in android/build/AndroidManifest.xml (the Gradle main
+## manifest — NOT src/debug/AndroidManifest.xml, which Godot
+## regenerates from scratch on every export); GodotApp.java writes
+## the incoming URI to AUTH_CALLBACK_FILE for the game to pick up
+## (vanilla Godot 4.3 does not surface deep links to GDScript).
+## Use auth_redirect_url() to pick the right one per platform.
 const CUSTOM_SCHEME_REDIRECT := "com.musehiro.carrom://auth-callback"
 ## File the native side writes the deep-link URI into (getFilesDir() is
 ## the same directory Godot maps user:// to on Android).
 const AUTH_CALLBACK_FILE := "user://auth_callback.txt"
+
+## The redirect_to for an auth return on THIS platform: the custom
+## scheme on Android (the browser re-opens the game, even after a cold
+## start), the loopback URL on desktop/editor (the game listens on
+## 127.0.0.1:8765). Pure — unit-testable via OS.has_feature.
+static func auth_redirect_url() -> String:
+	return CUSTOM_SCHEME_REDIRECT if OS.has_feature("android") else LOOPBACK_REDIRECT
 
 ## Extract the ?code=... from an OAuth callback URI — custom scheme
 ## (com.musehiro.carrom://auth-callback?code=...) or loopback
@@ -257,10 +268,11 @@ func signup_anonymous() -> Dictionary:
 ## for a new Gmail (creates the Auth user) and for an existing one.
 ## `redirect_to` + `code_challenge` go on the REQUEST PATH as query
 ## parameters (v10): GoTrue takes them as options, NOT in the JSON body
-## — the body form returns HTTP 400. The redirect is the loopback URL
-## so the email's "Sign in" link returns to the game instead of the
-## Site URL (localhost:3000); the challenge makes the link carry
-## ?code= so the loopback listener can complete it (PKCE, like the
+## — the body form returns HTTP 400. The redirect is
+## auth_redirect_url() (custom scheme on Android, loopback on
+## desktop/editor) so the email's "Sign in" link returns to the game
+## instead of the Site URL (localhost:3000); the challenge makes the
+## link carry ?code= so the return path can complete it (PKCE, like the
 ## official clients). The email template itself must ALSO show the
 ## 6-digit code {{.Token}} — that is a dashboard setting, not code
 ## (see docs/verification.md v10).
@@ -292,12 +304,13 @@ func verify_otp(email: String, token: String) -> Dictionary:
 		return {"ok": false, "status": int(res["status"]), "data": res["data"], "error": "Verification did not return a session."}
 	return {"ok": true, "status": int(res["status"]), "data": res["data"], "error": ""}
 
-## Google sign-in, PKCE loopback flavour: the game listens on
-## http://127.0.0.1:8765/callback for Supabase's redirect, so no native
-## plugin and no deep-link intent filter are needed. Returns the
-## authorize URL + the verifier the caller must keep for the exchange.
-## The caller opens the URL in the browser (OS.shell_open) and feeds the
-## ?code=... from the loopback callback into exchange_pkce_code().
+## Google sign-in, PKCE flavour: on Android the browser returns via
+## the custom-scheme deep link (auth_redirect_url()), on desktop via
+## the http://127.0.0.1:8765/callback loopback listener, so no native
+## plugin is needed on desktop. Returns the authorize URL + the
+## verifier the caller must keep for the exchange. The caller opens
+## the URL in the browser (OS.shell_open) and feeds the ?code=... from
+## the callback into exchange_pkce_code().
 static func google_authorize_url(base: String, verifier: String, redirect_to: String) -> String:
 	var challenge := pkce_challenge(verifier)
 	return "%s/auth/v1/authorize?provider=google&redirect_to=%s&code_challenge=%s&code_challenge_method=S256" % [
