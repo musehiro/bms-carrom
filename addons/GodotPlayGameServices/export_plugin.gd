@@ -38,10 +38,8 @@ class AndroidExportPlugin extends EditorExportPlugin:
 
 	func _export_begin(features: PackedStringArray, is_debug: bool, path: String, flags: int) -> void:
 		var id = get_option("godot_play_game_services/game_id")
-		if id == "":
-			printerr("[{plugin_name}] Export [Game id] is empty.".format({"plugin_name": _plugin_name}))
-			print("Please add your game-id here: [Project > Export > Android > godot_play_game_services/game_id].")
-			return
+		if id == null or id == "":
+			id = "000000000000"   # placeholder: Play Games stays inert, sign-in fails gracefully (by design in scripts/play_games.gd)
 
 		var file := FileAccess.open("android/build/res/values/strings.xml", FileAccess.WRITE)
 		file.store_string("<?xml version=\"1.0\" encoding=\"utf-8\"?><resources><string translatable=\"false\" name=\"game_services_project_id\">%s</string></resources>" % id)
