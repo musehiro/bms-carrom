@@ -51,25 +51,37 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Google sign-in return (v9, restored v11 — the v11 commit
-                 re-installed the build template and wiped this filter):
-                 Supabase redirects the browser to
-                 com.musehiro.carrom://auth-callback?code=... — Android
-                 routes it back to this activity (singleInstancePerTask,
-                 so onNewIntent fires), and GodotApp writes the URI to
-                 user://auth_callback.txt for the game to pick up.
-                 This is the Gradle MAIN manifest (build.gradle:
-                 sourceSets main manifest.srcFile 'AndroidManifest.xml')
-                 — it is NOT overwritten by Godot's export, unlike
-                 src/debug/AndroidManifest.xml, which Godot regenerates
-                 from scratch on every export. -->
+        </activity>
+
+        <!-- Google sign-in return (v11 fixes — activity-ALIAS, not a
+             filter on the activity above): Supabase redirects the browser
+             to com.musehiro.carrom://auth-callback?code=... — Android
+             routes it to this alias, which launches GodotApp
+             (singleInstancePerTask, so onNewIntent fires), and GodotApp
+             writes the URI to user://auth_callback.txt for the game.
+             WHY AN ALIAS: an intent-filter on the GodotApp activity
+             itself does NOT survive the build. Godot's export regenerates
+             src/debug/AndroidManifest.xml on every export, and its
+             activity element carries tools:node="mergeOnlyAttributes" —
+             the manifest merger then keeps only that file's children and
+             DROPS the main manifest's activity children (proven by the
+             first v11-fixes APK, 2026-11-24: its manifest had no
+             auth-callback string at all). An activity-alias is a child
+             of <application>, not of the activity, so the merger keeps
+             it. Do NOT move this filter back onto the activity.
+             This is the Gradle MAIN manifest (build.gradle: sourceSets
+             main manifest.srcFile 'AndroidManifest.xml'). -->
+        <activity-alias
+            android:name=".AuthCallbackAlias"
+            android:targetActivity="com.godot.game.GodotApp"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="com.musehiro.carrom" android:host="auth-callback" />
             </intent-filter>
-        </activity>
+        </activity-alias>
 
     </application>
 

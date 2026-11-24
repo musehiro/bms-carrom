@@ -69,15 +69,19 @@ the agent cannot do this step (it needs a Supabase dashboard login).
    it back into the game; see `android/build/AndroidManifest.xml`).
    NOTE (v11, 2026-11-24): the CUSTOM SCHEME is now the game's
    primary return on Android — the game uses it as `redirect_to`
-   there (see `Supabase.auth_redirect_url()`), the intent filter is
-   in `android/build/AndroidManifest.xml`, and `GodotApp.java`
-   writes the returned URI to `user://auth_callback.txt`. The
+   there (see `Supabase.auth_redirect_url()`), the deep link is
+   declared as an `activity-alias` in
+   `android/build/AndroidManifest.xml` (NOT as a filter on the
+   GodotApp activity — the manifest merger drops activity children
+   from the main manifest, see the comment in that file), and
+   `GodotApp.java` writes the returned URI to
+   `user://auth_callback.txt`. The
    LOOPBACK is desktop/editor only (the game listens on the phone
    itself there). Both must stay listed — the OTP magic link uses
    the same per-platform redirect as Google sign-in. (v10 had this
    backwards — loopback primary, custom scheme secondary — because
    the built APK then lacked the native code; the v11 fix restores
-   the intent filter + `onNewIntent`, and the v11 commit had wiped
+   the deep link + `onNewIntent`, and the v11 commit had wiped
    the filter from the manifest when the build template was
    re-installed.)
 4. (Optional, for one-tap Google sign-in) **Authentication →
