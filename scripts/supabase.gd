@@ -30,6 +30,7 @@ extends Node
 ##   POST /auth/v1/otp {email, create_user:true}    -> sends 6-digit code
 ##   POST /auth/v1/verify {email, token, type}      -> links Gmail, session
 ##   POST /auth/v1/token?grant_type=pkce            -> PKCE code exchange
+##   POST /auth/v1/token?grant_type=refresh_token   -> restore a saved session
 ##   GET  /auth/v1/authorize?provider=google...     -> Google sign-in page
 ##
 ## Realtime (phoenix channels over WebSocket):
@@ -102,6 +103,9 @@ var base_url := ""
 var anon_key := ""
 var google_client_id := ""
 var access_token := "" # Supabase Auth session ("" = not signed in)
+var refresh_token := "" # GoTrue refresh token ("" = none) — persisted by
+## Accounts (Save) so a restart can restore the session; GoTrue rotates
+## it on every refresh, so the stored value is rewritten each time.
 var user_id := "" # Supabase Auth user id ("" = none)
 
 var _ws: WebSocketPeer = null
@@ -207,12 +211,15 @@ func _headers(auth: bool) -> PackedStringArray:
 	return h
 
 ## One HTTP call. Returns {ok, status, data, error}. `path` is appended
-## to base_url (already starts with "/"). Never throws.
-func _http(method: int, path: String, body: Dictionary = {}, auth: bool = true, extra_headers: PackedStringArray = PackedStringArray()) -> Dictionary:
+## to base_url (already starts with "/"). `timeout_sec` caps the wait —
+## the default 15 s is for user-initiated calls (OTP verify, sign-in);
+## session restore at startup passes a shorter cap so a hanging network
+## cannot stall the home screen. Never throws.
+func _http(method: int, path: String, body: Dictionary = {}, auth: bool = true, extra_headers: PackedStringArray = PackedStringArray(), timeout_sec: float = 15.0) -> Dictionary:
 	if not configured:
 		return {"ok": false, "status": 0, "data": null, "error": "Supabase is not configured yet (backend_config.json is empty)."}
 	var req := HTTPRequest.new()
-	req.timeout = 15.0
+	req.timeout = timeout_sec
 	add_child(req)
 	var headers := _headers(auth)
 	for extra in extra_headers:
@@ -245,6 +252,12 @@ func _http(method: int, path: String, body: Dictionary = {}, auth: bool = true, 
 
 func _set_session(session: Dictionary) -> void:
 	access_token = String(session.get("access_token", ""))
+	# GoTrue rotates the refresh token on refresh — keep the new one.
+	# A response without one (never in practice) keeps the old token
+	# instead of blanking it.
+	var new_refresh := String(session.get("refresh_token", ""))
+	if new_refresh != "":
+		refresh_token = new_refresh
 	var user: Dictionary = session.get("user", {})
 	user_id = String(user.get("id", ""))
 
@@ -365,14 +378,41 @@ static func jwt_sub(token: String) -> String:
 		return String(payload.get("sub", ""))
 	return ""
 
+## The refresh-token grant path (GoTrue). Pure — unit-tested.
+static func refresh_token_path() -> String:
+	return "/auth/v1/token?grant_type=refresh_token"
+
+## Exchange a stored refresh token for a fresh session (GoTrue rotates
+## both tokens). Used by Accounts.restore_session() on startup — the
+## session must be restored BEFORE Friends starts listening, or the
+## lobby/presence run as `anon` and RLS denies them. The restore call
+## is capped at 8 s so a hanging network cannot stall the home screen
+## (the default 15 s cap is for user-initiated calls). Returns the raw
+## result dict {ok, status, data, error}; on success _set_session has
+## run (new access + refresh tokens, same user). Never throws.
+func refresh_session(refresh_token_value: String) -> Dictionary:
+	if refresh_token_value == "":
+		return {"ok": false, "status": 0, "data": null, "error": "No saved session to restore."}
+	var res := await _http(HTTPClient.METHOD_POST, refresh_token_path(),
+		{"refresh_token": refresh_token_value}, false, PackedStringArray(), 8.0)
+	if not bool(res["ok"]):
+		return res
+	_set_session(res["data"] if res["data"] is Dictionary else {})
+	if access_token == "" or user_id == "":
+		return {"ok": false, "status": int(res["status"]), "data": res["data"], "error": "Session refresh did not return a session."}
+	return {"ok": true, "status": int(res["status"]), "data": res["data"], "error": ""}
+
 ## Adopt tokens received out-of-band (a pasted implicit-flow link).
 ## Sets the session from the access token; the caller still needs the
-## user's email (get_user) before the profile can load.
-func set_session_from_tokens(access_token_value: String, _refresh_token_value: String) -> bool:
+## user's email (get_user) before the profile can load. The refresh
+## token is kept too (it used to be dropped) so the session can be
+## restored after a restart like any other sign-in.
+func set_session_from_tokens(access_token_value: String, refresh_token_value: String) -> bool:
 	var sub := jwt_sub(access_token_value)
 	if sub == "":
 		return false
 	access_token = access_token_value
+	refresh_token = refresh_token_value
 	user_id = sub
 	return true
 

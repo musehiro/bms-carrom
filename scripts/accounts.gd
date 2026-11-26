@@ -71,6 +71,11 @@ var _google_deadline := 0.0 # unix time the pending return times out
 var _return_kind := "" # "google" | "otp_link" — which return is pending
 var _google_started_at := 0.0 # unix time the pending return started; 0 = resumed after a cold start (elapsed unknown)
 var _file_poll_accum := 0.0 # throttle for the deep-link file poll
+## Session persistence (v11): true when a saved session existed but its
+## refresh failed — the player must sign in again. The lobby reads this
+## (session_needs_sign_in) and says so instead of a silent empty list.
+## Never persisted — a fresh launch re-runs the restore and sets it.
+var session_refresh_failed := false
 
 func _ready() -> void:
 	# Resume a browser return that was interrupted by the app being
@@ -355,8 +360,79 @@ func sync_to_cloud() -> Dictionary:
 	if Supabase.user_id == "":
 		return {"ok": false, "error": "Verify your Gmail first to sync."}
 	var up := await _cloud_upsert()
+	if not bool(up.get("ok", false)) and Supabase.user_id != "":
+		# A real failure WITH a session (not the "no session" early
+		# return above) — surface it in the log instead of failing
+		# silently; local progress is kept and sync retries.
+		push_warning("Cloud sync failed (%s) — local progress is kept and sync will retry." % String(up.get("error", "unknown error")))
 	sync_finished.emit(bool(up.get("ok", false)))
 	return up
+
+# ------------------------------------------------------ session persistence
+# (v11) The Supabase session used to live in memory only, so every app
+# restart lost the sign-in: the lobby showed "No players online right
+# now" without any network call, the presence heartbeat ran as `anon`
+# (RLS denied it — the phone never appeared in anyone else's lobby)
+# and profile sync refused outright. The session is now persisted in
+# the app-private save file (Save.session_*, never the cloud profile,
+# never logged) and restored on startup before Friends listens.
+
+## True when a saved session existed but its refresh failed — the
+## player must sign in again (the lobby shows this instead of a silent
+## empty list).
+func session_needs_sign_in() -> bool:
+	return session_refresh_failed
+
+## Write the current Supabase session (access + refresh tokens) to the
+## local save. Called after every successful sign-in and after every
+## successful refresh (GoTrue rotates both tokens, so the stored values
+## are rewritten each time). No-op when there is no session to store.
+## A successful sign-in also clears the stale-refresh flag.
+func _persist_session() -> void:
+	session_refresh_failed = false
+	if Supabase.access_token == "" or Supabase.user_id == "":
+		return
+	Save.session_access_token = Supabase.access_token
+	Save.session_refresh_token = Supabase.refresh_token
+	Save.session_saved_at = int(Time.get_unix_time_from_system())
+	Save.save()
+
+## Restore the saved Supabase session on startup: exchange the stored
+## refresh token for a fresh session (GoTrue rotates both tokens).
+## Must run BEFORE Friends.start_listening() — Friends uses the Auth
+## uid for Realtime/presence, and without a session the lobby shows an
+## empty list and this phone never appears in anyone else's lobby. On
+## success the local account id becomes the Auth uid (the profile id
+## IS the Auth uid) and the rotated tokens are persisted. On failure
+## the saved tokens are cleared and session_refresh_failed is set —
+## the player must sign in again; play still works locally and the
+## lobby says so instead of showing a silent empty list.
+## Returns {ok, error}. Never throws.
+func restore_session() -> Dictionary:
+	if not Supabase.configured:
+		return {"ok": false, "error": "Supabase is not configured yet."}
+	if Save.session_refresh_token == "":
+		return {"ok": false, "error": "No saved session."}
+	var res := await Supabase.refresh_session(Save.session_refresh_token)
+	if not bool(res.get("ok", false)):
+		_clear_saved_session()
+		session_refresh_failed = true
+		push_warning("Session restore failed (%s) — the player must sign in again." % String(res.get("error", "refresh failed")))
+		return {"ok": false, "error": String(res.get("error", "Session refresh failed."))}
+	if Supabase.user_id != "":
+		Save.account_id = Supabase.user_id
+	_persist_session()
+	return {"ok": true, "error": ""}
+
+## Clear the saved + in-memory session (failed refresh / sign out).
+func _clear_saved_session() -> void:
+	Save.session_access_token = ""
+	Save.session_refresh_token = ""
+	Save.session_saved_at = 0
+	Save.save()
+	Supabase.access_token = ""
+	Supabase.user_id = ""
+	Supabase.refresh_token = ""
 
 func _cloud_upsert() -> Dictionary:
 	if Supabase.user_id == "":
@@ -442,7 +518,10 @@ func verify_code_and_login(gmail: String, code: String, allow_create: bool = fal
 	var ver := await Supabase.verify_otp(g, c)
 	if not bool(ver.get("ok", false)):
 		return {"ok": false, "error": String(ver.get("error", "Wrong code — try again.")), "restored": false}
-	# The code won — the magic link is no longer needed. End its
+	# The code won — persist the session now, so a restart restores the
+	# sign-in instead of losing it (v11 session persistence).
+	_persist_session()
+	# The magic link is no longer needed. End its pending return
 	# pending return (loopback listener + persisted slot) so a later
 	# Google sign-in can start its own return instead of being told
 	# one is "already in flight".
@@ -719,6 +798,9 @@ func _finish_return(code: String) -> void:
 	if not bool(res.get("ok", false)):
 		_emit_return_finished(false, String(res.get("error", "Sign-in failed.")), kind)
 		return
+	# The exchange won — persist the session now, so a restart restores
+	# the sign-in instead of losing it (v11 session persistence).
+	_persist_session()
 	var user: Dictionary = (res.get("data", {}) as Dictionary).get("user", {})
 	var gmail := String(user.get("email", "")).strip_edges().to_lower()
 	if gmail == "":
@@ -743,6 +825,9 @@ func _finish_return_with_tokens(tokens: Dictionary) -> void:
 	if not Supabase.set_session_from_tokens(String(tokens.get("access_token", "")), String(tokens.get("refresh_token", ""))):
 		_emit_return_finished(false, "That sign-in link could not be read — try again, or register with your Gmail + code.", kind)
 		return
+	# The tokens won — persist the session now, so a restart restores
+	# the sign-in instead of losing it (v11 session persistence).
+	_persist_session()
 	var got := await Supabase.get_user()
 	var user: Dictionary = (got.get("data", {}) as Dictionary).get("user", got.get("data", {}))
 	var gmail := String(user.get("email", "")).strip_edges().to_lower()
@@ -824,9 +909,16 @@ func sign_out() -> void:
 	Save.aim_assist_ads_progress = 0
 	Save.interstitial_counter = 0
 	Save.pending_pot = 0 # F9: a win pot held on the win screen belongs to this player
+	# v11 session persistence: sign-out clears the saved session too,
+	# or the next launch would silently restore the old account.
+	Save.session_access_token = ""
+	Save.session_refresh_token = ""
+	Save.session_saved_at = 0
+	session_refresh_failed = false
 	Save.save()
 	Supabase.access_token = ""
 	Supabase.user_id = ""
+	Supabase.refresh_token = ""
 	Supabase.disconnect_realtime()
 	account_changed.emit()
 

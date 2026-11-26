@@ -61,6 +61,7 @@ func _initialize() -> void:
 	_test_v11_invites_ui()
 	_test_v11_coin_loop()
 	_test_v11_p2p()
+	_test_v11_session_persist()
 	print("=== %d passed, %d failed ===" % [_passed, _failed])
 	for f in _failures:
 		print("FAIL: ", f)
@@ -1035,6 +1036,45 @@ func _test_v11_coin_loop() -> void:
 
 func _test_v11_p2p() -> void:
 	_run_suite("p2p", "tests/p2p_test.gd")
+
+func _test_v11_session_persist() -> void:
+	# Refresh-token grant path (pure).
+	_check("session: refresh token path", SupabaseClient.refresh_token_path() == "/auth/v1/token?grant_type=refresh_token")
+	# _set_session stores the refresh token (and keeps the old one when
+	# a response carries none — GoTrue always sends one, but a blank
+	# must never wipe the stored token).
+	var client := SupabaseClient.new()
+	client._set_session({"access_token": "tok-x", "refresh_token": "ref-x", "user": {"id": "user-1"}})
+	_check("session: _set_session stores the refresh token", client.refresh_token == "ref-x" and client.access_token == "tok-x" and client.user_id == "user-1")
+	client._set_session({"access_token": "tok-y", "user": {"id": "user-1"}})
+	_check("session: _set_session without a refresh token keeps the old one", client.refresh_token == "ref-x" and client.access_token == "tok-y")
+	# set_session_from_tokens keeps the refresh token too (it used to drop it).
+	var payload := '{"sub":"user-9","email":"a@b.c"}'
+	var b64 := Marshalls.raw_to_base64(payload.to_utf8_buffer()).replace("+", "-").replace("/", "_").rstrip("=")
+	var token := "eyJhbGciOiJIUzI1NiJ9." + b64 + ".sig"
+	_check("session: set_session_from_tokens stores the refresh token", client.set_session_from_tokens(token, "ref-9") and client.refresh_token == "ref-9" and client.user_id == "user-9")
+	client.free()
+	# Lobby: the expired-session state says "sign in again" — and it
+	# must NOT look like the plain empty state (which means "nobody is
+	# online"). Same build pattern as the tour roster test above.
+	var lobby := OnlinePlayerLobby.new(100)
+	lobby._ready()
+	lobby.set_session_expired()
+	var texts: Array = []
+	_collect_label_texts(lobby, texts)
+	var joined := " ".join(texts)
+	_check("session: lobby expired state says sign in again", joined.contains("sign in again"))
+	_check("session: lobby expired state does not claim nobody is online", not joined.contains("No players online right now"))
+	var lobby2 := OnlinePlayerLobby.new(100)
+	lobby2._ready()
+	lobby2.set_players([])
+	var texts2: Array = []
+	_collect_label_texts(lobby2, texts2)
+	var joined2 := " ".join(texts2)
+	_check("session: lobby empty state does not ask to sign in again", not joined2.contains("sign in again"))
+	_check("session: lobby empty state says nobody is online", joined2.contains("No players online right now"))
+	lobby.free()
+	lobby2.free()
 
 func _run_suite(label: String, path: String) -> void:
 	var out: Array = []

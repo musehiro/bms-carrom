@@ -9,6 +9,9 @@ the Godot client (scripts/supabase.gd) to run its full flow against it:
            POST /auth/v1/verify {email, token}-> session (token must be 123456)
            POST /auth/v1/token?grant_type=pkce (auth_code TESTCODE)
                                               -> session for google-user@gmail.com
+           POST /auth/v1/token?grant_type=refresh_token
+             {refresh_token: "ref-<uid>"}     -> ROTATED session, same user
+             (unknown token -> 400)
   REST:    GET/POST /rest/v1/profiles (upsert by id, filter by id/gmail)
            POST /rest/v1/rpc/search_players {q, exclude_id}
            GET/POST/PATCH /rest/v1/invites (filters: to_id/group_id/status)
@@ -379,6 +382,26 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, STATE.session(uid))
             return
         if path == "/auth/v1/token":
+            qs = parse_qs(parsed.query)
+            grant = qs.get("grant_type", [""])[0]
+            if grant == "refresh_token":
+                # v11 session restore: "ref-<uid>" (or the rotated
+                # "ref-refreshed-<uid>") -> a ROTATED session for the
+                # same user (new tokens, same id). Unknown tokens fail.
+                token = str(body.get("refresh_token", ""))
+                uid = None
+                for prefix in ("ref-refreshed-", "ref-"):
+                    if token.startswith(prefix):
+                        uid = token[len(prefix):]
+                        break
+                if uid is None or uid not in STATE.users:
+                    self._json(400, {"error_description": "Invalid refresh token."})
+                    return
+                sess = STATE.session(uid)
+                sess["access_token"] = "tok-refreshed-" + uid
+                sess["refresh_token"] = "ref-refreshed-" + uid
+                self._json(200, sess)
+                return
             if body.get("auth_code") == PKCE_TEST_CODE:
                 uid = STATE.email_to_id.get(GOOGLE_TEST_EMAIL)
                 if uid is None:

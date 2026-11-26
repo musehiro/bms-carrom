@@ -151,6 +151,23 @@ func _show_count_choice(player: Dictionary) -> void:
 		_selected_4p[pid] = player
 		set_players(_players))
 
+## The saved session expired and its refresh failed — the player must
+## sign in again. Shows that plainly instead of the silent empty list
+## (which looks identical to "nobody is online"). The random buttons
+## still work — only the live player list needs a session.
+func set_session_expired() -> void:
+	_players = []
+	_refresh_accum = 0.0
+	if _list_box == null:
+		return
+	for c in _list_box.get_children():
+		c.queue_free()
+	_status_label.text = "Your sign-in expired — sign in again to see who is online."
+	# Same overflow rule as the empty state: wrap, don't widen.
+	var note := UiKit.muted_label("Your saved sign-in could not be restored. Sign in again with your Gmail, then come back here — the random buttons below still work.", 18)
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_list_box.add_child(note)
+
 ## Rebuild the player list. Rows show name + level + status ONLY.
 func set_players(players: Array) -> void:
 	_players = players

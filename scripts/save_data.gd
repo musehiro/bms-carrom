@@ -77,6 +77,14 @@ var google_pkce_deadline: int = 0 # unix time; 0 = no Google sign-in pending
 var pending_return_verifier: String = "" # PKCE verifier of the pending return
 var pending_return_deadline: int = 0 # unix time; 0 = no return pending
 var pending_return_kind: String = "" # "google" | "otp_link"
+# Session persistence (v11): the Supabase Auth session, so a restart
+# restores the sign-in without another OTP/Google round-trip. Stored in
+# the app-private save file (user://) like the PKCE verifier — never in
+# the cloud profile, never logged. Cleared on sign-out and on a failed
+# refresh (Accounts).
+var session_access_token: String = ""
+var session_refresh_token: String = ""
+var session_saved_at: int = 0 # unix time the session was last saved
 
 # Account (v7, mandatory registration — NO guest mode). A player cannot
 # play without registering (display name + Gmail). The account id is the
@@ -153,6 +161,9 @@ func load_save() -> void:
 	pending_return_verifier = String(_cfg.get_value("account", "pending_return_verifier", ""))
 	pending_return_deadline = int(_cfg.get_value("account", "pending_return_deadline", 0))
 	pending_return_kind = String(_cfg.get_value("account", "pending_return_kind", ""))
+	session_access_token = String(_cfg.get_value("account", "session_access_token", ""))
+	session_refresh_token = String(_cfg.get_value("account", "session_refresh_token", ""))
+	session_saved_at = int(_cfg.get_value("account", "session_saved_at", 0))
 
 func save() -> void:
 	_cfg.set_value("player", "coins", coins)
@@ -196,6 +207,9 @@ func save() -> void:
 	_cfg.set_value("account", "pending_return_verifier", pending_return_verifier)
 	_cfg.set_value("account", "pending_return_deadline", pending_return_deadline)
 	_cfg.set_value("account", "pending_return_kind", pending_return_kind)
+	_cfg.set_value("account", "session_access_token", session_access_token)
+	_cfg.set_value("account", "session_refresh_token", session_refresh_token)
+	_cfg.set_value("account", "session_saved_at", session_saved_at)
 	_cfg.save(SAVE_PATH)
 
 func level() -> int:

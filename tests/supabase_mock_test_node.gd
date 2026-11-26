@@ -18,6 +18,11 @@ extends Node
 ##   begin + finish_google_with_pasted_code(full URL / bare code) ->
 ##   google_finished ok. The Google flow needs NO google_client_id
 ##   (the mock config sets it to "").
+##   Session persistence (v11): OTP sign-in persists its tokens ->
+##   simulated restart (in-memory session cleared) restores the
+##   session with ROTATED tokens -> bad refresh token fails, needs
+##   sign-in again, saved tokens cleared -> restore with no saved
+##   session fails fast -> sign-out clears the saved session.
 ## The local Save file is backed up and restored at the end, so the
 ## test never touches the real save. No real Supabase project, no
 ## network beyond localhost.
@@ -96,6 +101,12 @@ func _run() -> void:
 	Save.account_created_at = ""
 	Save.account_synced_at = 0
 	Save.player_name = "Player"
+	# v11 session persistence: a stale saved session from an earlier
+	# (possibly interrupted) run would make the persist checks vacuous.
+	Save.session_access_token = ""
+	Save.session_refresh_token = ""
+	Save.session_saved_at = 0
+	Accounts.session_refresh_failed = false
 	Save.save()
 	# Start the mock.
 	var script_path := ProjectSettings.globalize_path("res://tests/mock_supabase.py")
@@ -138,6 +149,9 @@ func _run() -> void:
 	# as an OTP-link return (wrong signal, wrong PKCE verifier).
 	_check("mock: OTP verify ends the pending return", not Accounts.is_return_pending())
 	_check("mock: account id is now the Supabase user id", Save.account_id == Supabase.user_id and Save.account_id != "")
+	# v11 session persistence: the OTP sign-in persisted its session.
+	_check("mock: OTP sign-in persisted the session tokens", Save.session_refresh_token != "" and Save.session_access_token != "" and Supabase.refresh_token == Save.session_refresh_token)
+	_check("mock: saved access token matches the live session", Save.session_access_token == Supabase.access_token)
 	# --- Profile fetch by Gmail (restore path) ---
 	var got := await Supabase.get_profile_by_gmail("test.player@gmail.com")
 	var row: Dictionary = got.get("data", {})
@@ -240,6 +254,43 @@ func _run() -> void:
 	# --- Google paste with nothing pending is refused ---
 	var pasted5 := Accounts.finish_google_with_pasted_code("TESTCODE")
 	_check("mock: paste-code refused when nothing is pending", not pasted5)
+	# --- v11 session restore: simulated restart (in-memory session
+	# cleared, saved tokens kept) -> restore brings it back, rotated ---
+	var saved_refresh := Save.session_refresh_token
+	var saved_uid := Supabase.user_id
+	_check("mock: a saved refresh token exists before the restart", saved_refresh != "" and saved_uid != "")
+	Supabase.access_token = ""
+	Supabase.user_id = ""
+	Supabase.refresh_token = ""
+	var restored := await Accounts.restore_session()
+	_check("mock: saved session restores after a restart", bool(restored.get("ok", false)) and Supabase.user_id == saved_uid)
+	_check("mock: refresh rotated the tokens", Supabase.access_token != "" and Supabase.access_token != "tok-" + saved_uid and Supabase.refresh_token == "ref-refreshed-" + saved_uid)
+	_check("mock: rotated tokens persisted", Save.session_refresh_token == Supabase.refresh_token and Save.session_access_token == Supabase.access_token)
+	_check("mock: restored account id is the Auth uid", Save.account_id == saved_uid)
+	# --- Failed refresh: bad token -> needs sign-in, tokens cleared ---
+	Save.session_refresh_token = "ref-no-such-user"
+	Save.session_access_token = "tok-no-such-user"
+	Save.save()
+	Supabase.access_token = ""
+	Supabase.user_id = ""
+	Supabase.refresh_token = ""
+	var bad := await Accounts.restore_session()
+	_check("mock: bad refresh token fails the restore", not bool(bad.get("ok", false)))
+	_check("mock: failed refresh needs sign-in again", Accounts.session_needs_sign_in())
+	_check("mock: failed refresh clears the saved tokens", Save.session_refresh_token == "" and Save.session_access_token == "" and Supabase.user_id == "")
+	# --- Restore with no saved session fails fast (no network) ---
+	var none := await Accounts.restore_session()
+	_check("mock: restore with no saved session fails fast", not bool(none.get("ok", false)))
+	# --- Sign-out clears the saved session ---
+	# (put a session back first so sign-out has something to clear)
+	Save.session_refresh_token = saved_refresh
+	Save.save()
+	Supabase.access_token = "tok-" + saved_uid
+	Supabase.user_id = saved_uid
+	Supabase.refresh_token = saved_refresh
+	Accounts.sign_out()
+	_check("mock: sign-out clears the saved session", Save.session_refresh_token == "" and Save.session_access_token == "" and Supabase.refresh_token == "" and Supabase.user_id == "")
+	_check("mock: sign-out clears the needs-sign-in flag", not Accounts.session_needs_sign_in())
 	Friends.stop_listening()
 	_finish()
 

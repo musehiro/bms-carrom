@@ -78,7 +78,13 @@ func _ready() -> void:
 	if _shot_mode != "":
 		_run_shot_mode()
 	elif Accounts.has_account():
-		# Returning player: straight to home; invites start listening.
+		# Returning player: restore the saved Supabase session FIRST
+		# (refresh token) — Friends uses the Auth uid for Realtime and
+		# presence, and without a session the lobby shows an empty list
+		# and this phone never appears in anyone else's lobby. A failed
+		# refresh clears the saved tokens; play still works locally
+		# and the lobby says "sign in again" instead of an empty list.
+		await Accounts.restore_session()
 		Friends.start_listening()
 		_show_home()
 	else:
@@ -652,7 +658,12 @@ func _on_online_lobby_refresh() -> void:
 	# No signed-in session (tests / logged-out): the lobby shows the
 	# empty state and the random buttons still work.
 	if not Supabase.configured or Supabase.user_id == "":
-		_online_lobby.set_players([])
+		# A saved session that failed to refresh is NOT a silent empty
+		# list — the lobby says "sign in again" (v11 session persistence).
+		if Accounts.session_needs_sign_in():
+			_online_lobby.set_session_expired()
+		else:
+			_online_lobby.set_players([])
 		return
 	var res := await Friends.list_online_players()
 	if _online_lobby == null:

@@ -52,6 +52,10 @@ var online_players: Array = [] # §11: last fetched live-player list
 var _presence_status := "online"
 var _presence_timer := 0.0
 var _presence_busy := false
+## Heartbeat failure logging (v11): the last heartbeat's outcome, so a
+## failure is logged on transition only — a dead network would
+## otherwise spam the log every 30 s. True at start (no failure yet).
+var _presence_last_ok := true
 
 var _poll_timer := 0.0
 var _listening := false
@@ -121,8 +125,19 @@ func _heartbeat_presence_async() -> void:
 	if _presence_busy or Save.account_id == "":
 		return
 	_presence_busy = true
-	await Supabase.heartbeat_presence(Save.account_id, Save.player_name, Save.level(), _presence_status)
+	var res := await Supabase.heartbeat_presence(Save.account_id, Save.player_name, Save.level(), _presence_status)
 	_presence_busy = false
+	# Surface heartbeat failures in the log (v11): when this fails the
+	# lobby silently empties — e.g. the session is gone and the write
+	# runs as `anon`, so RLS denies it and this phone never appears in
+	# anyone else's lobby. Transition-only: a dead network must not
+	# spam the log every 30 s.
+	var ok := bool(res.get("ok", false))
+	if not ok and _presence_last_ok:
+		push_warning("Presence heartbeat failed (%s) — this phone will not appear in other players' lobbies." % String(res.get("error", "unknown error")))
+	elif ok and not _presence_last_ok:
+		print("Presence heartbeat recovered.")
+	_presence_last_ok = ok
 
 ## Fetch the live-player list (presence rows, newest first), filtered
 ## to rows younger than PRESENCE_OFFLINE_SECONDS and excluding me.
