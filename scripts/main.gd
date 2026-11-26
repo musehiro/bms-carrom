@@ -78,14 +78,24 @@ func _ready() -> void:
 	if _shot_mode != "":
 		_run_shot_mode()
 	elif Accounts.has_account():
-		# Returning player: restore the saved Supabase session FIRST
-		# (refresh token) — Friends uses the Auth uid for Realtime and
-		# presence, and without a session the lobby shows an empty list
-		# and this phone never appears in anyone else's lobby. A failed
+		# Returning player: show the loading screen (not a black
+		# screen) while the saved session is restored — the restore
+		# can take seconds on a slow network, and a black screen reads
+		# as a hang. The bar moves at real step boundaries.
+		_show_loading("LOADING GAME", "Starting…")
+		_loading.set_progress(0.15)
+		_loading.set_status("Restoring your sign-in…")
+		# Restore the saved Supabase session FIRST (refresh token) —
+		# Friends uses the Auth uid for Realtime and presence, and
+		# without a session the lobby shows an empty list and this
+		# phone never appears in anyone else's lobby. A failed
 		# refresh clears the saved tokens; play still works locally
 		# and the lobby says "sign in again" instead of an empty list.
 		await Accounts.restore_session()
+		_loading.set_progress(0.6)
+		_loading.set_status("Loading your tables…")
 		Friends.start_listening()
+		_loading.set_progress(0.9)
 		_show_home()
 	else:
 		# First screen: register / sign in (mandatory — no guest mode).
@@ -420,45 +430,128 @@ func _join_invite_room(group_id: String, mode: String, stake: int, is_inviter: b
 		# LEGACY ENet path (transport switch rollback): the frozen server.
 		Net.connect_to_server(Save.online_host, NetClient.DEFAULT_PORT)
 
-## Short loading screen (v10 direct play): tap -> this -> board.
-## One big label, one sub-line, animated dots. No buttons, no choices —
-## the player understands it at a glance (clean-UI rule).
+## Loading screen (2026-11-27, Buddhika's reference look): the same
+## gold/red/wood artwork family as home and auth — wood photo
+## background, the golden crown "BMS CARROM" logo, a mini carrom
+## board in the middle, and at the bottom the title with a gold
+## progress bar that fills with REAL progress. The bar auto-advances
+## 0 -> 1 over 1.2 s by default (the tap -> loading -> board pause);
+## set_progress() switches it to manual (startup steps) and clamps.
+## The old teal screen with animated dots is gone.
 class LoadingScreen:
 	extends Control
-	var _dots_label: Label
-	var _dots := 0
-	var _accum := 0.0
+	var _bar: ProgressBar
+	var _status: Label
+	var _board_holder: Control
+	var _mini: BoardView
+	var _elapsed := 0.0
+	var _duration := 1.2 # 0 = manual (set_progress drives the bar)
 
 	func _init(title_text: String, sub_text: String) -> void:
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
 		UiKit.full_rect(self)
-		var bg := ColorRect.new()
-		bg.color = Color(0.04, 0.45, 0.42)
+		var bg := TextureRect.new()
+		bg.texture = preload("res://art/bg_home_wood.jpg")
+		bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		bg.stretch_mode = TextureRect.STRETCH_SCALE
 		bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		UiKit.full_rect(bg)
 		add_child(bg)
-		var center := CenterContainer.new()
-		center.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		UiKit.full_rect(center)
-		add_child(center)
 		var vb := VBoxContainer.new()
-		vb.add_theme_constant_override("separation", 14)
-		center.add_child(vb)
-		var title := UiKit.title_label(title_text, 40)
+		vb.add_theme_constant_override("separation", 10)
+		UiKit.full_rect(vb)
+		vb.offset_left = 24
+		vb.offset_right = -24
+		vb.offset_top = 24
+		vb.offset_bottom = -24
+		vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(vb)
+		# Logo (top): golden crown "BMS CARROM" + "PLAY & ENJOY".
+		# 400x380 matches the logo's 1200x1140 aspect exactly.
+		var logo := TextureRect.new()
+		logo.texture = preload("res://art/logo_carrom_loading.png")
+		logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		logo.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		logo.custom_minimum_size = Vector2(400, 380)
+		logo.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		vb.add_child(logo)
+		# Mini board (middle): the real board, classic, pieces set up —
+		# the same embedding home.gd uses (BoardView at (-20,-250)*s,
+		# scale s, no backdrop, no labels). _ready() resizes it to the
+		# real viewport; 560 is the pre-tree default.
+		var center := CenterContainer.new()
+		center.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		vb.add_child(center)
+		_board_holder = Control.new()
+		_board_holder.custom_minimum_size = Vector2(560, 560)
+		_board_holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		center.add_child(_board_holder)
+		_mini = BoardView.new()
+		_mini.board_id = Save.equipped_board
+		_mini.striker_id = Save.equipped_striker
+		_mini.draw_backdrop = false
+		_mini.show_labels = false
+		_mini.pieces = CarromPhysics.setup_pieces()
+		_fit_board(560.0)
+		_board_holder.add_child(_mini)
+		# Title + gold progress bar + status (bottom).
+		var title := UiKit.title_label(title_text, 30)
 		vb.add_child(title)
-		var sub := UiKit.muted_label(sub_text, 20)
-		sub.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		vb.add_child(sub)
-		_dots_label = UiKit.title_label("", 40)
-		vb.add_child(_dots_label)
+		_bar = ProgressBar.new()
+		_bar.min_value = 0
+		_bar.max_value = 100
+		_bar.value = 0
+		_bar.show_percentage = false
+		_bar.custom_minimum_size = Vector2(0, 26)
+		_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var bar_bg := StyleBoxFlat.new()
+		bar_bg.bg_color = Color(0.10, 0.05, 0.03, 0.95)
+		bar_bg.set_corner_radius_all(13)
+		bar_bg.border_color = UiKit.GOLD
+		bar_bg.set_border_width_all(2)
+		var bar_fill := StyleBoxFlat.new()
+		bar_fill.bg_color = UiKit.GOLD_LIGHT
+		bar_fill.set_corner_radius_all(11)
+		_bar.add_theme_stylebox_override("background", bar_bg)
+		_bar.add_theme_stylebox_override("fill", bar_fill)
+		vb.add_child(_bar)
+		_status = UiKit.muted_label(sub_text, 18)
+		_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_status.add_theme_color_override("font_color", Color(0.96, 0.95, 0.92))
+		vb.add_child(_status)
+
+	## Resize the mini board to the real viewport (home.gd pattern):
+	## as wide as fits after the logo + title + bar chrome.
+	func _ready() -> void:
+		var vp := get_viewport_rect().size
+		if vp.x <= 0.0 or vp.y <= 0.0:
+			return
+		var chrome := 48.0 + 380.0 + 10.0 * 4.0 + 40.0 + 26.0 + 28.0
+		var board_px := clampf(minf(vp.x - 40.0, vp.y - chrome), 280.0, 680.0)
+		_board_holder.custom_minimum_size = Vector2(board_px, board_px)
+		_fit_board(board_px)
+
+	func _fit_board(board_px: float) -> void:
+		var s := board_px / 680.0
+		_mini.position = Vector2(-20, -250) * s
+		_mini.scale = Vector2(s, s)
+
+	## Real progress: 0.0 empty, 1.0 full. Clamped — never over/under.
+	## Also switches the bar to manual: the auto-advance stops.
+	func set_progress(f: float) -> void:
+		_duration = 0.0
+		_bar.value = clampf(f, 0.0, 1.0) * 100.0
+
+	func set_status(text: String) -> void:
+		_status.text = text
 
 	func _process(delta: float) -> void:
-		_accum += delta
-		if _accum >= 0.4:
-			_accum = 0.0
-			_dots = (_dots + 1) % 4
-			_dots_label.text = ".".repeat(_dots)
+		if _duration > 0.0:
+			_elapsed += delta
+			_bar.value = clampf(_elapsed / _duration, 0.0, 1.0) * 100.0
 
 ## Show the loading screen (no timer — the caller drives what happens
 ## next). The screenshot mode uses this to capture the screen itself.

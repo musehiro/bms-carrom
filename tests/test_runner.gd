@@ -62,6 +62,7 @@ func _initialize() -> void:
 	_test_v11_coin_loop()
 	_test_v11_p2p()
 	_test_v11_session_persist()
+	_test_auth_fix_loading()
 	# The SIGN OUT button test lives in tests/supabase_mock_test_node.gd
 	# (mock: home has a SIGN OUT button …), NOT here: in -s script mode
 	# home.gd's first compile runs before the autoloads register, so the
@@ -1080,6 +1081,45 @@ func _test_v11_session_persist() -> void:
 	_check("session: lobby empty state says nobody is online", joined2.contains("No players online right now"))
 	lobby.free()
 	lobby2.free()
+
+## Auth fix + loading look (2026-11-27): the Google-provider flag in
+## backend_config.json, and the redirect-error matcher that decides
+## the code-only OTP retry. Pure — no network, no autoloads.
+func _test_auth_fix_loading() -> void:
+	# looks_like_redirect_error: only redirect rejections match — a
+	# failed OTP for any other reason must NOT be retried.
+	_check("authfix: redirect_to rejected is a redirect error", SupabaseClient.looks_like_redirect_error("redirect_to is not allowed"))
+	_check("authfix: Redirect URL message is a redirect error", SupabaseClient.looks_like_redirect_error("Redirect URL not allowed"))
+	_check("authfix: invalid code is NOT a redirect error", not SupabaseClient.looks_like_redirect_error("Invalid code"))
+	_check("authfix: rate limit is NOT a redirect error", not SupabaseClient.looks_like_redirect_error("Too many requests"))
+	_check("authfix: empty message is NOT a redirect error", not SupabaseClient.looks_like_redirect_error(""))
+	# google_enabled flag in backend_config.json.
+	var client := SupabaseClient.new()
+	_write_text_file("user://test_cfg_off.json", '{"supabase_url": "https://x.supabase.co", "supabase_anon_key": "k", "google_enabled": false}')
+	client.load_config("user://test_cfg_off.json")
+	_check("authfix: config google_enabled false is read", not client.google_enabled and client.configured)
+	_write_text_file("user://test_cfg_on.json", '{"supabase_url": "https://x.supabase.co", "supabase_anon_key": "k", "google_enabled": true}')
+	client.load_config("user://test_cfg_on.json")
+	_check("authfix: config google_enabled true is read", client.google_enabled and client.configured)
+	# Absent flag = true: configs written before the flag keep Google.
+	_write_text_file("user://test_cfg_absent.json", '{"supabase_url": "https://x.supabase.co", "supabase_anon_key": "k"}')
+	client.load_config("user://test_cfg_absent.json")
+	_check("authfix: config without the flag defaults Google on", client.google_enabled and client.configured)
+	# set_config override: the mock test points at a mock server with
+	# Google on by default, and can turn it off for the gate test.
+	client.set_config("http://127.0.0.1:8765", "k")
+	_check("authfix: set_config defaults Google on", client.google_enabled)
+	client.set_config("http://127.0.0.1:8765", "k", "", false)
+	_check("authfix: set_config can turn Google off", not client.google_enabled)
+	client.free()
+	DirAccess.remove_absolute("user://test_cfg_off.json")
+	DirAccess.remove_absolute("user://test_cfg_on.json")
+	DirAccess.remove_absolute("user://test_cfg_absent.json")
+
+func _write_text_file(path: String, text: String) -> void:
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	f.store_string(text)
+	f.close()
 
 func _run_suite(label: String, path: String) -> void:
 	var out: Array = []

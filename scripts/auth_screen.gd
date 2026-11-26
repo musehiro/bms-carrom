@@ -31,10 +31,17 @@ extends Control
 ##     on Android (v11 PRIMARY — intent filter + GodotApp.onNewIntent)
 ##     and via the 127.0.0.1 loopback listener on desktop/editor; a
 ##     paste-the-code row covers the case where the automatic return
-##     fails, and after ~60 s a RETRY button appears too. Every failure
-##     shows an error — never silently nothing. The OTP email's "Sign
-##     in" link uses the same platform return, so tapping it signs the
-##     player in — the 6-digit code stays the primary path.
+##     fails, and the moment a return is pending a recovery row offers
+##     RETRY (open Google again) and CANCEL (back to Gmail + code), so
+##     a failed or cancelled browser trip never leaves the player stuck
+##     on "Signing in with Google…"; after ~60 s an explanatory message
+##     is added too. Every failure shows an error — never silently
+##     nothing. While the project's Google provider is OFF
+##     (google_enabled false in backend_config.json — the new project,
+##     2026-11-27), the button is hidden and a note points at Gmail +
+##     code instead. The OTP email's "Sign in" link uses the same
+##     platform return, so tapping it signs the player in — the 6-digit
+##     code stays the primary path.
 ##
 ## The logo is JUST the carrom board (BoardView, no text — logo rule).
 
@@ -71,11 +78,20 @@ var _action_button: Button
 var _code_button: Button
 var _resend_button: Button
 var _google_button: Button
+var _google_note: Label # shown instead of the button while the
+## project's Google provider is off (google_enabled false)
+var _scroll: ScrollContainer # the scrollable content — the recovery
+## row is scrolled into view the moment a return is pending
 var _verify_later_button: Button
 var _code_row: VBoxContainer
 var _paste_row: VBoxContainer
-var _recovery_row: VBoxContainer # v10: RETRY + help, shown after 60 s pending
+var _recovery_row: VBoxContainer # v10: RETRY + CANCEL + help, shown
+## the moment a Google return is pending (not after 60 s)
 var _recovery_shown := false
+var _scroll_to_recovery := false # scroll the recovery row into view
+## on the next frame (after the layout settles — a deferred call in
+## _set_google_pending runs before the VBox re-sorts, so it scrolls
+## to the row's old zero-size rect and nothing moves)
 var _pending_gmail := ""
 var _pending_allow_create := false # the pending code was sent from the REGISTER tab (verify may create the cloud profile) or SIGN IN (must already exist) — tied to how the code was sent, not to the tab showing now
 var _busy := false
@@ -89,6 +105,10 @@ var _resend_cooldown := 0
 func _process(_delta: float) -> void:
 	if _google_pending and not _recovery_shown and Accounts.google_pending_elapsed() > 60.0:
 		show_recovery_ui()
+	if _scroll_to_recovery and _recovery_row and _recovery_row.visible:
+		_scroll_to_recovery = false
+		if _scroll:
+			_scroll.ensure_control_visible(_recovery_row)
 
 ## Show the recovery panel (also called directly by the screenshot
 ## mode and the auth-flow test). Public on purpose.
@@ -117,6 +137,7 @@ func _ready() -> void:
 	var vp := get_viewport_rect().size
 	var content_w := vp.x - 48.0
 	var scroll := ScrollContainer.new()
+	_scroll = scroll
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
 	scroll.follow_focus = true
@@ -131,16 +152,16 @@ func _ready() -> void:
 	root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	root.add_theme_constant_override("separation", clampf((vp.y - 1150.0) / 12.0, 12.0, 32.0))
 	scroll.add_child(root)
-	# ---- Logo: the golden crown CARROM + "WELCOME TO CARROM" ribbon
-	# (premium redesign — the logo image carries the screen; the mini
-	# board is gone, the board already stars on home). Full content
-	# width; the image is 1200x875, so it keeps its aspect and the
-	# scroll layout absorbs any height.
+	# ---- Logo: the golden crown "BMS CARROM" + "PLAY & ENJOY" ribbon
+	# (the same artwork family as the loading screen and home — the
+	# auth screen must look like the same game, not a different one).
+	# Full content width; the image is 1200x1140, so it keeps its
+	# aspect and the scroll layout absorbs any height.
 	var logo := TextureRect.new()
-	logo.texture = preload("res://art/logo_carrom_welcome.png")
+	logo.texture = preload("res://art/logo_carrom_loading.png")
 	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	logo.stretch_mode = TextureRect.STRETCH_SCALE
-	logo.custom_minimum_size = Vector2(content_w, content_w * 875.0 / 1200.0)
+	logo.custom_minimum_size = Vector2(content_w, content_w * 1140.0 / 1200.0)
 	logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(logo)
 	# ---- Why register ----
@@ -164,6 +185,17 @@ func _ready() -> void:
 	# ---- Google (first — the way most players sign in) ----
 	_google_button = _make_google_button()
 	root.add_child(_google_button)
+	# While the project's Google provider is OFF (google_enabled false
+	# in backend_config.json — the new project, 2026-11-27), the button
+	# is hidden and this note points at Gmail + code instead: opening
+	# the authorize URL would land the player on GoTrue's 400
+	# "Unsupported provider" page with no way back into the game.
+	_google_note = UiKit.muted_label("Google sign-in isn't set up yet —\nregister with your Gmail + code below.", 17)
+	_google_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_google_note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_google_note.add_theme_color_override("font_color", Color(0.96, 0.95, 0.92))
+	root.add_child(_google_note)
+	_apply_google_availability()
 	Accounts.google_finished.connect(_on_google_finished)
 	# ---- Divider ----
 	var divider := UiKit.muted_label("—  or continue with Gmail  —", 16)
@@ -244,7 +276,9 @@ func _ready() -> void:
 	use_code.custom_minimum_size = Vector2(170, 68)
 	use_code.pressed.connect(_on_use_pasted_code_pressed)
 	paste_hbox.add_child(use_code)
-	# ---- Recovery row (v10: shown after 60 s of Google pending) ----
+	# ---- Recovery row (v10, shown the moment a Google return is
+	# pending — not after 60 s: a failed or cancelled browser return
+	# must offer a way back at once, never a dead screen) ----
 	_recovery_row = VBoxContainer.new()
 	_recovery_row.add_theme_constant_override("separation", 10)
 	_recovery_row.visible = false
@@ -253,6 +287,10 @@ func _ready() -> void:
 	retry.custom_minimum_size = Vector2(0, 68)
 	retry.pressed.connect(_on_google_retry_pressed)
 	_recovery_row.add_child(retry)
+	var cancel := UiKit.dark_button("✕  CANCEL — USE GMAIL + CODE", 22)
+	cancel.custom_minimum_size = Vector2(0, 60)
+	cancel.pressed.connect(_on_google_cancel_pressed)
+	_recovery_row.add_child(cancel)
 	# ---- Messages ----
 	_error_label = Label.new()
 	_error_label.add_theme_font_size_override("font_size", 18)
@@ -426,10 +464,20 @@ func _set_google_pending(pending: bool) -> void:
 	_google_button.disabled = pending
 	_google_button.text = "Signing in with Google…" if pending else "Continue with Google"
 	_paste_row.visible = pending
+	# The recovery row (RETRY + CANCEL) shows the moment a return is
+	# pending — not after 60 s: a failed or cancelled browser return
+	# must offer a way back at once, never a dead screen. The 60 s
+	# timer in _process still adds the explanatory message. Scroll it
+	# into view on the next frame: it sits below the fold on a 1280 px
+	# screen, and a stuck player must SEE the way back, not have to
+	# discover it by scrolling.
+	if _recovery_row:
+		_recovery_row.visible = pending
+		if pending:
+			_scroll_to_recovery = true
 	if not pending:
 		_recovery_shown = false
-		if _recovery_row:
-			_recovery_row.visible = false
+		_scroll_to_recovery = false
 
 func _start_resend_cooldown() -> void:
 	_resend_cooldown = 60
@@ -568,6 +616,23 @@ func _on_google_retry_pressed() -> void:
 	_set_google_pending(false)
 	_set_message(_error_label, "")
 	_on_google_pressed()
+
+## CANCEL: drop a pending Google return and go back to Gmail + code.
+## The recovery row shows this the moment a return is pending, so a
+## failed or cancelled browser trip never leaves the player stuck on
+## "Signing in with Google…".
+func _on_google_cancel_pressed() -> void:
+	Accounts.cancel_pending_return()
+	_set_google_pending(false)
+	_set_message(_error_label, "")
+	_set_message(_info_label, "Google sign-in cancelled — register with your Gmail + code below.")
+
+## Show the Google button or the "not set up yet" note, depending on
+## whether the project's Google provider is enabled.
+func _apply_google_availability() -> void:
+	var on := Supabase.google_enabled
+	_google_button.visible = on
+	_google_note.visible = not on
 
 func _on_use_pasted_code_pressed() -> void:
 	if not Accounts.finish_google_with_pasted_code(_paste_edit.text):

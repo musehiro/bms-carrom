@@ -102,6 +102,16 @@ var configured := false
 var base_url := ""
 var anon_key := ""
 var google_client_id := ""
+## Whether the Supabase project's Google provider is enabled (Auth ->
+## Providers -> Google). The NEW project (2026-11-27) was created with
+## Google OFF, so the game's "Continue with Google" button opened the
+## authorize URL and GoTrue answered 400 "Unsupported provider:
+## provider is not enabled" — a dead browser page and a stuck player.
+## backend_config.json carries this flag (false for the new project);
+## the auth screen hides the Google button while it is false, and
+## begin_google_sign_in() refuses fast. Default true: configs written
+## before the flag existed (old project, Google on) keep working.
+var google_enabled := true
 var access_token := "" # Supabase Auth session ("" = not signed in)
 var refresh_token := "" # GoTrue refresh token ("" = none) — persisted by
 ## Accounts (Save) so a restart can restore the session; GoTrue rotates
@@ -150,6 +160,9 @@ func load_config(path: String = CONFIG_PATH) -> void:
 	base_url = String(data.get("supabase_url", "")).strip_edges().trim_suffix("/")
 	anon_key = String(data.get("supabase_anon_key", "")).strip_edges()
 	google_client_id = String(data.get("google_client_id", "")).strip_edges()
+	# Google provider flag (see var google_enabled above): absent =
+	# true, so pre-flag configs keep the old behaviour.
+	google_enabled = bool(data.get("google_enabled", true))
 	# v11 P2P: ICE servers override (backend_config.json "turn_servers").
 	# Anything else (missing, wrong type, empty) falls back to the
 	# plan defaults inside ice_servers() — never a hard failure.
@@ -164,10 +177,11 @@ func ice_servers() -> Array:
 
 ## Test override: point the client at a mock server (tests) instead of
 ## the configured project. Pass "" to clear the override.
-func set_config(url: String, key: String, client_id: String = "") -> void:
+func set_config(url: String, key: String, client_id: String = "", google: bool = true) -> void:
 	base_url = url.strip_edges().trim_suffix("/")
 	anon_key = key.strip_edges()
 	google_client_id = client_id.strip_edges()
+	google_enabled = google
 	configured = base_url != "" and anon_key != ""
 
 func _process(delta: float) -> void:
@@ -304,6 +318,25 @@ static func otp_path(redirect_to: String = "", code_challenge: String = "") -> S
 func send_otp(email: String, redirect_to: String = "", code_challenge: String = "") -> Dictionary:
 	return await _http(HTTPClient.METHOD_POST, otp_path(redirect_to, code_challenge),
 		{"email": email, "create_user": true}, false)
+
+## Send the 6-digit code WITHOUT a redirect or PKCE challenge (the
+## fallback in Accounts.request_login_code). A fresh Supabase project
+## allow-lists no Redirect URLs, so GoTrue can reject the redirect
+## variant above — the code email itself still works without it; only
+## the "Sign in" magic-link return is lost, and the 6-digit code stays
+## the primary path. No return listener is started for this variant.
+func send_otp_code_only(email: String) -> Dictionary:
+	return await _http(HTTPClient.METHOD_POST, "/auth/v1/otp",
+		{"email": email, "create_user": true}, false)
+
+## True when a GoTrue error message says the redirect was rejected
+## ("redirect_to is not allowed" and friends). Pure — unit-tested.
+## Used to decide the code-only retry above; a failed OTP for any
+## other reason (rate limit, bad email) must NOT be retried — the
+## player would get a second code email for a problem a resend cannot
+## fix, and a rate-limit retry would only burn the quota.
+static func looks_like_redirect_error(msg: String) -> bool:
+	return msg.strip_edges().to_lower().contains("redirect")
 
 ## Verify the 6-digit code. On success the Gmail is linked to the
 ## current Auth user and a session is returned.

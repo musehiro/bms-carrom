@@ -175,6 +175,25 @@ func _run() -> void:
 	_check("mock: OTP code re-sent for the leading-zero check", bool(sent_lz.get("ok", false)))
 	var lz := await Accounts.verify_code_and_login("test.player@gmail.com", "012345", false)
 	_check("mock: code with a leading zero verifies (string, never int)", bool(lz.get("ok", false)) and Save.coins == 1000)
+	# --- Auth fix (2026-11-27): Google off + OTP redirect fallback ---
+	# Google disabled (new project): begin refuses fast — no browser
+	# opens, so the player never sees GoTrue's 400 "Unsupported
+	# provider" page. Re-enable right away: the Google loopback tests
+	# below need it on.
+	Supabase.google_enabled = false
+	_check("mock: Google sign-in refuses fast while the provider is off", not Accounts.begin_google_sign_in())
+	Supabase.google_enabled = true
+	# OTP redirect rejected (fresh project, no Redirect URLs
+	# allow-listed): the code-only retry still sends the code, starts
+	# NO return listener (no magic link will come back), and the code
+	# verifies. The flag is turned off again right after.
+	await _set_otp_redirect_fail(true)
+	var sent_fb := await Accounts.request_login_code("test.player@gmail.com")
+	_check("mock: OTP sent via the code-only fallback", bool(sent_fb.get("ok", false)))
+	_check("mock: fallback starts no return listener", not Accounts.is_return_pending())
+	var right_fb := await Accounts.verify_code_and_login("test.player@gmail.com", "123456", false)
+	_check("mock: fallback code verifies", bool(right_fb.get("ok", false)))
+	await _set_otp_redirect_fail(false)
 	# --- Second player + search (name only) ---
 	var p2 := SupabaseClient.profile_row("user-nimal", "nimal@gmail.com", "Nimal Perera", 1500, 1200, 10, 6, 3, 2, ["classic"], ["classic"], "classic", "classic")
 	var up2 := await Supabase.upsert_profile(p2)
@@ -320,6 +339,16 @@ func _run() -> void:
 	_check("mock: sign-out clears the needs-sign-in flag", not Accounts.session_needs_sign_in())
 	Friends.stop_listening()
 	_finish()
+
+## Test seam: toggle the mock's fresh-project OTP behaviour (reject
+## OTP requests that carry redirect_to). Returns true on a 200.
+func _set_otp_redirect_fail(enabled: bool) -> bool:
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request(MOCK_URL + "/__test__/otp_redirect_fail", ["Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify({"enabled": enabled}))
+	var res: Array = await http.request_completed
+	http.queue_free()
+	return int(res[1]) == 200
 
 func _wait_for_health() -> bool:
 	var deadline := Time.get_unix_time_from_system() + 10.0

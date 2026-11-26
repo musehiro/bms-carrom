@@ -482,7 +482,28 @@ func request_login_code(gmail: String) -> Dictionary:
 		otp_verifier = Supabase.random_verifier()
 	var res := await Supabase.send_otp(gmail.strip_edges().to_lower(),
 		Supabase.auth_redirect_url(), Supabase.pkce_challenge(otp_verifier))
+	var sent_with_redirect := false
 	if bool(res.get("ok", false)):
+		sent_with_redirect = true
+	elif Supabase.looks_like_redirect_error(String(res.get("error", ""))):
+		# The project's Redirect URLs do not allow the game's return
+		# address yet (fresh project, 2026-11-27) — GoTrue rejected
+		# the redirect variant. Retry once WITHOUT it: the code email
+		# still arrives and the 6-digit code is the primary path; only
+		# the magic-link return is lost. No second email is sent when
+		# the first request succeeded, and no other failure is retried.
+		# If an OTP-link return was already pending, its link is dead
+		# too (same redirect) — end it so the code row is the only
+		# path and a later Google sign-in is not told one is in flight.
+		if _google_pending and _return_kind == "otp_link":
+			_end_google_pending()
+		res = await Supabase.send_otp_code_only(gmail.strip_edges().to_lower())
+	if bool(res.get("ok", false)):
+		if not sent_with_redirect:
+			# Code-only send: no magic link will come back, so no
+			# return listener — the player types the 6-digit code.
+			otp_sent.emit(gmail.strip_edges().to_lower())
+			return {"ok": true, "error": ""}
 		if _google_pending and _return_kind == "otp_link":
 			# Same return, still in flight: only extend its deadline
 			# — do NOT restart the listener (that would reset the
@@ -668,6 +689,14 @@ static func _local_has_progress() -> bool:
 ## message.
 func begin_google_sign_in() -> bool:
 	if not Supabase.configured:
+		return false
+	if not Supabase.google_enabled:
+		# The project's Google provider is OFF (new project, 2026-11-27):
+		# opening the authorize URL would land the player on GoTrue's
+		# 400 "Unsupported provider" page with no way back into the
+		# game. Refuse here instead — the caller shows the Gmail + code
+		# path. Flip `google_enabled` in backend_config.json once the
+		# provider is enabled in the dashboard.
 		return false
 	if _google_pending:
 		if _return_kind == "google":

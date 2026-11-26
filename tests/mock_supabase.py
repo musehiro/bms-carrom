@@ -32,6 +32,8 @@ the Godot client (scripts/supabase.gd) to run its full flow against it:
 
 Run: python3 tests/mock_supabase.py --port 18080
 Health: GET /health -> {"ok": true}
+Test seams: POST /__test__/otp_redirect_fail {"enabled": bool} — reject
+OTP requests that carry redirect_to (fresh-project behaviour).
 """
 
 import argparse
@@ -73,6 +75,9 @@ class State:
         self.presence = {}   # v11: id -> presence row
         self.broadcast_log = []  # v11: [{channel, msg}] fake Broadcast store
         self.ws_clients = set()  # sockets
+        self.otp_redirect_fail = False  # test seam: reject OTP requests
+        # that carry redirect_to (a fresh Supabase project with no
+        # Redirect URLs allow-listed) — the client must retry code-only.
 
     def new_user(self, email=None):
         uid = str(uuid.uuid4())
@@ -362,8 +367,19 @@ class Handler(BaseHTTPRequestHandler):
             uid = STATE.new_user()
             self._json(200, STATE.session(uid))
             return
+        if path == "/__test__/otp_redirect_fail":
+            # Test seam (auth fix, 2026-11-27): toggle the fresh-project
+            # behaviour — OTP requests WITH a redirect_to are rejected.
+            STATE.otp_redirect_fail = bool(body.get("enabled", False))
+            self._json(200, {"ok": True, "enabled": STATE.otp_redirect_fail})
+            return
         if path == "/auth/v1/otp":
             email = str(body.get("email", "")).strip().lower()
+            if STATE.otp_redirect_fail and "redirect_to" in parsed.query:
+                # Fresh project: the Redirect URL is not allow-listed,
+                # so GoTrue rejects the redirect variant with 400.
+                self._json(400, {"msg": "redirect_to is not allowed"})
+                return
             STATE.otps[email] = OTP_CODE
             self._json(200, {})
             return

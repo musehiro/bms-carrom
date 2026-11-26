@@ -37,6 +37,11 @@ func _ready() -> void:
 	Save.account_synced_at = 0
 	Save.player_name = "Player"
 	Save.save()
+	# A leftover pending browser return (e.g. the --shot=googlepending
+	# run quits without cancelling it) would make _ready() show the
+	# "Signing in with Google…" state instead of the plain auth screen
+	# — clear it so the test is hermetic.
+	Accounts.cancel_pending_return()
 	# v9: force local-only so this test is hermetic — it must not depend
 	# on backend_config.json (which is now a live, configured project)
 	# or on the network. The cloud paths are covered by the mock test.
@@ -94,6 +99,15 @@ func _find_label_containing(root: Node, text: String) -> Label:
 			return found
 	return null
 
+func _find_texture_with(root: Node, path_part: String) -> TextureRect:
+	if root is TextureRect and (root as TextureRect).texture != null and (root as TextureRect).texture.resource_path.contains(path_part):
+		return root
+	for c in root.get_children():
+		var found := _find_texture_with(c, path_part)
+		if found:
+			return found
+	return null
+
 func _run() -> void:
 	await _frames(5)
 	# --- A1/A2: auth first, no guest path ---
@@ -108,6 +122,22 @@ func _run() -> void:
 	google_btn.pressed.emit()
 	await _frames(3)
 	_check("auth: Google tap with no backend shows an error", _main._auth._error_label.text != "" and _main._auth._error_label.text.contains("not connected"))
+	# --- A9 (auth fix, 2026-11-27): Google off hides the button ---
+	# The new project has the Google provider OFF: the button must be
+	# hidden and a note must point at Gmail + code, so the player never
+	# lands on GoTrue's 400 "Unsupported provider" page.
+	Supabase.google_enabled = false
+	_main._show_auth()
+	await _frames(3)
+	var google_btn_off := _find_button(_main._auth, "Continue with Google")
+	_check("auth: Google button hidden while the provider is off", google_btn_off != null and not google_btn_off.is_visible_in_tree())
+	var gnote := _find_label_containing(_main._auth, "Google sign-in isn't set up yet")
+	_check("auth: note points at Gmail + code while Google is off", gnote != null and gnote.is_visible_in_tree())
+	Supabase.google_enabled = true
+	_main._show_auth()
+	await _frames(3)
+	var google_btn_on := _find_button(_main._auth, "Continue with Google")
+	_check("auth: Google button back when the provider is on", google_btn_on != null and google_btn_on.is_visible_in_tree())
 	# --- A5: register screen is full (benefits + footer at the bottom) ---
 	_check("auth: benefits panel present", _find_label_containing(_main._auth, "saved to your account forever") != null)
 	_check("auth: free-to-play / no-ads line present", _find_label_containing(_main._auth, "No ads until you play") != null)
@@ -121,6 +151,13 @@ func _run() -> void:
 	_main._auth._set_google_pending(true)
 	await _frames(2)
 	_check("auth: paste-code row appears while Google is pending", use_code.is_visible_in_tree())
+	# Auth fix (2026-11-27): the recovery row (RETRY + CANCEL) shows
+	# the moment a return is pending — not after 60 s — so a failed or
+	# cancelled browser trip offers a way back at once.
+	var retry_now := _find_button_containing(_main._auth, "RETRY GOOGLE SIGN-IN")
+	_check("auth: recovery row shows at once while Google is pending", retry_now != null and retry_now.is_visible_in_tree())
+	var cancel_now := _find_button_containing(_main._auth, "CANCEL")
+	_check("auth: recovery row shows CANCEL at once too", cancel_now != null and cancel_now.is_visible_in_tree())
 	_main._auth._set_google_pending(false)
 	await _frames(2)
 	_check("auth: paste-code row hides again when Google finishes", not use_code.is_visible_in_tree())
@@ -132,9 +169,25 @@ func _run() -> void:
 	var retry := _find_button_containing(_main._auth, "RETRY GOOGLE SIGN-IN")
 	_check("auth: recovery shows RETRY GOOGLE SIGN-IN", retry != null and retry.is_visible_in_tree())
 	_check("auth: recovery keeps the paste-code row visible", use_code.is_visible_in_tree())
+	var cancel := _find_button_containing(_main._auth, "CANCEL")
+	_check("auth: recovery shows CANCEL — USE GMAIL + CODE", cancel != null and cancel.is_visible_in_tree())
 	_main._auth._set_google_pending(false)
 	await _frames(2)
 	_check("auth: recovery hides again when Google finishes", retry != null and not retry.is_visible_in_tree())
+	# --- A10 (auth fix): CANCEL drops a pending Google return ---
+	# A real pending return (debug helper, as the screenshot mode
+	# does), then CANCEL: the pending state ends and the Google button
+	# comes back enabled — the player is never stuck on "Signing in
+	# with Google…".
+	Accounts.debug_begin_pending_return("google")
+	_main._auth._set_google_pending(true)
+	await _frames(2)
+	var cancel2 := _find_button_containing(_main._auth, "CANCEL")
+	_check("auth: CANCEL button present on a real pending return", cancel2 != null and cancel2.is_visible_in_tree())
+	cancel2.pressed.emit()
+	await _frames(2)
+	_check("auth: CANCEL drops the pending Google return", not Accounts.is_return_pending())
+	_check("auth: CANCEL brings the Google button back enabled", _main._auth._google_button != null and not _main._auth._google_button.disabled)
 	# --- A7: RESEND CODE exists (hidden until a code is sent) ---
 	_check("auth: RESEND CODE button exists", _main._auth._resend_button != null)
 	_check("auth: RESEND CODE hidden until a code is sent", not _main._auth._resend_button.is_visible_in_tree())
@@ -213,6 +266,26 @@ func _run() -> void:
 	_main._home._toggle_invite_box()
 	Friends.incoming = []
 	Friends.outgoing = []
+	# --- L6 (auth fix, 2026-11-27): the loading screen is the new look ---
+	# Wood background, BMS crown logo, mini board, and a gold bar that
+	# fills with real progress — not the old teal screen with dots.
+	_main._show_loading("LOADING GAME", "Starting…")
+	await _frames(2)
+	var ls = _main._loading
+	_check("loading: screen is shown", ls != null)
+	ls._process(0.6)
+	_check("loading: bar auto-advances over the 1.2 s wait", ls._bar.value >= 50.0)
+	ls.set_progress(0.5)
+	_check("loading: bar shows real progress (50%)", ls._bar.value == 50.0)
+	ls.set_progress(2.0)
+	_check("loading: progress clamps at 100%", ls._bar.value == 100.0)
+	ls.set_progress(-1.0)
+	_check("loading: progress clamps at 0%", ls._bar.value == 0.0)
+	ls.set_status("Restoring your sign-in…")
+	_check("loading: status text updates", ls._status.text == "Restoring your sign-in…")
+	_check("loading: BMS crown logo is shown", _find_texture_with(ls, "logo_carrom_loading.png") != null)
+	_check("loading: wood background is shown", _find_texture_with(ls, "bg_home_wood.jpg") != null)
+	_check("loading: mini board has the full 20-piece setup", ls._mini != null and ls._mini.pieces.size() == 20)
 	_done = true
 	print("=== auth flow test: %d passed, %d failed ===" % [_passed, _failed])
 	get_tree().quit(0 if _failed == 0 else 1)
