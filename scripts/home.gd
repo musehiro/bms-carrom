@@ -64,8 +64,10 @@ var _selected_4p: Dictionary = {} # player id -> {id, name, level}
 
 func _ready() -> void:
 	UiKit.full_rect(self)
-	var bg := ColorRect.new()
-	bg.color = Color(0.04, 0.45, 0.42) # v10: vivid teal, not dark brown
+	var bg := TextureRect.new()
+	bg.texture = preload("res://art/bg_home_wood.jpg")
+	bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	bg.stretch_mode = TextureRect.STRETCH_SCALE
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	UiKit.full_rect(bg)
 	add_child(bg)
@@ -97,15 +99,27 @@ func _ready() -> void:
 	name_label.text = Save.player_name
 	name_label.add_theme_font_size_override("font_size", 24)
 	name_label.add_theme_color_override("font_color", UiKit.TEXT)
+	# Readability fix: the wood photo behind the top bar is light, so
+	# the white/gold name + level wash out — a dark shadow keeps them
+	# readable (same pattern as the match message banner).
+	name_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+	name_label.add_theme_constant_override("shadow_offset_x", 2)
+	name_label.add_theme_constant_override("shadow_offset_y", 2)
 	id_box.add_child(name_label)
 	_level_label = Label.new()
 	_level_label.add_theme_font_size_override("font_size", 18)
 	_level_label.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
+	_level_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+	_level_label.add_theme_constant_override("shadow_offset_x", 2)
+	_level_label.add_theme_constant_override("shadow_offset_y", 2)
 	id_box.add_child(_level_label)
 	top.add_child(id_box)
 	_coins_label = Label.new()
 	_coins_label.add_theme_font_size_override("font_size", 24)
 	_coins_label.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
+	_coins_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+	_coins_label.add_theme_constant_override("shadow_offset_x", 2)
+	_coins_label.add_theme_constant_override("shadow_offset_y", 2)
 	top.add_child(_coins_label)
 	var coins_btn := UiKit.dark_button("◉", 24)
 	coins_btn.custom_minimum_size = Vector2(52, 52)
@@ -177,20 +191,26 @@ func _ready() -> void:
 	# below the banner slot.
 	hero.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	root.add_child(hero)
-	var sub := UiKit.muted_label("Real carrom • Online & offline • Fewer ads", 18)
-	hero.add_child(sub)
-	var divider := ColorRect.new()
-	divider.color = Color(0.83, 0.69, 0.22, 0.55)
-	divider.custom_minimum_size = Vector2(0, 3)
-	divider.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hero.add_child(divider)
+	# Premium logo (reference home screen): golden crown CARROM +
+	# "PLAY & ENJOY" ribbon. The tagline + divider are gone — the
+	# reference has neither, and the logo + board need the room.
+	var vp := get_viewport_rect().size
+	var logo_w := 320.0
+	var logo_h := logo_w * 848.0 / 1200.0
+	var logo := TextureRect.new()
+	logo.texture = preload("res://art/logo_carrom_play.png")
+	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	logo.stretch_mode = TextureRect.STRETCH_SCALE
+	logo.custom_minimum_size = Vector2(logo_w, logo_h)
+	logo.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hero.add_child(logo)
 	# Board size adapts to the real viewport height so the screen fills
 	# at both 720x1280 and 720x1640: up to 680 px wide (full width).
-	# P1-3: chrome 720 (was 740) — the demoted SOLO/ONLINE row and the
-	# merged bonus row freed ~90 px, so the board grows a little.
-	var vp := get_viewport_rect().size
-	var chrome := 720.0 + (72.0 if Save.coins == 0 else 0.0)
-	var board_px := clampf(minf(vp.x - 40.0, vp.y - chrome), 360.0, 680.0)
+	# Premium chrome 760 (was 720) + the logo height: the logo and the
+	# board trade height 1:1, so the hero total stays flat.
+	var chrome := 760.0 + logo_h + 8.0 + (72.0 if Save.coins == 0 else 0.0)
+	var board_px := clampf(minf(vp.x - 40.0, vp.y - chrome), 300.0, 680.0)
 	var s := board_px / 680.0
 	var center := CenterContainer.new()
 	center.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -210,7 +230,7 @@ func _ready() -> void:
 	mini.scale = Vector2(s, s)
 	board_holder.add_child(mini)
 	# ---- Big PLAY ----
-	var play := UiKit.gold_button("▶  PLAY", 40)
+	var play := UiKit.red_button("▶  PLAY", 40)
 	play.custom_minimum_size = Vector2(0, 76)
 	# v3: PLAY opens the full-screen mode-choice screen (Main handles it).
 	# The v2 popup's SOLO/ONLINE buttons were dead on Buddhika's phone
@@ -228,12 +248,12 @@ func _ready() -> void:
 	var modes := HBoxContainer.new()
 	modes.add_theme_constant_override("separation", 12)
 	root.add_child(modes)
-	var solo := UiKit.dark_button("SOLO — vs AI (offline)", 22)
+	var solo := UiKit.cream_tile("SOLO\nvs AI (offline)", 20)
 	solo.custom_minimum_size = Vector2(0, 56)
 	solo.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	solo.pressed.connect(_on_solo_pressed)
 	modes.add_child(solo)
-	var online := UiKit.dark_button("ONLINE — vs real players", 22)
+	var online := UiKit.cream_tile("ONLINE\nvs real players", 20)
 	online.custom_minimum_size = Vector2(0, 56)
 	online.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	online.pressed.connect(_on_online_pressed)
@@ -242,17 +262,17 @@ func _ready() -> void:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 12)
 	root.add_child(row)
-	var shop := UiKit.dark_button("SHOP", 22)
+	var shop := UiKit.cream_tile("SHOP", 22)
 	shop.custom_minimum_size = Vector2(0, 56)
 	shop.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	shop.pressed.connect(func() -> void: open_shop.emit())
 	row.add_child(shop)
-	var howto := UiKit.dark_button("HOW TO PLAY", 22)
+	var howto := UiKit.cream_tile("HOW TO PLAY", 22)
 	howto.custom_minimum_size = Vector2(0, 56)
 	howto.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	howto.pressed.connect(func() -> void: open_howto.emit())
 	row.add_child(howto)
-	_assist_button = UiKit.dark_button("AIM-ASSIST", 22)
+	_assist_button = UiKit.cream_tile("AIM-ASSIST", 22)
 	_assist_button.custom_minimum_size = Vector2(0, 56)
 	_assist_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_assist_button.pressed.connect(func() -> void: open_aim_assist.emit())
@@ -264,19 +284,19 @@ func _ready() -> void:
 	pg_row.add_theme_constant_override("separation", 12)
 	pg_row.visible = PlayGames.is_available()
 	root.add_child(pg_row)
-	var lb_btn := UiKit.dark_button("LEADERBOARD", 22)
+	var lb_btn := UiKit.cream_tile("LEADERBOARD", 22)
 	lb_btn.custom_minimum_size = Vector2(0, 56)
 	lb_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	lb_btn.pressed.connect(func() -> void: PlayGames.show_leaderboard())
 	pg_row.add_child(lb_btn)
-	var ach_btn := UiKit.dark_button("ACHIEVEMENTS", 22)
+	var ach_btn := UiKit.cream_tile("ACHIEVEMENTS", 22)
 	ach_btn.custom_minimum_size = Vector2(0, 56)
 	ach_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	ach_btn.pressed.connect(func() -> void: PlayGames.show_achievements())
 	pg_row.add_child(ach_btn)
 	# ---- Ad-ladder strip (visible tiers, current one highlighted) ----
 	var ladder_panel := PanelContainer.new()
-	ladder_panel.add_theme_stylebox_override("panel", UiKit.panel_style(UiKit.PANEL, Color(0.83, 0.69, 0.22, 0.35), 14, 1))
+	ladder_panel.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.16, 0.10, 0.06, 0.97), UiKit.GOLD, 14, 1))
 	root.add_child(ladder_panel)
 	_ladder_box = VBoxContainer.new()
 	_ladder_box.add_theme_constant_override("separation", 6)
@@ -290,12 +310,12 @@ func _ready() -> void:
 	var bonus_row := HBoxContainer.new()
 	bonus_row.add_theme_constant_override("separation", 12)
 	root.add_child(bonus_row)
-	_daily_button = UiKit.gold_button("DAILY BONUS", 22)
+	_daily_button = UiKit.gold_button("DAILY BONUS", 20)
 	_daily_button.custom_minimum_size = Vector2(0, 52)
 	_daily_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_daily_button.pressed.connect(func() -> void: watch_ad_daily.emit())
 	bonus_row.add_child(_daily_button)
-	_free_coins_button = UiKit.dark_button("FREE COINS", 20)
+	_free_coins_button = UiKit.purple_tile("FREE COINS", 20)
 	_free_coins_button.custom_minimum_size = Vector2(0, 52)
 	_free_coins_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_free_coins_button.pressed.connect(func() -> void: watch_ad_coins.emit())
@@ -344,14 +364,14 @@ func refresh() -> void:
 	_out_box.visible = Save.coins == 0
 	if Save.can_claim_daily():
 		_daily_button.visible = true
-		_daily_button.text = "DAILY BONUS +%d" % Save.daily_bonus_amount()
+		_daily_button.text = "DAILY BONUS\n+%d" % Save.daily_bonus_amount()
 	else:
 		_daily_button.visible = false
 	if Save.ad_cap_reached():
-		_free_coins_button.text = "AD LIMIT REACHED"
+		_free_coins_button.text = "FREE COINS\ncap reached"
 		_free_coins_button.disabled = true
 	else:
-		_free_coins_button.text = "FREE COINS +%d — WATCH AD" % Save.ad_next_reward()
+		_free_coins_button.text = "FREE COINS\n+%d" % Save.ad_next_reward()
 		_free_coins_button.disabled = false
 	if Save.aim_assist_active():
 		var left := Save.aim_assist_remaining_sec()
@@ -461,6 +481,13 @@ func _toggle_invite_box() -> void:
 	# stable reference to it.
 	_invite_body = VBoxContainer.new()
 	_invite_body.add_theme_constant_override("separation", 10)
+	# Overflow fix (2026-11-27, user phone screenshots): a
+	# ScrollContainer child with only SIZE_FILL keeps its CONTENT
+	# minimum width (463 px) instead of filling the scroll (548 px),
+	# so the search row and close button sat ~85 px left of the panel
+	# edge and the panel looked shifted. EXPAND_FILL makes the body
+	# fill the scroll width (verified live: 463 -> 548).
+	_invite_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(_invite_body)
 	_refresh_invite_box()
 

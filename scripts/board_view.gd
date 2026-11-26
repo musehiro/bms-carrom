@@ -11,6 +11,9 @@ var striker_id := "classic"
 # mini board must NOT draw it: it is scaled/offset and would paint over the
 # title and top bar drawn before it.
 var draw_backdrop := true
+# Optional photo backdrop (match screen only): when set, the wood-table
+# photo replaces the procedural gradient + halo behind the board.
+var backdrop_texture: Texture2D = null
 # Labelled diagram (home only): English part names with leader lines so new
 # players learn the board — Striker, White coin, Black coin, Queen, Pocket,
 # Base line, Centre circle, Diagonal (Buddhika, 2026-11-22).
@@ -125,21 +128,26 @@ func _draw() -> void:
 	# interior stays bright, just without garish competing colour).
 	if draw_backdrop:
 		var bg_rect := Rect2(Vector2(-200, -200), Vector2(1120, 2100))
-		var top_col := Color(0.96, 0.93, 0.88)
-		var bot_col := Color(0.83, 0.78, 0.69)
-		var strips := 28
-		for i in range(strips):
-			var t := float(i) / float(strips - 1)
-			var strip := Rect2(bg_rect.position + Vector2(0, bg_rect.size.y * float(i) / strips), Vector2(bg_rect.size.x, bg_rect.size.y / strips + 1.0))
-			draw_rect(strip, top_col.lerp(bot_col, t))
-		# Soft warm halo behind the board (one warm tone only, very
-		# faint — replaces the old magenta + blue + gold glow rings).
-		for i in range(3):
-			draw_circle(c, half + frame + 180.0 - float(i) * 35.0, Color(1.0, 0.88, 0.62, 0.03), true, -1.0, true)
-		# Wider, even fainter halo so the board sits in a pool of warm
-		# light (skipped on low-end GPUs).
-		if not quality_low:
-			draw_circle(c, half + frame + 250.0, Color(1.0, 0.88, 0.62, 0.02), true, -1.0, true)
+		if backdrop_texture != null:
+			# Photo backdrop (match screen): the wood table carries the
+			# light, so the gradient + halo are skipped entirely.
+			draw_texture_rect(backdrop_texture, bg_rect, false)
+		else:
+			var top_col := Color(0.96, 0.93, 0.88)
+			var bot_col := Color(0.83, 0.78, 0.69)
+			var strips := 28
+			for i in range(strips):
+				var t := float(i) / float(strips - 1)
+				var strip := Rect2(bg_rect.position + Vector2(0, bg_rect.size.y * float(i) / strips), Vector2(bg_rect.size.x, bg_rect.size.y / strips + 1.0))
+				draw_rect(strip, top_col.lerp(bot_col, t))
+			# Soft warm halo behind the board (one warm tone only, very
+			# faint — replaces the old magenta + blue + gold glow rings).
+			for i in range(3):
+				draw_circle(c, half + frame + 180.0 - float(i) * 35.0, Color(1.0, 0.88, 0.62, 0.03), true, -1.0, true)
+			# Wider, even fainter halo so the board sits in a pool of warm
+			# light (skipped on low-end GPUs).
+			if not quality_low:
+				draw_circle(c, half + frame + 250.0, Color(1.0, 0.88, 0.62, 0.02), true, -1.0, true)
 	# Frame (rosewood) with a soft drop shadow under the whole board.
 	var frame_rect := Rect2(c - Vector2(half + frame, half + frame), Vector2(2.0 * (half + frame), 2.0 * (half + frame)))
 	# Soft drop shadow under the whole board: three layers, farthest
@@ -393,22 +401,28 @@ func _draw_piece(p: Dictionary) -> void:
 	draw_circle(pos + Vector2(2, 4), r + 2.0, Color(0, 0, 0, 0.16), true, -1.0, true)
 	draw_circle(pos + Vector2(2, 3), r, Color(0, 0, 0, 0.42), true, -1.0, true)
 	var kind: String = p["kind"]
-	# Glossy two-tone discs (Carrom Pool look): coloured ring + bright
-	# centre, white specular highlight, soft shadow. Light coins keep a
-	# pale blue ring, dark coins a deep purple ring, queen red + yellow.
-	var base := Color(0.94, 0.92, 0.86)
-	var rim := Color(0.62, 0.66, 0.92)
-	var center_col := Color(0.95, 0.78, 0.25)
+	# Coin clarity (2026-11-27): white and black used to share the
+	# identical gold centre disc, so at a glance they read as one
+	# piece. Each kind now has its OWN centre motif + rim hue:
+	# white = royal-blue rim + sky-blue centre + white dot,
+	# black = bright-gold rim + hollow gold ring + gold dot,
+	# queen = gold STAR centre (never confusable with either coin).
+	# A thin outer ring in the kind's own colour keeps each readable
+	# on pale beech AND on the dark shop boards.
+	var base := Color(0.98, 0.96, 0.90) # white: bright ivory
+	var rim := Color(0.12, 0.32, 0.85) # white: royal blue
+	var center_col := Color(0.30, 0.62, 0.95) # white: sky blue
 	# Thick outline band, one per kind, picked for the board where that
 	# face is weakest: dark edge for the white coin (it vanishes on pale
 	# beech), light edge for the black coin (it vanishes on the dark shop
 	# boards), dark edge for the queen (its red face carries dark boards).
 	# Strikers vary in colour, so the edge follows face luminance instead.
-	var outline := Color(0.12, 0.13, 0.18)
+	var outline := Color(0.10, 0.12, 0.20) # white: dark navy
 	if kind == "black":
-		base = Color(0.16, 0.16, 0.19)
-		rim = Color(0.28, 0.24, 0.48)
-		outline = Color(0.96, 0.93, 0.82)
+		base = Color(0.04, 0.04, 0.05)
+		rim = Color(0.96, 0.76, 0.20) # bright gold
+		center_col = Color(0.96, 0.76, 0.20) # gold dot / ring
+		outline = Color(0.96, 0.94, 0.86) # warm white
 	elif kind == "queen":
 		base = Color(0.78, 0.12, 0.16)
 		rim = Color(0.5, 0.05, 0.08)
@@ -438,14 +452,42 @@ func _draw_piece(p: Dictionary) -> void:
 	draw_circle(pos, r, outline, true, -1.0, true)
 	draw_circle(pos, r - outline_w, rim, true, -1.0, true)
 	draw_circle(pos, r - outline_w - 2.0, base, true, -1.0, true)
-	# Two-tone centre disc (coins only; the striker gets a sun emblem).
-	if kind != "striker":
+	# Thin outer ring in the kind's own colour — the piece reads on
+	# pale beech and on dark boards alike. (Striker: no ring; its sun
+	# emblem + halo already mark it.)
+	if kind == "white":
+		draw_arc(pos, r + 2.0, 0, TAU, 32, Color(0.12, 0.32, 0.85), 2.0, true)
+	elif kind == "black":
+		draw_arc(pos, r + 2.0, 0, TAU, 32, Color(0.96, 0.76, 0.20), 2.0, true)
+	# Centre motif (coins only; the striker gets a sun emblem below).
+	# White: sky-blue disc + white dot. Black: hollow gold ring (the
+	# black face shows inside) + gold dot. Queen: gold five-point star.
+	if kind == "white":
 		draw_circle(pos, r * 0.46, center_col, true, -1.0, true)
 		draw_arc(pos, r * 0.46, 0, TAU, 24, rim, 2.0, true)
+		draw_circle(pos, r * 0.15, Color(1, 1, 1, 0.95), true, -1.0, true)
+	elif kind == "black":
+		draw_arc(pos, r * 0.46, 0, TAU, 24, center_col, 3.0, true)
+		draw_circle(pos, r * 0.13, center_col, true, -1.0, true)
+	elif kind == "queen":
+		var star := PackedVector2Array()
+		for k in range(10):
+			var ang := -PI / 2.0 + float(k) * PI / 5.0
+			var rad := r * 0.42 if k % 2 == 0 else r * 0.18
+			star.append(pos + Vector2(cos(ang), sin(ang)) * rad)
+		draw_colored_polygon(star, center_col)
 	# Gloss highlight + bright specular dot (coins look glossy, not flat).
 	# Kept inside the face so the white gloss never washes out the edge.
-	draw_circle(pos + Vector2(-r * 0.22, -r * 0.25), r * 0.30, Color(1, 1, 1, 0.5), true, -1.0, true)
-	draw_circle(pos + Vector2(-r * 0.30, -r * 0.34), r * 0.14, Color(1, 1, 1, 0.85), true, -1.0, true)
+	# On black the gloss is smaller and fainter, so the face stays black.
+	var gloss_a := 0.5
+	var gloss_r := r * 0.30
+	var dot_a := 0.85
+	if kind == "black":
+		gloss_a = 0.35
+		gloss_r = r * 0.22
+		dot_a = 0.5
+	draw_circle(pos + Vector2(-r * 0.22, -r * 0.25), gloss_r, Color(1, 1, 1, gloss_a), true, -1.0, true)
+	draw_circle(pos + Vector2(-r * 0.30, -r * 0.34), r * 0.14, Color(1, 1, 1, dot_a), true, -1.0, true)
 	# Bottom inner shadow for depth, hugging the face edge.
 	draw_arc(pos, r - outline_w - 3.0, PI * 0.15, PI * 0.85, 16, Color(0, 0, 0, 0.30), 2.0, true)
 	if kind == "striker":

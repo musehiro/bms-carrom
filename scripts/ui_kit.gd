@@ -38,6 +38,11 @@ const TILE_QUIZ := {"top": Color(1.0, 0.717, 0.012), "bottom": Color(1.0, 0.482,
 const TILE_BALLOON := {"top": Color(1.0, 0.419, 0.419), "bottom": Color(1.0, 0.180, 0.619)} # #FF6B6B -> #FF2E9E
 const TILE_BLUE := {"top": Color(0.219, 0.713, 1.0), "bottom": Color(0.118, 0.435, 0.851), "lip": Color(0.082, 0.345, 0.674)} # #38B6FF -> #1E6FD9, lip #1558AC
 const TILE_GOLD := {"top": Color(1.0, 0.851, 0.408), "bottom": Color(0.914, 0.663, 0.110)} # Carrom gold #FFD968 -> #E9A91C
+## Premium-redesign tiles (reference home / welcome screens).
+const TILE_RED := {"top": Color(0.91, 0.27, 0.18), "bottom": Color(0.72, 0.12, 0.07), "lip": Color(0.49, 0.07, 0.04)} # #E8452E -> #B81E12
+const TILE_GREEN := {"top": Color(0.21, 0.78, 0.35), "bottom": Color(0.12, 0.62, 0.27), "lip": Color(0.07, 0.42, 0.16)} # #36C759 -> #1F9E45
+const TILE_CREAM := {"top": Color(1.0, 0.96, 0.86), "bottom": Color(0.94, 0.85, 0.63), "lip": Color(0.79, 0.66, 0.42)} # #FFF5DB -> #F0D9A1
+const TILE_PURPLE := {"top": Color(0.55, 0.36, 0.96), "bottom": Color(0.43, 0.16, 0.85), "lip": Color(0.29, 0.09, 0.60)} # #8C5CF5 -> #6E29D9
 
 static func panel_style(bg: Color = PANEL, border: Color = PANEL_BORDER, radius: int = 16, border_w: int = 2) -> StyleBoxFlat:
 	var s := StyleBoxFlat.new()
@@ -83,6 +88,45 @@ static func tile_button(text: String, font_size: int, pair: Dictionary) -> Butto
 	b.add_theme_font_size_override("font_size", font_size)
 	var lip: Color = pair.get("lip", ThreeDButton.lip_for(pair["bottom"]))
 	b.set_colors(pair["top"], pair["bottom"], lip, Color.WHITE)
+	b.pill = false
+	b.corner_radius = 24.0
+	return b
+
+## Big red pill — the PLAY button (reference home screen).
+static func red_button(text: String, font_size: int = 30) -> Button:
+	var b := ThreeDButton.new()
+	b.text = text
+	b.add_theme_font_size_override("font_size", font_size)
+	b.set_colors(TILE_RED["top"], TILE_RED["bottom"], TILE_RED["lip"], Color.WHITE)
+	b.pill = true
+	return b
+
+## Big green pill — REGISTER & PLAY (reference welcome screen).
+static func green_button(text: String, font_size: int = 30) -> Button:
+	var b := ThreeDButton.new()
+	b.text = text
+	b.add_theme_font_size_override("font_size", font_size)
+	b.set_colors(TILE_GREEN["top"], TILE_GREEN["bottom"], TILE_GREEN["lip"], Color.WHITE)
+	b.pill = true
+	return b
+
+## Cream tile — dark text on cream (reference menu tiles: SOLO,
+## ONLINE, SHOP, HOW TO PLAY, AIM-ASSIST, LEADERBOARD, ACHIEVEMENTS).
+static func cream_tile(text: String, font_size: int = 22) -> Button:
+	var b := ThreeDButton.new()
+	b.text = text
+	b.add_theme_font_size_override("font_size", font_size)
+	b.set_colors(TILE_CREAM["top"], TILE_CREAM["bottom"], TILE_CREAM["lip"], DARK_TEXT)
+	b.pill = false
+	b.corner_radius = 24.0
+	return b
+
+## Purple tile — FREE COINS (reference home screen).
+static func purple_tile(text: String, font_size: int = 20) -> Button:
+	var b := ThreeDButton.new()
+	b.text = text
+	b.add_theme_font_size_override("font_size", font_size)
+	b.set_colors(TILE_PURPLE["top"], TILE_PURPLE["bottom"], TILE_PURPLE["lip"], Color.WHITE)
 	b.pill = false
 	b.corner_radius = 24.0
 	return b

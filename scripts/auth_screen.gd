@@ -103,18 +103,11 @@ func show_recovery_ui() -> void:
 
 func _ready() -> void:
 	UiKit.full_rect(self)
-	# ---- Bright emerald background (v10: vivid, not near-black) ----
-	var grad := Gradient.new()
-	grad.set_color(0, Color(0.05, 0.45, 0.38)) # vivid emerald
-	grad.set_color(1, Color(0.02, 0.28, 0.22)) # deep teal-green
-	var bg_tex := GradientTexture2D.new()
-	bg_tex.gradient = grad
-	bg_tex.width = 16
-	bg_tex.height = 512
-	bg_tex.fill_from = Vector2(0.5, 0.0)
-	bg_tex.fill_to = Vector2(0.5, 1.0)
+	# ---- Green foliage background (premium redesign): the photo
+	# carries the look now — deep green leaves, sunbeams, sparkles.
 	var bg := TextureRect.new()
-	bg.texture = bg_tex
+	bg.texture = preload("res://art/bg_auth_green.jpg")
+	bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	bg.stretch_mode = TextureRect.STRETCH_SCALE
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	UiKit.full_rect(bg)
@@ -138,55 +131,36 @@ func _ready() -> void:
 	root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	root.add_theme_constant_override("separation", clampf((vp.y - 1150.0) / 12.0, 12.0, 32.0))
 	scroll.add_child(root)
-	# ---- Logo: just the board, no text, on a soft gold glow ----
-	var board_px := clampf(minf(minf(vp.x - 140.0, vp.y * 0.28), 460.0), 300.0, 460.0)
-	var glow_size := board_px + 80.0
-	var board_wrap := Control.new()
-	board_wrap.custom_minimum_size = Vector2(content_w, glow_size)
-	board_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	root.add_child(board_wrap)
-	var glow_grad := Gradient.new()
-	glow_grad.set_color(0, Color(0.83, 0.69, 0.22, 0.30))
-	glow_grad.set_color(1, Color(0.83, 0.69, 0.22, 0.0))
-	var glow_tex := GradientTexture2D.new()
-	glow_tex.gradient = glow_grad
-	glow_tex.width = 256
-	glow_tex.height = 256
-	glow_tex.fill = GradientTexture2D.FILL_RADIAL
-	glow_tex.fill_from = Vector2(0.5, 0.5)
-	glow_tex.fill_to = Vector2(1.0, 0.5)
-	var glow := TextureRect.new()
-	glow.texture = glow_tex
-	glow.stretch_mode = TextureRect.STRETCH_SCALE
-	glow.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	glow.position = Vector2((content_w - glow_size) * 0.5, 0)
-	glow.size = Vector2(glow_size, glow_size)
-	board_wrap.add_child(glow)
-	var s := board_px / 680.0
-	var board_holder := Control.new()
-	board_holder.custom_minimum_size = Vector2(board_px, board_px)
-	board_holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	board_holder.position = Vector2((content_w - board_px) * 0.5, (glow_size - board_px) * 0.5)
-	board_wrap.add_child(board_holder)
-	var mini := BoardView.new()
-	mini.board_id = Save.equipped_board
-	mini.striker_id = Save.equipped_striker
-	mini.draw_backdrop = false
-	mini.show_labels = false
-	mini.pieces = _logo_pieces()
-	mini.position = Vector2(-20, -250) * s
-	mini.scale = Vector2(s, s)
-	board_holder.add_child(mini)
-	# ---- Title + why ----
-	var title := UiKit.title_label("WELCOME TO CARROM", 36)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
-	root.add_child(title)
+	# ---- Logo: the golden crown CARROM + "WELCOME TO CARROM" ribbon
+	# (premium redesign — the logo image carries the screen; the mini
+	# board is gone, the board already stars on home). Full content
+	# width; the image is 1200x875, so it keeps its aspect and the
+	# scroll layout absorbs any height.
+	var logo := TextureRect.new()
+	logo.texture = preload("res://art/logo_carrom_welcome.png")
+	logo.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	logo.stretch_mode = TextureRect.STRETCH_SCALE
+	logo.custom_minimum_size = Vector2(content_w, content_w * 875.0 / 1200.0)
+	logo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(logo)
+	# ---- Why register ----
 	var why := UiKit.muted_label("Register once — your coins, level and shop items are saved to your account, so they come back even if you delete the app and reinstall.", 18)
 	why.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	why.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	why.add_theme_color_override("font_color", Color(0.96, 0.95, 0.92))
 	root.add_child(why)
+	# ---- "Create Your Account" header pill (reference welcome screen).
+	# No emoji glyph — the bundled fonts carry no emoji, so the pill is
+	# text only (an emoji would render as an empty box).
+	var create_pill := PanelContainer.new()
+	create_pill.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.05, 0.35, 0.22, 0.97), UiKit.GOLD, 20, 2))
+	var create_label := Label.new()
+	create_label.text = "Create Your Account"
+	create_label.add_theme_font_size_override("font_size", 26)
+	create_label.add_theme_color_override("font_color", Color(0.96, 0.95, 0.92))
+	create_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	create_pill.add_child(create_label)
+	root.add_child(create_pill)
 	# ---- Google (first — the way most players sign in) ----
 	_google_button = _make_google_button()
 	root.add_child(_google_button)
@@ -242,7 +216,7 @@ func _ready() -> void:
 	spam_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_code_row.add_child(spam_hint)
 	# ---- Action ----
-	_action_button = UiKit.gold_button("REGISTER & PLAY", 28)
+	_action_button = UiKit.green_button("REGISTER & PLAY", 28)
 	_action_button.custom_minimum_size = Vector2(0, 68)
 	_action_button.pressed.connect(_on_action_pressed)
 	root.add_child(_action_button)

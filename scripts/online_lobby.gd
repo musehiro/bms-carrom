@@ -80,7 +80,14 @@ func _ready() -> void:
 	root.add_theme_constant_override("separation", 14)
 	add_child(root)
 	root.add_child(UiKit.title_label("ONLINE LOBBY", 40))
-	root.add_child(UiKit.muted_label("Players online right now, worldwide. Tap INVITE to play together — or find a random opponent below.", 19))
+	# Overflow fix (2026-11-27, user phone screenshots): muted_label
+	# has NO autowrap, so this long line's minimum width (~931 px)
+	# forced the whole VBox wider than the 720 screen and every
+	# button/text ran off the right edge. Wrap it so the VBox stays
+	# 672 wide (720 - 24 margins each side).
+	var intro := UiKit.muted_label("Players online right now, worldwide. Tap INVITE to play together — or find a random opponent below.", 19)
+	intro.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	root.add_child(intro)
 	_radar = RadarView.new()
 	_radar.custom_minimum_size = Vector2(0, 180)
 	root.add_child(_radar)
@@ -91,6 +98,11 @@ func _ready() -> void:
 	root.add_child(scroll)
 	_list_box = VBoxContainer.new()
 	_list_box.add_theme_constant_override("separation", 8)
+	# Same ScrollContainer rule as the invite box: without
+	# EXPAND_FILL the list keeps its content minimum width — and an
+	# autowrapping label's minimum is ~1 px, so the empty-state text
+	# drew one character per line in a sliver down the left edge.
+	_list_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(_list_box)
 	_list_box.add_child(UiKit.muted_label("Loading players…", 18))
 	var b2 := UiKit.gold_button("2 PLAYERS — RANDOM OPPONENT", 26)
@@ -101,7 +113,11 @@ func _ready() -> void:
 	b4.custom_minimum_size = Vector2(0, 96)
 	b4.pressed.connect(func() -> void: random_chosen.emit(4))
 	root.add_child(b4)
-	root.add_child(UiKit.muted_label("Your stake ◉ %d — winner takes the pot (2p) / winning team splits it (4p)." % _stake, 17))
+	# Same overflow fix: wrap the stake line (its minimum width grows
+	# with the stake and would otherwise widen the whole screen).
+	var stake_lbl := UiKit.muted_label("Your stake ◉ %d — winner takes the pot (2p) / winning team splits it (4p)." % _stake, 17)
+	stake_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	root.add_child(stake_lbl)
 	var back := UiKit.dark_button("←  BACK", 24)
 	back.custom_minimum_size = Vector2(0, 64)
 	back.pressed.connect(func() -> void: go_back.emit())
@@ -124,7 +140,10 @@ func set_players(players: Array) -> void:
 		c.queue_free()
 	if players.is_empty():
 		_status_label.text = "No players online right now — try a random opponent below."
-		_list_box.add_child(UiKit.muted_label("Nobody else is online at this moment. Random matchmaking still works — the queue finds players as they come online.", 18))
+		# Same overflow fix as the intro label: wrap, don't widen.
+		var empty_lbl := UiKit.muted_label("Nobody else is online at this moment. Random matchmaking still works — the queue finds players as they come online.", 18)
+		empty_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		_list_box.add_child(empty_lbl)
 	else:
 		_status_label.text = "%d player(s) online now — tap INVITE to play together." % players.size()
 	for player in players:

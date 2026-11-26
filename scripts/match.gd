@@ -121,6 +121,11 @@ var _opp_dots: Dots
 var _my_dots: Dots
 var _turn_label: Label
 var _msg_label: Label
+var _turn_pill: PanelContainer
+var _msg_pill: PanelContainer
+var _opp_avatar_label: Label
+var _my_avatar_label: Label
+var _opp_coins_label: Label
 var _timer_bar: ProgressBar
 var _power_bar: ProgressBar
 # Power-bar easing target (Grok plan step 5, adapted): the drag sets
@@ -264,6 +269,8 @@ func _ready() -> void:
 	board_view.board_id = Save.equipped_board
 	board_view.striker_id = Save.equipped_striker
 	board_view.aim_mode = Save.aim_guide
+	# Premium wood-table backdrop behind the board (reference look).
+	board_view.backdrop_texture = preload("res://art/bg_home_wood.jpg")
 	add_child(board_view)
 	# Place the board behind the HUD.
 	move_child(board_view, 0)
@@ -486,9 +493,11 @@ func _physics_process(delta: float) -> void:
 
 func _on_piece_pocketed(p: Dictionary) -> void:
 	_shot_pocketed.append(p)
-	var col := Color(0.94, 0.92, 0.86)
+	# Puff colours follow the new coin motifs (white = sky blue,
+	# black = gold, queen = red, striker = gold).
+	var col := Color(0.30, 0.62, 0.95)
 	if p["kind"] == "black":
-		col = Color(0.2, 0.2, 0.22)
+		col = Color(0.96, 0.76, 0.20)
 	elif p["kind"] == "queen":
 		col = Color(0.85, 0.15, 0.2)
 	elif p["kind"] == "striker":
@@ -694,7 +703,7 @@ func _process(delta: float) -> void:
 	if _msg_timer > 0.0:
 		_msg_timer -= delta
 		if _msg_timer <= 0.0:
-			_msg_label.visible = false
+			_msg_pill.visible = false
 	# Power bar eases toward its target instead of snapping (smooth
 	# feel; the drag still sets the target directly, so aiming stays 1:1).
 	if _power_bar != null and _power_bar.visible:
@@ -1305,20 +1314,34 @@ func _build_hud() -> void:
 	# or label over the board would eat the drag before _unhandled_input.
 	# Only the pause Button stays interactive (default STOP).
 	# Opponent panel (top). 4p needs a taller panel (3 player rows).
+	# Premium: dark wood + gold border (reference in-game screen).
 	_opp_panel = PanelContainer.new()
 	_opp_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_opp_panel.add_theme_stylebox_override("panel", UiKit.panel_style())
+	_opp_panel.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.16, 0.10, 0.06, 0.95), UiKit.GOLD, 16, 2))
 	_opp_panel.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	_opp_panel.offset_left = 16
 	_opp_panel.offset_right = -16
 	_opp_panel.offset_top = 12
-	_opp_panel.offset_bottom = 168 if player_count == 4 else 108
+	_opp_panel.offset_bottom = 186 if player_count == 4 else 126
 	root.add_child(_opp_panel)
 	var opp_box := VBoxContainer.new()
 	opp_box.name = "OppBox"
 	_opp_panel.add_child(opp_box)
 	var opp_top := HBoxContainer.new()
 	opp_top.name = "OppTop"
+	# Gold avatar circle (reference top bar) — initial refreshed in
+	# _update_hud alongside the name.
+	var opp_avatar := PanelContainer.new()
+	opp_avatar.add_theme_stylebox_override("panel", UiKit.panel_style(UiKit.GOLD, UiKit.GOLD, 28, 2))
+	opp_avatar.custom_minimum_size = Vector2(52, 52)
+	_opp_avatar_label = Label.new()
+	_opp_avatar_label.text = opponent_name.substr(0, 1).to_upper()
+	_opp_avatar_label.add_theme_font_size_override("font_size", 26)
+	_opp_avatar_label.add_theme_color_override("font_color", UiKit.DARK_TEXT)
+	_opp_avatar_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_opp_avatar_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	opp_avatar.add_child(_opp_avatar_label)
+	opp_top.add_child(opp_avatar)
 	var opp_name := Label.new()
 	opp_name.text = "Opponent"
 	opp_name.name = "OppName"
@@ -1331,6 +1354,16 @@ func _build_hud() -> void:
 	opp_lv.add_theme_font_size_override("font_size", 20)
 	opp_lv.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
 	opp_top.add_child(opp_lv)
+	# Coins (local balance, reference top bar) — refreshed in _update_hud.
+	var opp_spacer := Control.new()
+	opp_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	opp_spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	opp_top.add_child(opp_spacer)
+	_opp_coins_label = Label.new()
+	_opp_coins_label.text = "◉ %d" % Save.coins
+	_opp_coins_label.add_theme_font_size_override("font_size", 22)
+	_opp_coins_label.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
+	opp_top.add_child(_opp_coins_label)
 	opp_box.add_child(opp_top)
 	# 4p doubles: two more rows so all three other players are listed
 	# (partner + two opponents, seat order). Names are set in _update_hud.
@@ -1370,17 +1403,30 @@ func _build_hud() -> void:
 	_opp_dots.color = Color(0.15, 0.15, 0.17)
 	_opp_dots.custom_minimum_size = Vector2(200, 24)
 	opp_box.add_child(_opp_dots)
-	# Turn label. 4p: below the taller opponent panel.
+	# Turn banner: dark pill with a gold border (reference in-game
+	# screen). The pill is the positioned node; the label lives inside
+	# it. Height 40 px fits the 40 px gap to the timer bar below.
+	# (Panel + banner sit 18 px lower than before — the avatar circle
+	# made the opponent panel taller.)
+	_turn_pill = PanelContainer.new()
+	_turn_pill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var turn_style := UiKit.panel_style(Color(0.10, 0.08, 0.05, 0.92), UiKit.GOLD, 20, 2)
+	turn_style.content_margin_top = 4
+	turn_style.content_margin_bottom = 4
+	_turn_pill.add_theme_stylebox_override("panel", turn_style)
+	_turn_pill.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	_turn_pill.offset_top = 196 if player_count == 4 else 136
+	_turn_pill.offset_bottom = 236 if player_count == 4 else 176
+	_turn_pill.offset_left = -200
+	_turn_pill.offset_right = 200
+	root.add_child(_turn_pill)
 	_turn_label = Label.new()
 	_turn_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_turn_label.add_theme_font_size_override("font_size", 26)
 	_turn_label.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
 	_turn_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_turn_label.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_turn_label.offset_top = 178 if player_count == 4 else 118
-	_turn_label.offset_left = -200
-	_turn_label.offset_right = 200
-	root.add_child(_turn_label)
+	_turn_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_turn_pill.add_child(_turn_label)
 	# Timer bar.
 	_timer_bar = ProgressBar.new()
 	_timer_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1388,10 +1434,10 @@ func _build_hud() -> void:
 	_timer_bar.max_value = 20
 	_timer_bar.show_percentage = false
 	_timer_bar.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_timer_bar.offset_top = 218 if player_count == 4 else 158
+	_timer_bar.offset_top = 236 if player_count == 4 else 176
 	_timer_bar.offset_left = -140
 	_timer_bar.offset_right = 140
-	_timer_bar.offset_bottom = 232 if player_count == 4 else 172
+	_timer_bar.offset_bottom = 250 if player_count == 4 else 190
 	_timer_bar.add_theme_stylebox_override("background", UiKit.panel_style(Color(0, 0, 0, 0.5), Color(0, 0, 0, 0), 6, 0))
 	var fill := StyleBoxFlat.new()
 	fill.bg_color = UiKit.GOLD
@@ -1405,11 +1451,35 @@ func _build_hud() -> void:
 	_assist_chip.add_theme_color_override("font_color", Color(0.4, 0.9, 0.5))
 	_assist_chip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_assist_chip.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_assist_chip.offset_top = 238 if player_count == 4 else 178
+	_assist_chip.offset_top = 256 if player_count == 4 else 196
 	_assist_chip.offset_left = -200
 	_assist_chip.offset_right = 200
 	root.add_child(_assist_chip)
-	# Message label (centre of board).
+	# Message banner (centre of board): dark pill with a gold border
+	# + the gold crown at the left (reference queen banner). The pill
+	# is the positioned node and the visibility toggle; the label
+	# inside only carries the text.
+	_msg_pill = PanelContainer.new()
+	_msg_pill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_msg_pill.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.10, 0.08, 0.05, 0.92), UiKit.GOLD, 20, 2))
+	_msg_pill.set_anchors_preset(Control.PRESET_CENTER)
+	_msg_pill.offset_top = -300
+	_msg_pill.offset_bottom = -240
+	_msg_pill.offset_left = -340
+	_msg_pill.offset_right = 340
+	_msg_pill.visible = false
+	root.add_child(_msg_pill)
+	var msg_row := HBoxContainer.new()
+	msg_row.add_theme_constant_override("separation", 10)
+	msg_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_msg_pill.add_child(msg_row)
+	var crown := TextureRect.new()
+	crown.texture = preload("res://art/icon_crown_gold.png")
+	crown.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	crown.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	crown.custom_minimum_size = Vector2(44, 30)
+	crown.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	msg_row.add_child(crown)
 	_msg_label = Label.new()
 	_msg_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_msg_label.add_theme_font_size_override("font_size", 28)
@@ -1418,13 +1488,10 @@ func _build_hud() -> void:
 	_msg_label.add_theme_constant_override("shadow_offset_x", 2)
 	_msg_label.add_theme_constant_override("shadow_offset_y", 2)
 	_msg_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_msg_label.set_anchors_preset(Control.PRESET_CENTER)
-	_msg_label.offset_top = -300
-	_msg_label.offset_bottom = -240
-	_msg_label.offset_left = -340
-	_msg_label.offset_right = 340
-	_msg_label.visible = false
-	root.add_child(_msg_label)
+	_msg_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_msg_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_msg_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	msg_row.add_child(_msg_label)
 	# Power meter (horizontal, just above the bottom panel, while aiming).
 	_power_bar = ProgressBar.new()
 	_power_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1443,10 +1510,11 @@ func _build_hud() -> void:
 	_power_bar.add_theme_stylebox_override("fill", pfill)
 	_power_bar.add_theme_stylebox_override("background", UiKit.panel_style(Color(0, 0, 0, 0.5), Color(0, 0, 0, 0), 8, 0))
 	root.add_child(_power_bar)
-	# My panel (bottom).
+	# My panel (bottom). Premium: dark wood + gold border, same as the
+	# opponent panel (reference in-game screen).
 	_my_panel = PanelContainer.new()
 	_my_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_my_panel.add_theme_stylebox_override("panel", UiKit.panel_style())
+	_my_panel.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.16, 0.10, 0.06, 0.95), UiKit.GOLD, 16, 2))
 	_my_panel.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
 	_my_panel.offset_left = 16
 	_my_panel.offset_right = -16
@@ -1456,6 +1524,18 @@ func _build_hud() -> void:
 	var my_box := VBoxContainer.new()
 	_my_panel.add_child(my_box)
 	var my_top := HBoxContainer.new()
+	# Gold avatar circle (reference bottom bar).
+	var my_avatar := PanelContainer.new()
+	my_avatar.add_theme_stylebox_override("panel", UiKit.panel_style(UiKit.GOLD, UiKit.GOLD, 28, 2))
+	my_avatar.custom_minimum_size = Vector2(52, 52)
+	_my_avatar_label = Label.new()
+	_my_avatar_label.text = Save.player_name.substr(0, 1).to_upper()
+	_my_avatar_label.add_theme_font_size_override("font_size", 26)
+	_my_avatar_label.add_theme_color_override("font_color", UiKit.DARK_TEXT)
+	_my_avatar_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_my_avatar_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	my_avatar.add_child(_my_avatar_label)
+	my_top.add_child(my_avatar)
 	var my_name := Label.new()
 	my_name.text = Save.player_name + " (YOU)"
 	my_name.add_theme_font_size_override("font_size", 24)
@@ -1526,7 +1606,7 @@ func _on_pause_pressed() -> void:
 
 func _show_message(text: String, seconds: float) -> void:
 	_msg_label.text = text
-	_msg_label.visible = true
+	_msg_pill.visible = true
 	_msg_timer = seconds
 
 ## F2 layer 2: create the missing OppRow1/OppRow2 rows when a 4p match
@@ -1554,11 +1634,12 @@ func _ensure_opp_rows() -> void:
 		row.add_child(lv)
 		opp_box.add_child(row)
 		opp_box.move_child(row, k)
-	_opp_panel.offset_bottom = 168
-	_turn_label.offset_top = 178
-	_timer_bar.offset_top = 218
-	_timer_bar.offset_bottom = 232
-	_assist_chip.offset_top = 238
+	_opp_panel.offset_bottom = 186
+	_turn_pill.offset_top = 196
+	_turn_pill.offset_bottom = 236
+	_timer_bar.offset_top = 236
+	_timer_bar.offset_bottom = 250
+	_assist_chip.offset_top = 256
 
 func _update_hud() -> void:
 	# F2 layer 1: setup()/setup_4p() may run before add_child now, so
@@ -1624,11 +1705,20 @@ func _update_hud() -> void:
 				lv = _opp_panel.get_node("OppBox/OppRow%d/OppLevel%d" % [k, k])
 			nm.text = "%s (%s)" % [String(p.get("name", "Player")), tag]
 			lv.text = "Lv %d" % int(p.get("level", 1))
+		# Avatar shows the first listed player (the OppTop row).
+		if _opp_avatar_label != null and others.size() > 0:
+			var top_p: Dictionary = players4[others[0]]
+			_opp_avatar_label.text = String(top_p.get("name", "Player")).substr(0, 1).to_upper()
 	else:
 		var opp_panel_name: Label = _opp_panel.get_node("OppBox/OppTop/OppName")
 		opp_panel_name.text = opponent_name
 		var opp_lv: Label = _opp_panel.get_node("OppBox/OppTop/OppLevel")
 		opp_lv.text = "Lv %d" % opponent_level
+		if _opp_avatar_label != null:
+			_opp_avatar_label.text = opponent_name.substr(0, 1).to_upper()
+	# Coins in the top panel (local balance, reference top bar).
+	if _opp_coins_label != null:
+		_opp_coins_label.text = "◉ %d" % Save.coins
 	# Dots show pocketed coins of each TEAM's colour.
 	_opp_dots.filled = int(rules_state["pocketed"][1 - my_team])
 	_opp_dots.color = Color(0.15, 0.15, 0.17) if opp_color == "black" else Color(0.94, 0.92, 0.86)
