@@ -621,9 +621,7 @@ func _refresh_invite_box() -> void:
 			_refresh_invite_box())
 		prow.add_child(sel_btn)
 		var inv_btn := UiKit.gold_button("INVITE", 20)
-		inv_btn.pressed.connect(func() -> void:
-			_toggle_invite_box()
-			invite_send_chosen.emit(player))
+		inv_btn.pressed.connect(func() -> void: _show_count_choice(player))
 		prow.add_child(inv_btn)
 	if not _selected_4p.is_empty():
 		# 3-player guard (v11): the invite UI offers only 1-or-3
@@ -666,6 +664,28 @@ func _on_search_pressed() -> void:
 		return
 	_search_results = res.get("results", [])
 	_refresh_invite_box()
+
+## 2-or-4 choice (2026-11-27, user — same as the lobby): tapping INVITE
+## on a found friend must NOT jump straight to the 1 vs 1 stake picker —
+## the player first chooses how many people play. 2 PLAYERS keeps the old
+## flow (close the box, stake picker, send the 1 vs 1 invite). 4 PLAYERS
+## pre-selects this friend in the doubles picker and KEEPS the box open,
+## so 2 more friends can be picked and the match is set when SEND is tapped.
+func _show_count_choice(player: Dictionary) -> void:
+	var pop := UiKit.choose_player_count(String(player.get("display_name", "Player")))
+	add_child(pop["dim"])
+	var close_pop := func() -> void:
+		(pop["dim"] as Control).queue_free()
+	(pop["close"] as Button).pressed.connect(close_pop)
+	(pop["btn2"] as Button).pressed.connect(func() -> void:
+		close_pop.call()
+		_toggle_invite_box()
+		invite_send_chosen.emit(player))
+	(pop["btn4"] as Button).pressed.connect(func() -> void:
+		close_pop.call()
+		var pid := String(player.get("id", ""))
+		_selected_4p[pid] = player
+		_refresh_invite_box())
 
 # ------------------------------------------------------- invite box (v7)
 func _build_ladder() -> void:

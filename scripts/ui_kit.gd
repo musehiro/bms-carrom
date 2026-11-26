@@ -205,6 +205,27 @@ static func popup_window(title: String, size: Vector2) -> Dictionary:
 	dim.add_child(win)
 	return {"dim": dim, "win": win, "box": vb, "close": x}
 
+## 2-or-4 player choice (2026-11-27, user request): after tapping an
+## online player, the player FIRST chooses 2 or 4 players — the match is
+## only set once the choice is confirmed. Tapping INVITE must never send
+## a 2p invite straight away. Returns the popup_window dict plus "btn2"
+## (2 PLAYERS — 1 VS 1) and "btn4" (4 PLAYERS — DOUBLES); the caller
+## adds pop["dim"] to its own screen and wires the buttons + close.
+static func choose_player_count(display_name: String) -> Dictionary:
+	var pop: Dictionary = popup_window("HOW MANY PLAYERS?", Vector2(560, 400))
+	var box: VBoxContainer = pop["box"]
+	box.add_child(body_label("Invite %s — how many people play? The match is set only after you choose." % display_name, 20))
+	var b2 := gold_button("2 PLAYERS — 1 VS 1", 24)
+	b2.custom_minimum_size = Vector2(0, 72)
+	box.add_child(b2)
+	pop["btn2"] = b2
+	var b4 := dark_button("4 PLAYERS — DOUBLES", 24)
+	b4.custom_minimum_size = Vector2(0, 72)
+	box.add_child(b4)
+	pop["btn4"] = b4
+	box.add_child(body_label("4 players: pick 2 more friends after this — you are the fourth player.", 16))
+	return pop
+
 ## Stake picker popup (v5, virtual-coin staking): before an online match
 ## the player chooses ANY stake from 0 up to their balance — no fixed
 ## amount, no forced match of the opponent's stake. The confirm button

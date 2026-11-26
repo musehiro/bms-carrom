@@ -130,6 +130,27 @@ func _process(delta: float) -> void:
 		_refresh_accum = 0.0
 		refresh_requested.emit()
 
+## 2-or-4 choice (2026-11-27, user): tapping INVITE on a listed player
+## must NOT send a 2p invite straight away — the player first chooses
+## how many people play, and the match is only set after the choice.
+## 2 PLAYERS sends the invite at once (lobby stake). 4 PLAYERS
+## pre-selects this player in the doubles picker below, so 2 more
+## friends can be picked and the match is set when SEND is tapped.
+func _show_count_choice(player: Dictionary) -> void:
+	var pop := UiKit.choose_player_count(String(player.get("display_name", "Player")))
+	add_child(pop["dim"])
+	var close_pop := func() -> void:
+		(pop["dim"] as Control).queue_free()
+	(pop["close"] as Button).pressed.connect(close_pop)
+	(pop["btn2"] as Button).pressed.connect(func() -> void:
+		close_pop.call()
+		invite_chosen.emit(player))
+	(pop["btn4"] as Button).pressed.connect(func() -> void:
+		close_pop.call()
+		var pid := String(player.get("id", ""))
+		_selected_4p[pid] = player
+		set_players(_players))
+
 ## Rebuild the player list. Rows show name + level + status ONLY.
 func set_players(players: Array) -> void:
 	_players = players
@@ -172,7 +193,7 @@ func set_players(players: Array) -> void:
 			set_players(_players))
 		row.add_child(sel)
 		var inv := UiKit.gold_button("INVITE", 20)
-		inv.pressed.connect(func() -> void: invite_chosen.emit(player))
+		inv.pressed.connect(func() -> void: _show_count_choice(player))
 		row.add_child(inv)
 	if not _selected_4p.is_empty():
 		# 3-player guard (v11): exactly 2 picks can never send — the
