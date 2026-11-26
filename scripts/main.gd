@@ -204,6 +204,15 @@ func _on_auth_done() -> void:
 	Friends.start_listening()
 	_show_home()
 
+## v11 re-sign-in entry (home SIGN OUT button): sign_out() clears the
+## saved session AND the local progress (by design — F7: the next
+## player must not inherit it); the cloud profile is untouched, and
+## signing back in with the same Gmail restores it via last-write-
+## wins. Then the auth screen shows again.
+func _on_sign_out_requested() -> void:
+	Accounts.sign_out()
+	_show_auth()
+
 func _show_home() -> void:
 	_clear()
 	_home = HomeScreen.new()
@@ -219,6 +228,10 @@ func _show_home() -> void:
 	_home.open_aim_assist.connect(_open_aim_assist)
 	_home.watch_ad_coins.connect(_on_watch_ad_coins)
 	_home.watch_ad_daily.connect(_on_watch_ad_daily)
+	# v11 re-sign-in entry: sign out (saved session cleared) and show
+	# the auth screen again, so the player can sign in again — with
+	# the same Gmail (cloud profile restores) or a different one.
+	_home.sign_out_requested.connect(_on_sign_out_requested)
 	# v11 coin loop: the OUT OF COINS banner's free bot match.
 	_home.play_broke_bot.connect(_start_solo_direct)
 	_home.invite_accept_chosen.connect(_on_invite_accept_chosen)

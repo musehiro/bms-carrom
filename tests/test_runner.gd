@@ -62,6 +62,11 @@ func _initialize() -> void:
 	_test_v11_coin_loop()
 	_test_v11_p2p()
 	_test_v11_session_persist()
+	# The SIGN OUT button test lives in tests/supabase_mock_test_node.gd
+	# (mock: home has a SIGN OUT button …), NOT here: in -s script mode
+	# home.gd's first compile runs before the autoloads register, so the
+	# Friends autoload is a bare Node and HomeScreen._ready dies on
+	# Friends.invites_changed. In the mock scene the autoloads are real.
 	print("=== %d passed, %d failed ===" % [_passed, _failed])
 	for f in _failures:
 		print("FAIL: ", f)

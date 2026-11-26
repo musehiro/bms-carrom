@@ -1,7 +1,7 @@
 {
   "google_client_id": "",
-  "supabase_anon_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh5aGxobmd5Ynp3bnVuZ25zaGZmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTUzMzE3NzgsImV4cCI6MjExMDkwNzc3OH0.vSjnL3L9uobAhOqRlKSeyQTkOfRg7ZCIQ1ccGNyNo2k",
-  "supabase_url": "https://hyhlhngybzwnungnshff.supabase.co",
+  "supabase_anon_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFpZ3JpZmlxdGFyamdrbGZ4bWZnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU3MTQ0OTMsImV4cCI6MjExMTI5MDQ5M30.epeTf5DhXul1obhzUpeBaecDVr0D-IhRpe65X3JhZLU",
+  "supabase_url": "https://qigrifiqtarjgklfxmfg.supabase.co",
   "turn_servers": [
     {
       "urls": [

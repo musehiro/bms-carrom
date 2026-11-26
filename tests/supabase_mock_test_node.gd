@@ -63,6 +63,12 @@ func _check(name: String, cond: bool, detail: String = "") -> void:
 		_failures.append(name + (" — " + detail if detail != "" else ""))
 		print("FAIL: ", name, (" — " + detail if detail != "" else ""))
 
+func _collect_button_texts(node: Node, out: Array) -> void:
+	for n in node.get_children():
+		if n is Button:
+			out.append((n as Button).text)
+		_collect_button_texts(n, out)
+
 func _fail(name: String) -> void:
 	_failed += 1
 	_failures.append(name)
@@ -281,6 +287,27 @@ func _run() -> void:
 	# --- Restore with no saved session fails fast (no network) ---
 	var none := await Accounts.restore_session()
 	_check("mock: restore with no saved session fails fast", not bool(none.get("ok", false)))
+	# --- v11 re-sign-in entry: the home screen carries a small SIGN OUT
+	# button that emits sign_out_requested (Main signs out and shows
+	# the auth screen again). Checked here, not in test_runner: in -s
+	# script mode home.gd's first compile runs before the autoloads
+	# register, so the Friends autoload is a bare Node and HomeScreen
+	# _ready dies on Friends.invites_changed — in this scene the
+	# autoloads are real, so the screen builds as on the phone. Placed
+	# right after the failed-refresh checks: this is the exact moment
+	# the player needs the button (lobby says "sign in again").
+	var home = load("res://scripts/home.gd").new()
+	add_child(home)
+	var btn_texts: Array = []
+	_collect_button_texts(home, btn_texts)
+	_check("mock: home has a SIGN OUT button", "SIGN OUT" in btn_texts)
+	_check("mock: sign-out button is visible", home._sign_out_button.visible)
+	_check("mock: home has the sign_out_requested signal", home.has_signal("sign_out_requested"))
+	var signout_seen := {"fired": false}
+	home.sign_out_requested.connect(func() -> void: signout_seen["fired"] = true)
+	home._sign_out_button.pressed.emit()
+	_check("mock: pressing SIGN OUT emits sign_out_requested", bool(signout_seen["fired"]))
+	home.queue_free()
 	# --- Sign-out clears the saved session ---
 	# (put a session back first so sign-out has something to clear)
 	Save.session_refresh_token = saved_refresh

@@ -33,6 +33,13 @@ signal open_howto
 signal open_aim_assist
 signal watch_ad_coins
 signal watch_ad_daily
+# v11 re-sign-in entry: the home screen's sign-out button. Main signs
+# the player out (Accounts.sign_out clears the saved session) and
+# shows the auth screen again, so a player whose saved sign-in could
+# not be restored — or who wants a different Gmail — can sign in
+# again. The cloud profile is untouched; signing back in with the
+# same Gmail restores it.
+signal sign_out_requested
 # v11 coin loop: the OUT OF COINS banner offers a free bot match next to
 # the ad — a broke player can play right away while earning back.
 signal play_broke_bot
@@ -47,6 +54,7 @@ var _level_label: Label
 var _xp_bar: ProgressBar
 var _daily_button: Button
 var _sound_button: Button
+var _sign_out_button: Button
 var _invite_button: Button
 var _assist_button: Button
 var _free_coins_button: Button
@@ -320,7 +328,7 @@ func _ready() -> void:
 	_free_coins_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_free_coins_button.pressed.connect(func() -> void: watch_ad_coins.emit())
 	bonus_row.add_child(_free_coins_button)
-	# ---- Level bar + version ----
+	# ---- Level bar + version + sign out ----
 	_xp_bar = ProgressBar.new()
 	_xp_bar.min_value = 0
 	_xp_bar.max_value = Save.XP_PER_LEVEL
@@ -335,8 +343,18 @@ func _ready() -> void:
 	fill.set_corner_radius_all(7)
 	_xp_bar.add_theme_stylebox_override("fill", fill)
 	root.add_child(_xp_bar)
+	# v11 re-sign-in entry: one small dark pill beside the version
+	# line, at the very bottom — visible but out of the way of PLAY.
+	var ver_row := HBoxContainer.new()
+	ver_row.add_theme_constant_override("separation", 12)
+	root.add_child(ver_row)
 	var ver := UiKit.muted_label("BMS Carrom " + APP_VERSION + "  •  Account required  •  Free to play", 15)
-	root.add_child(ver)
+	ver.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ver_row.add_child(ver)
+	_sign_out_button = UiKit.dark_button("SIGN OUT", 16)
+	_sign_out_button.custom_minimum_size = Vector2(110, 36)
+	_sign_out_button.pressed.connect(_on_sign_out_pressed)
+	ver_row.add_child(_sign_out_button)
 	# ---- Banner-ad slot (bottom; the native banner covers it on Android) ----
 	var banner_slot := PanelContainer.new()
 	banner_slot.add_theme_stylebox_override("panel", UiKit.panel_style(UiKit.PANEL, Color(0.80, 0.86, 0.84, 0.4), 10, 1))
@@ -759,6 +777,11 @@ func _on_sound_pressed() -> void:
 	Sfx.set_enabled(Save.sound_on)
 	Save.save()
 	refresh()
+
+## v11 re-sign-in entry: Main owns the screen switch — this screen
+## only asks for it.
+func _on_sign_out_pressed() -> void:
+	sign_out_requested.emit()
 
 ## v10 direct play: no difficulty choice — tap SOLO and a random bot
 ## is picked (loading screen first, then straight to the board).
