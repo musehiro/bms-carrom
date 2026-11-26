@@ -33,6 +33,12 @@ pointing/emulate_touch_from_mouse=true
 
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
+; Graphics upgrade (2026-11-26): the board is drawn in 2D canvas, so the
+; 3D-only parts of Grok's plan do not apply here. MSAA 2D is NOT supported
+; by the Compatibility renderer (Forward+/Mobile only) - edge smoothing
+; is done with antialiased=true on the canvas draw calls in
+; scripts/board_view.gd instead. The renderer stays gl_compatibility
+; for the widest low-end Android support; do not switch it for this game.
 textures/vram_compression/import_etc2_astc=true
 
 [autoload]

@@ -123,6 +123,10 @@ var _turn_label: Label
 var _msg_label: Label
 var _timer_bar: ProgressBar
 var _power_bar: ProgressBar
+# Power-bar easing target (Grok plan step 5, adapted): the drag sets
+# this target directly and _process eases the visible bar toward it,
+# so the bar glides instead of snapping. Aiming itself stays 1:1.
+var _power_target := 0.0
 var _assist_chip: Label
 var _opp_panel: PanelContainer
 var _my_panel: PanelContainer
@@ -357,6 +361,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		board_view.aim_visible = false
 		board_view.pocket_glow = -1
 		_power_bar.visible = false
+		_power_bar.value = 0.0
+		_power_target = 0.0
 
 func _near_baseline(pos: Vector2) -> bool:
 	# Is this touch on (or near) the local seat's baseline band? Bottom
@@ -394,6 +400,7 @@ func _handle_drag(pos: Vector2) -> void:
 		if pull.length() < 12.0:
 			board_view.aim_visible = false
 			_power_bar.visible = false
+			_power_target = 0.0
 			return
 		var dir := pull.normalized()
 		# Aim must point into the board from your seat (up from the
@@ -410,7 +417,7 @@ func _handle_drag(pos: Vector2) -> void:
 		board_view.aim_assist = Save.aim_assist_active()
 		board_view.pocket_glow = _lined_up_pocket(dir)
 		_power_bar.visible = true
-		_power_bar.value = _aim_power * 100.0
+		_power_target = _aim_power * 100.0
 
 func _lined_up_pocket(dir: Vector2) -> int:
 	# Deflection preview: does the first coin hit send a coin near a pocket?
@@ -688,6 +695,10 @@ func _process(delta: float) -> void:
 		_msg_timer -= delta
 		if _msg_timer <= 0.0:
 			_msg_label.visible = false
+	# Power bar eases toward its target instead of snapping (smooth
+	# feel; the drag still sets the target directly, so aiming stays 1:1).
+	if _power_bar != null and _power_bar.visible:
+		_power_bar.value = lerpf(_power_bar.value, _power_target, minf(1.0, delta * 14.0))
 	if phase == "place" and not result_shown:
 		# Turn timer (local player only in solo/tour; both seats online).
 		if _is_local_ai_mode():

@@ -71,11 +71,31 @@ var _grain: Array = []
 var _puffs: Array = []
 var _font: Font
 
+# Graphics-quality tier (Grok plan step 6, adapted to 2D): the extra
+# glow/shadow/grain layers below are skipped on low-end GPUs so the
+# board stays fast on cheap phones. Detected once, in _ready, from the
+# GPU name — an empty name (headless/editor) means full quality.
+var quality_low := false
+const GRAIN_HIGH := 44
+const GRAIN_LOW := 26
+
+func _is_low_end_gpu() -> bool:
+	var adapter := RenderingServer.get_video_adapter_name()
+	if adapter == "":
+		return false
+	var low := ["Adreno 5", "Adreno 6", "Mali-G31", "Mali-G52", "Mali-G57", "Mali-T", "PowerVR GE8"]
+	for tag in low:
+		if tag in adapter:
+			return true
+	return false
+
 func _ready() -> void:
 	_font = ThemeDB.fallback_font
+	quality_low = _is_low_end_gpu()
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 12345
-	for i in range(26):
+	var grain_count := GRAIN_LOW if quality_low else GRAIN_HIGH
+	for i in range(grain_count):
 		var x := CarromPhysics.BOARD_CENTER.x - CarromPhysics.SURFACE_HALF + rng.randf() * 2.0 * CarromPhysics.SURFACE_HALF
 		_grain.append({"x": x, "amp": rng.randf_range(2.0, 7.0), "phase": rng.randf() * TAU, "dark": rng.randf_range(0.03, 0.07)})
 
@@ -106,7 +126,7 @@ func _draw() -> void:
 	if draw_backdrop:
 		var bg_rect := Rect2(Vector2(-200, -200), Vector2(1120, 2100))
 		var top_col := Color(0.96, 0.93, 0.88)
-		var bot_col := Color(0.86, 0.82, 0.75)
+		var bot_col := Color(0.83, 0.78, 0.69)
 		var strips := 28
 		for i in range(strips):
 			var t := float(i) / float(strips - 1)
@@ -115,9 +135,19 @@ func _draw() -> void:
 		# Soft warm halo behind the board (one warm tone only, very
 		# faint — replaces the old magenta + blue + gold glow rings).
 		for i in range(3):
-			draw_circle(c, half + frame + 180.0 - float(i) * 35.0, Color(1.0, 0.88, 0.62, 0.03))
+			draw_circle(c, half + frame + 180.0 - float(i) * 35.0, Color(1.0, 0.88, 0.62, 0.03), true, -1.0, true)
+		# Wider, even fainter halo so the board sits in a pool of warm
+		# light (skipped on low-end GPUs).
+		if not quality_low:
+			draw_circle(c, half + frame + 250.0, Color(1.0, 0.88, 0.62, 0.02), true, -1.0, true)
 	# Frame (rosewood) with a soft drop shadow under the whole board.
 	var frame_rect := Rect2(c - Vector2(half + frame, half + frame), Vector2(2.0 * (half + frame), 2.0 * (half + frame)))
+	# Soft drop shadow under the whole board: three layers, farthest
+	# faintest, so the edge falls off gently instead of a hard step.
+	if not quality_low:
+		var shadow_far2 := frame_rect.grow(24.0)
+		shadow_far2.position += Vector2(9, 13)
+		draw_rect(shadow_far2, Color(0, 0, 0, 0.08))
 	var shadow_far := frame_rect.grow(16.0)
 	shadow_far.position += Vector2(7, 10)
 	draw_rect(shadow_far, Color(0, 0, 0, 0.16))
@@ -135,10 +165,10 @@ func _draw() -> void:
 	var tr := frame_rect.position + Vector2(frame_rect.size.x, 0)
 	var br := frame_rect.position + frame_rect.size
 	var bl := frame_rect.position + Vector2(0, frame_rect.size.y)
-	draw_line(tl, tr, Color(1.0, 0.88, 0.62, 0.55), 2.0)
-	draw_line(tl, bl, Color(1.0, 0.88, 0.62, 0.55), 2.0)
-	draw_line(tr, br, Color(0, 0, 0, 0.35), 2.0)
-	draw_line(bl, br, Color(0, 0, 0, 0.35), 2.0)
+	draw_line(tl, tr, Color(1.0, 0.88, 0.62, 0.55), 2.0, true)
+	draw_line(tl, bl, Color(1.0, 0.88, 0.62, 0.55), 2.0, true)
+	draw_line(tr, br, Color(0, 0, 0, 0.35), 2.0, true)
+	draw_line(bl, br, Color(0, 0, 0, 0.35), 2.0, true)
 	# Strong gold inner trim: dark gold underlay for a crisp edge, then the
 	# bright gold line (4 px, up from 3).
 	draw_rect(frame_rect, Color(0.45, 0.28, 0.08, 0.65), false, 5.5)
@@ -154,14 +184,18 @@ func _draw() -> void:
 		draw_rect(Rect2(x0, c.y - half, 2.0 * half / 6.0, 2.0 * half), Color(base_col.r * t, base_col.g * t, base_col.b * t))
 		# Thin separator between planks (v5 polish: reads as real boards).
 		if i > 0:
-			draw_line(Vector2(x0, c.y - half), Vector2(x0, c.y + half), Color(0, 0, 0, 0.14), 1.5)
+			draw_line(Vector2(x0, c.y - half), Vector2(x0, c.y + half), Color(0, 0, 0, 0.14), 1.5, true)
 	# Warm centre glow, kept EVEN: three wide, faint, equal-alpha
 	# circles (r300 reaches almost to the board edges) so there is no
 	# hot spot in the middle and no dark corners — centre ~0.06
 	# combined, mid ~0.04, edge ~0.02, instead of the old 0.10 centre.
-	draw_circle(c, 300.0, Color(1.0, 0.88, 0.62, 0.02))
-	draw_circle(c, 210.0, Color(1.0, 0.88, 0.62, 0.02))
-	draw_circle(c, 120.0, Color(1.0, 0.88, 0.62, 0.02))
+	# One wider, fainter circle (r360) on top so the glow reaches the
+	# board edges (skipped on low-end GPUs).
+	if not quality_low:
+		draw_circle(c, 360.0, Color(1.0, 0.88, 0.62, 0.012), true, -1.0, true)
+	draw_circle(c, 300.0, Color(1.0, 0.88, 0.62, 0.02), true, -1.0, true)
+	draw_circle(c, 210.0, Color(1.0, 0.88, 0.62, 0.02), true, -1.0, true)
+	draw_circle(c, 120.0, Color(1.0, 0.88, 0.62, 0.02), true, -1.0, true)
 	# Polished sheen: ONE broad, very faint diagonal band only (the old
 	# narrow bright band is gone; alpha 0.05/0.035 -> 0.012) so the
 	# wood is never washed out.
@@ -169,6 +203,18 @@ func _draw() -> void:
 		Vector2(c.x - half + 60.0, c.y - half), Vector2(c.x + half, c.y - half),
 		Vector2(c.x + half - 60.0, c.y + half), Vector2(c.x - half, c.y + half)])
 	draw_colored_polygon(sheen, Color(1, 1, 1, 0.012))
+	# Lacquer clearcoat, second band: another broad, even fainter
+	# diagonal band, offset from the first, so the varnish reads as
+	# depth rather than one flat highlight (skipped on low-end GPUs).
+	if not quality_low:
+		var sheen2 := PackedVector2Array([
+			Vector2(c.x - half + 260.0, c.y - half), Vector2(c.x + half, c.y - half),
+			Vector2(c.x + half - 260.0, c.y + half), Vector2(c.x - half, c.y + half)])
+		draw_colored_polygon(sheen2, Color(1, 1, 1, 0.008))
+	# Directional light pool: a large, very faint warm-white pool
+	# centred up-left of the board centre, so the light has a
+	# direction (top-left) instead of sitting dead-centre.
+	draw_circle(c + Vector2(-90, -110), 340.0, Color(1.0, 0.96, 0.86, 0.02), true, -1.0, true)
 	# Wood grain (fine vertical wavy lines, matching the vertical planks):
 	# thin dark pore + a faint light ridge beside it, so it reads as wood
 	# without muddying the surface.
@@ -177,11 +223,11 @@ func _draw() -> void:
 		for y in range(0, 25):
 			var py := c.y - half + float(y) * (2.0 * half / 24.0)
 			pts.append(Vector2(g["x"] + sin(float(y) * 0.5 + g["phase"]) * g["amp"], py))
-		draw_polyline(pts, Color(0.0, 0.0, 0.0, g["dark"] * 0.7), 1.0)
+		draw_polyline(pts, Color(0.0, 0.0, 0.0, g["dark"] * 0.7), 1.0, true)
 		var pts2 := PackedVector2Array()
 		for pt in pts:
 			pts2.append(pt + Vector2(2.5, 0))
-		draw_polyline(pts2, Color(1.0, 0.9, 0.7, g["dark"] * 0.4), 1.0)
+		draw_polyline(pts2, Color(1.0, 0.9, 0.7, g["dark"] * 0.4), 1.0, true)
 	# Surface border shadow + inner gold line. Shadow kept light
 	# (alpha 0.25 -> 0.10, width 4.0 -> 3.0) so the board edges no
 	# longer go dark; the thin gold inner line is unchanged and crisp.
@@ -191,11 +237,11 @@ func _draw() -> void:
 	# Centre: two concentric circles with the red ring between them (ICF:
 	# outer circle 17 cm diameter, centre spot 3.18 cm) + a solid red
 	# centre spot where the queen starts.
-	draw_arc(c, 70.0, 0, TAU, 64, accent, 3.0)
-	draw_arc(c, 62.0, 0, TAU, 64, Color(accent, 0.45), 14.0)
-	draw_arc(c, 54.0, 0, TAU, 64, accent, 3.0)
-	draw_circle(c, 13.0, accent)
-	draw_arc(c, 13.0, 0, TAU, 32, Color(0.95, 0.93, 0.88, 0.9), 2.0)
+	draw_arc(c, 70.0, 0, TAU, 64, accent, 3.0, true)
+	draw_arc(c, 62.0, 0, TAU, 64, Color(accent, 0.45), 14.0, true)
+	draw_arc(c, 54.0, 0, TAU, 64, accent, 3.0, true)
+	draw_circle(c, 13.0, accent, true, -1.0, true)
+	draw_arc(c, 13.0, 0, TAU, 32, Color(0.95, 0.93, 0.88, 0.9), 2.0, true)
 	if board_id == "signature":
 		draw_string(_font, c + Vector2(-52, 8), "BMS", HORIZONTAL_ALIGNMENT_LEFT, -1, 34, Color(0.85, 0.68, 0.25, 0.55))
 	# Base lines + base circles + diagonal arrows (all four sides).
@@ -209,24 +255,24 @@ func _draw() -> void:
 	for pi in range(pockets.size()):
 		var pp: Vector2 = pockets[pi]
 		var pdir := (pp - c).normalized()
-		draw_line(c + pdir * 78.0, pp - pdir * 36.0, Color(line_c, 0.8), 2.5)
+		draw_line(c + pdir * 78.0, pp - pdir * 36.0, Color(line_c, 0.8), 2.5, true)
 
 	# Pockets: large, glossy, near-black with a small white highlight at
 	# the top and a thin red rim (Carrom Pool look).
 	for i in range(pockets.size()):
 		var p: Vector2 = pockets[i]
-		draw_circle(p, CarromPhysics.POCKET_R + 4.0, Color(0, 0, 0, 0.45))
-		draw_circle(p, CarromPhysics.POCKET_R, Color(0.02, 0.02, 0.02))
-		draw_circle(p, CarromPhysics.POCKET_R - 6.0, Color(0, 0, 0, 0.65))
+		draw_circle(p, CarromPhysics.POCKET_R + 4.0, Color(0, 0, 0, 0.45), true, -1.0, true)
+		draw_circle(p, CarromPhysics.POCKET_R, Color(0.02, 0.02, 0.02), true, -1.0, true)
+		draw_circle(p, CarromPhysics.POCKET_R - 6.0, Color(0, 0, 0, 0.65), true, -1.0, true)
 		# Crisp dark edge where the pocket meets the wood, then the red rim.
-		draw_arc(p, CarromPhysics.POCKET_R + 3.5, 0, TAU, 28, Color(0, 0, 0, 0.5), 1.5)
-		draw_arc(p, CarromPhysics.POCKET_R + 2.0, 0, TAU, 28, Color(0.85, 0.16, 0.14, 0.95), 2.5)
-		draw_arc(p, CarromPhysics.POCKET_R - 2.0, 0, TAU, 24, Color(0.5, 0.4, 0.2, 0.6), 2.0)
-		draw_arc(p, CarromPhysics.POCKET_R - 1.0, PI * 1.2, PI * 1.8, 16, Color(1, 1, 1, 0.8), 3.0)
-		draw_circle(p + Vector2(-6, -7), 3.5, Color(1, 1, 1, 0.9))
+		draw_arc(p, CarromPhysics.POCKET_R + 3.5, 0, TAU, 28, Color(0, 0, 0, 0.5), 1.5, true)
+		draw_arc(p, CarromPhysics.POCKET_R + 2.0, 0, TAU, 28, Color(0.85, 0.16, 0.14, 0.95), 2.5, true)
+		draw_arc(p, CarromPhysics.POCKET_R - 2.0, 0, TAU, 24, Color(0.5, 0.4, 0.2, 0.6), 2.0, true)
+		draw_arc(p, CarromPhysics.POCKET_R - 1.0, PI * 1.2, PI * 1.8, 16, Color(1, 1, 1, 0.8), 3.0, true)
+		draw_circle(p + Vector2(-6, -7), 3.5, Color(1, 1, 1, 0.9), true, -1.0, true)
 		if pocket_glow == i:
 			var t := 0.5 + 0.5 * sin(Time.get_ticks_msec() / 150.0)
-			draw_arc(p, CarromPhysics.POCKET_R + 7.0, 0, TAU, 32, Color(1.0, 0.85, 0.3, 0.6 + 0.4 * t), 4.0)
+			draw_arc(p, CarromPhysics.POCKET_R + 7.0, 0, TAU, 32, Color(1.0, 0.85, 0.3, 0.6 + 0.4 * t), 4.0, true)
 
 	# Coins + striker.
 	for p in pieces:
@@ -239,8 +285,8 @@ func _draw() -> void:
 	# Puffs.
 	for puff in _puffs:
 		var k := float(puff["life"]) / float(puff["max"])
-		draw_circle(puff["pos"], (1.0 - k) * 26.0 + 6.0, Color(puff["color"], k * 0.7))
-		draw_circle(puff["pos"], (1.0 - k) * 14.0 + 3.0, Color(1, 1, 1, k * 0.5))
+		draw_circle(puff["pos"], (1.0 - k) * 26.0 + 6.0, Color(puff["color"], k * 0.7), true, -1.0, true)
+		draw_circle(puff["pos"], (1.0 - k) * 14.0 + 3.0, Color(1, 1, 1, k * 0.5), true, -1.0, true)
 	# Labelled diagram (home only, drawn last so pills sit on top).
 	if show_labels:
 		_draw_labels()
@@ -266,10 +312,10 @@ func _draw_side_markings(c: Vector2, half: float, line_c: Color, accent: Color, 
 	# thin, muted dark-red/brown, NEVER heavy black (Carrom Pool look).
 	# ICF: 47 cm long, outer line 10.15 cm from the frame, lines 3.18 cm
 	# apart — the striker touches both.
-	draw_line(p1a, p1b, Color(0.35, 0.18, 0.10, 0.22), 6.0)
-	draw_line(p1a, p1b, line_c, 3.5)
-	draw_line(p2a, p2b, Color(0.35, 0.18, 0.10, 0.22), 6.0)
-	draw_line(p2a, p2b, line_c, 3.5)
+	draw_line(p1a, p1b, Color(0.35, 0.18, 0.10, 0.22), 6.0, true)
+	draw_line(p1a, p1b, line_c, 3.5, true)
+	draw_line(p2a, p2b, Color(0.35, 0.18, 0.10, 0.22), 6.0, true)
+	draw_line(p2a, p2b, line_c, 3.5, true)
 	# Red base circles: ONE per lane end, centred on the lane centreline
 	# (ICF: 3.18 cm diameter) — exactly 2 per corner, 8 total, with a
 	# clear gap between the pair at each corner. (v3 drew one at the end
@@ -278,9 +324,9 @@ func _draw_side_markings(c: Vector2, half: float, line_c: Color, accent: Color, 
 	# still nearly touched; v5 uses the real ICF spacing.)
 	for px in [-end_off, end_off]:
 		var p: Vector2 = xform * Vector2(px, oc)
-		draw_circle(p, BASE_CIRCLE_R, accent)
-		draw_arc(p, BASE_CIRCLE_R + 1.0, 0, TAU, 24, Color(0.45, 0.08, 0.08, 0.6), 1.5)
-		draw_arc(p, BASE_CIRCLE_R, 0, TAU, 24, Color(0.96, 0.94, 0.88, 0.95), 2.5)
+		draw_circle(p, BASE_CIRCLE_R, accent, true, -1.0, true)
+		draw_arc(p, BASE_CIRCLE_R + 1.0, 0, TAU, 24, Color(0.45, 0.08, 0.08, 0.6), 1.5, true)
+		draw_arc(p, BASE_CIRCLE_R, 0, TAU, 24, Color(0.96, 0.94, 0.88, 0.95), 2.5, true)
 	# Diagonal arrow from this side's base circle toward the NEAREST pocket
 	# (one per corner, like a real board). v2 pointed sides 1 and 3 at the
 	# far pocket; fixed here (side 0 -> BL, 1 -> TR, 2 -> TL, 3 -> BR).
@@ -291,10 +337,10 @@ func _draw_side_markings(c: Vector2, half: float, line_c: Color, accent: Color, 
 	var start := base_c + dir * 16.0
 	var arrow_len := base_c.distance_to(target) - 40.0
 	var end := start + dir * arrow_len
-	draw_line(start, end, Color(0.35, 0.18, 0.10, 0.22), 7.0)
-	draw_line(start, end, accent, 5.0)
-	draw_line(end, end - dir.rotated(0.5) * 18.0, accent, 5.0)
-	draw_line(end, end - dir.rotated(-0.5) * 18.0, accent, 5.0)
+	draw_line(start, end, Color(0.35, 0.18, 0.10, 0.22), 7.0, true)
+	draw_line(start, end, accent, 5.0, true)
+	draw_line(end, end - dir.rotated(0.5) * 18.0, accent, 5.0, true)
+	draw_line(end, end - dir.rotated(-0.5) * 18.0, accent, 5.0, true)
 
 ## Labelled diagram (home only): dark pill + gold border + white text, with
 ## a thin gold leader line to the part. Pill positions are board-local and
@@ -331,8 +377,8 @@ func _draw_labels() -> void:
 		var tw := _font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, 18).x
 		var rect := Rect2(pill_pos, Vector2(tw + 24, 30))
 		# Leader first (under the pill), then the pill, then the text.
-		draw_line(rect.get_center(), target, Color(0.83, 0.69, 0.22, 0.9), 2.0)
-		draw_circle(target, 4.0, Color(0.83, 0.69, 0.22))
+		draw_line(rect.get_center(), target, Color(0.83, 0.69, 0.22, 0.9), 2.0, true)
+		draw_circle(target, 4.0, Color(0.83, 0.69, 0.22), true, -1.0, true)
 		draw_style_box(pill_style, rect)
 		draw_string(_font, rect.position + Vector2(12, 22), text, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(0.96, 0.95, 0.92))
 
@@ -340,9 +386,12 @@ func _draw_piece(p: Dictionary) -> void:
 	var pos: Vector2 = p["pos"]
 	var r: float = p["r"]
 	# Soft drop shadow, deeper than before but still soft: a faint wide
-	# bloom plus a darker core, both offset down-right.
-	draw_circle(pos + Vector2(2, 4), r + 2.0, Color(0, 0, 0, 0.16))
-	draw_circle(pos + Vector2(2, 3), r, Color(0, 0, 0, 0.42))
+	# bloom plus a darker core, both offset down-right. A third, widest
+	# faintest layer (skipped on low-end GPUs) softens the edge further.
+	if not quality_low:
+		draw_circle(pos + Vector2(3, 6), r + 5.0, Color(0, 0, 0, 0.08), true, -1.0, true)
+	draw_circle(pos + Vector2(2, 4), r + 2.0, Color(0, 0, 0, 0.16), true, -1.0, true)
+	draw_circle(pos + Vector2(2, 3), r, Color(0, 0, 0, 0.42), true, -1.0, true)
 	var kind: String = p["kind"]
 	# Glossy two-tone discs (Carrom Pool look): coloured ring + bright
 	# centre, white specular highlight, soft shadow. Light coins keep a
@@ -374,33 +423,40 @@ func _draw_piece(p: Dictionary) -> void:
 	# Glowing orange halo around the striker on your turn.
 	if kind == "striker" and your_turn:
 		var pulse := 0.55 + 0.35 * sin(Time.get_ticks_msec() / 180.0)
-		draw_circle(pos, r + 7.0, Color(1.0, 0.55, 0.15, 0.10 + 0.08 * pulse))
-		draw_arc(pos, r + 7.0, 0, TAU, 40, Color(1.0, 0.55, 0.15, 0.5 + 0.3 * pulse), 3.0)
+		draw_circle(pos, r + 7.0, Color(1.0, 0.55, 0.15, 0.10 + 0.08 * pulse), true, -1.0, true)
+		draw_arc(pos, r + 7.0, 0, TAU, 40, Color(1.0, 0.55, 0.15, 0.5 + 0.3 * pulse), 3.0, true)
+		# Second, wider pulsing ring (skipped on low-end GPUs).
+		if not quality_low:
+			draw_circle(pos, r + 14.0, Color(1.0, 0.55, 0.15, 0.05 + 0.04 * pulse), true, -1.0, true)
+	# Steady warm glow ring around the queen so she pops on any board.
+	if kind == "queen":
+		draw_circle(pos, r + 6.0, Color(1.0, 0.75, 0.25, 0.10), true, -1.0, true)
+		draw_arc(pos, r + 6.0, 0, TAU, 40, Color(1.0, 0.75, 0.25, 0.35), 3.0, true)
 	# Layered edge: thick outline band, then the coloured rim ring, then
 	# the face. Nothing here changes r or pos (physics is untouched).
 	var outline_w := r * 0.23
-	draw_circle(pos, r, outline)
-	draw_circle(pos, r - outline_w, rim)
-	draw_circle(pos, r - outline_w - 2.0, base)
+	draw_circle(pos, r, outline, true, -1.0, true)
+	draw_circle(pos, r - outline_w, rim, true, -1.0, true)
+	draw_circle(pos, r - outline_w - 2.0, base, true, -1.0, true)
 	# Two-tone centre disc (coins only; the striker gets a sun emblem).
 	if kind != "striker":
-		draw_circle(pos, r * 0.46, center_col)
-		draw_arc(pos, r * 0.46, 0, TAU, 24, rim, 2.0)
+		draw_circle(pos, r * 0.46, center_col, true, -1.0, true)
+		draw_arc(pos, r * 0.46, 0, TAU, 24, rim, 2.0, true)
 	# Gloss highlight + bright specular dot (coins look glossy, not flat).
 	# Kept inside the face so the white gloss never washes out the edge.
-	draw_circle(pos + Vector2(-r * 0.22, -r * 0.25), r * 0.30, Color(1, 1, 1, 0.5))
-	draw_circle(pos + Vector2(-r * 0.30, -r * 0.34), r * 0.14, Color(1, 1, 1, 0.85))
+	draw_circle(pos + Vector2(-r * 0.22, -r * 0.25), r * 0.30, Color(1, 1, 1, 0.5), true, -1.0, true)
+	draw_circle(pos + Vector2(-r * 0.30, -r * 0.34), r * 0.14, Color(1, 1, 1, 0.85), true, -1.0, true)
 	# Bottom inner shadow for depth, hugging the face edge.
-	draw_arc(pos, r - outline_w - 3.0, PI * 0.15, PI * 0.85, 16, Color(0, 0, 0, 0.30), 2.0)
+	draw_arc(pos, r - outline_w - 3.0, PI * 0.15, PI * 0.85, 16, Color(0, 0, 0, 0.30), 2.0, true)
 	if kind == "striker":
 		# Sun emblem: red-orange face + rays (Carrom Pool gold striker).
 		var sun := Color(0.9, 0.35, 0.12)
-		draw_circle(pos, r * 0.3, sun)
+		draw_circle(pos, r * 0.3, sun, true, -1.0, true)
 		for k in range(8):
 			var a := TAU * float(k) / 8.0
 			var d := Vector2(cos(a), sin(a))
-			draw_line(pos + d * (r * 0.36), pos + d * (r * 0.52), sun, 2.0)
-		draw_arc(pos, r * 0.62, 0, TAU, 32, rim, 2.0)
+			draw_line(pos + d * (r * 0.36), pos + d * (r * 0.52), sun, 2.0, true)
+		draw_arc(pos, r * 0.62, 0, TAU, 32, rim, 2.0, true)
 
 func _draw_aim_guide() -> void:
 	var from := aim_from
@@ -422,15 +478,15 @@ func _draw_aim_guide() -> void:
 	var arrow_end := arrow_start + dir * 44.0
 	var arrow_dark := Color(0.25, 0.1, 0.0, 0.85)
 	var arrow_col := Color(1.0, 0.55, 0.1)
-	draw_line(arrow_start, arrow_end, arrow_dark, 11.0)
-	draw_line(arrow_end, arrow_end - dir.rotated(0.45) * 18.0, arrow_dark, 11.0)
-	draw_line(arrow_end, arrow_end - dir.rotated(-0.45) * 18.0, arrow_dark, 11.0)
-	draw_line(arrow_start, arrow_end, arrow_col, 7.0)
-	draw_line(arrow_end, arrow_end - dir.rotated(0.45) * 18.0, arrow_col, 7.0)
-	draw_line(arrow_end, arrow_end - dir.rotated(-0.45) * 18.0, arrow_col, 7.0)
+	draw_line(arrow_start, arrow_end, arrow_dark, 11.0, true)
+	draw_line(arrow_end, arrow_end - dir.rotated(0.45) * 18.0, arrow_dark, 11.0, true)
+	draw_line(arrow_end, arrow_end - dir.rotated(-0.45) * 18.0, arrow_dark, 11.0, true)
+	draw_line(arrow_start, arrow_end, arrow_col, 7.0, true)
+	draw_line(arrow_end, arrow_end - dir.rotated(0.45) * 18.0, arrow_col, 7.0, true)
+	draw_line(arrow_end, arrow_end - dir.rotated(-0.45) * 18.0, arrow_col, 7.0, true)
 	# Large faint translucent circle around the striker area.
-	draw_circle(from, 64.0, Color(1, 1, 1, 0.07))
-	draw_arc(from, 64.0, 0, TAU, 48, Color(1, 1, 1, 0.28), 2.5)
+	draw_circle(from, 64.0, Color(1, 1, 1, 0.07), true, -1.0, true)
+	draw_arc(from, 64.0, 0, TAU, 48, Color(1, 1, 1, 0.28), 2.5, true)
 	# Aim-assist: one cushion bounce.
 	if aim_assist and hit_coin == null and wall_t >= 0.0 and wall_t < max_len:
 		var n := _wall_normal(hit_pos)
@@ -452,7 +508,7 @@ func _draw_aim_guide() -> void:
 		var contact := hit_pos + coin_dir * CarromPhysics.STRIKER_R
 		var defl_len := 130.0 if not aim_assist else 300.0
 		_draw_dashed(contact, contact + coin_dir * defl_len, Color(1.0, 0.85, 0.3, 0.95), 4.5)
-		draw_arc(coin_pos, CarromPhysics.COIN_R + 4.0, 0, TAU, 24, Color(1.0, 0.85, 0.3, 0.95), 3.5)
+		draw_arc(coin_pos, CarromPhysics.COIN_R + 4.0, 0, TAU, 24, Color(1.0, 0.85, 0.3, 0.95), 3.5, true)
 		var sdir: Vector2 = pred["striker_dir"]
 		if sdir.length() > 0.05:
 			var tlen := 90.0 if not aim_assist else 200.0
@@ -460,8 +516,8 @@ func _draw_aim_guide() -> void:
 	# Power hint: striker ring fills with power. Dark underlay arc
 	# first so the coloured ring reads on pale wood.
 	var power_col := Color(0.3, 0.9, 0.4).lerp(Color(0.95, 0.2, 0.15), aim_power)
-	draw_arc(from, CarromPhysics.STRIKER_R + 8.0, 0, TAU, 32, Color(0, 0, 0, 0.35), 8.0)
-	draw_arc(from, CarromPhysics.STRIKER_R + 8.0, -PI / 2.0, -PI / 2.0 + TAU * aim_power, 32, power_col, 6.0)
+	draw_arc(from, CarromPhysics.STRIKER_R + 8.0, 0, TAU, 32, Color(0, 0, 0, 0.35), 8.0, true)
+	draw_arc(from, CarromPhysics.STRIKER_R + 8.0, -PI / 2.0, -PI / 2.0 + TAU * aim_power, 32, power_col, 6.0, true)
 
 func _draw_dashed(from: Vector2, to: Vector2, color: Color, width: float) -> void:
 	var total := from.distance_to(to)
@@ -474,8 +530,8 @@ func _draw_dashed(from: Vector2, to: Vector2, color: Color, width: float) -> voi
 		var b := from + dir * minf(d + dash, total)
 		# Dark underlay first so the dash reads on any board colour,
 		# then the coloured dash on top.
-		draw_line(a, b, Color(0, 0, 0, 0.55), width + 3.0)
-		draw_line(a, b, color, width)
+		draw_line(a, b, Color(0, 0, 0, 0.55), width + 3.0, true)
+		draw_line(a, b, color, width, true)
 		d += dash + gap
 
 func _draw_dotted(from: Vector2, to: Vector2, color: Color) -> void:
@@ -485,13 +541,13 @@ func _draw_dotted(from: Vector2, to: Vector2, color: Color) -> void:
 	var dir := (to - from).normalized()
 	# Faint dark underlay line beneath the dots (keeps the dotted
 	# Carrom Pool feel while giving the dots something to sit on).
-	draw_line(from, to, Color(0, 0, 0, 0.30), 7.0)
+	draw_line(from, to, Color(0, 0, 0, 0.30), 7.0, true)
 	var d := 0.0
 	while d < total:
 		var p := from + dir * d
 		# Dark halo ring + bright core: reads on pale wood and dark boards.
-		draw_circle(p, 5.5, Color(0, 0, 0, 0.55))
-		draw_circle(p, 3.5, color)
+		draw_circle(p, 5.5, Color(0, 0, 0, 0.55), true, -1.0, true)
+		draw_circle(p, 3.5, color, true, -1.0, true)
 		d += 12.0
 
 ## Pure hit prediction for the aim guide (also used by the aim test):
