@@ -63,6 +63,7 @@ func _initialize() -> void:
 	_test_v11_p2p()
 	_test_v11_session_persist()
 	_test_match_fix()
+	_test_queue_insert_fix()
 	_test_auth_fix_loading()
 	_test_google_signin_deep_link()
 	_test_coin_colours_literal()
@@ -1303,6 +1304,35 @@ func _test_v11_session_persist() -> void:
 	_check("session: lobby empty state says nobody is online", joined2.contains("No players online right now"))
 	lobby.free()
 	lobby2.free()
+
+## Queue-insert fix (2026-11-28): the b2706f4 build never joined the
+## queue. Its [MATCH] log called String() on the INT table/stake
+## fields, and GDScript 4.3 has NO String(int) constructor — not even
+## through a Variant — so queue_insert threw BEFORE the POST, the
+## caller got a dict with no "error" key, and the user saw the
+## "(connection failed)" DEFAULT. str() converts anything. Pure.
+func _test_queue_insert_fix() -> void:
+	# The exact log expression queue_insert prints, on a real row:
+	# table/stake are ints — String() on them throws, str() works.
+	var qrow: Dictionary = NetClient.queue_row("uid-1", "Me", 5, 0, 100, "2p")
+	var log_line := "[MATCH] queue_insert -> player=%s mode=%s table=%s stake=%s" % [
+		str(qrow.get("id", "")), str(qrow.get("mode", "")), str(qrow.get("table", "")),
+		str(qrow.get("stake", ""))]
+	_check("queuefix: the queue_insert log formats int table/stake", log_line == "[MATCH] queue_insert -> player=uid-1 mode=2p table=0 stake=100", log_line)
+	# str() also covers the other shapes the row can carry (nulls).
+	var odd := {"id": "uid-1", "mode": "2p", "table": null, "stake": null}
+	var odd_line := "table=%s stake=%s" % [str(odd.get("table", "")), str(odd.get("stake", ""))]
+	_check("queuefix: str() formats null table/stake without throwing", odd_line.begins_with("table=") and odd_line.contains("stake="), odd_line)
+	# Retry predicate: transport failure (status 0) retries once; an
+	# HTTP answer (403/404/5xx) never retries; success never retries.
+	_check("queuefix: transport failure (status 0) retries", SupabaseClient.should_retry_queue_insert({"ok": false, "status": 0, "data": null, "error": "Connection failed (could not connect to the server)."}))
+	_check("queuefix: HTTP 403 does NOT retry", not SupabaseClient.should_retry_queue_insert({"ok": false, "status": 403, "data": null, "error": "Forbidden"}))
+	_check("queuefix: HTTP 500 does NOT retry", not SupabaseClient.should_retry_queue_insert({"ok": false, "status": 500, "data": null, "error": "Internal Server Error"}))
+	_check("queuefix: success does NOT retry", not SupabaseClient.should_retry_queue_insert({"ok": true, "status": 201, "data": [], "error": ""}))
+	# Result-code names: every transport failure gets a real string.
+	_check("queuefix: result names cover the transport failures", SupabaseClient._http_result_name(HTTPRequest.RESULT_CANT_CONNECT) != "" and SupabaseClient._http_result_name(HTTPRequest.RESULT_TIMEOUT) != "" and SupabaseClient._http_result_name(HTTPRequest.RESULT_TLS_HANDSHAKE_ERROR) != "")
+	_check("queuefix: unknown result code still names itself", SupabaseClient._http_result_name(99).contains("99"))
+	_check("queuefix: method names cover the verbs used", SupabaseClient._http_method_name(HTTPClient.METHOD_POST) == "POST" and SupabaseClient._http_method_name(HTTPClient.METHOD_DELETE) == "DELETE")
 
 ## Auth fix + loading look (2026-11-27): the Google-provider flag in
 ## backend_config.json, and the redirect-error matcher that decides

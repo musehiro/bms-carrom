@@ -564,9 +564,18 @@ func _queue_insert_async(player_name: String, level: int, table: int, stake: int
 		# pretend to search. (The live cause was the missing id-based
 		# UPDATE policy + the missing user_id in this body — both now
 		# fixed; a failure today is real, not a stale-row artefact.)
+		# Never surface the bare "connection failed" default as if it
+		# were the cause (2026-11-28: the user saw exactly that while
+		# the real fault was a String(int) throw inside queue_insert
+		# that aborted the POST — the default hid it). queue_insert /
+		# _http always return a real "error" string; an empty one means
+		# the response carried no detail, and the message says so.
 		_p2p_searching = false
-		print("[MATCH] queue insert failed — stopping search: %s" % String(res.get("error", "connection failed")))
-		queue_failed.emit("Could not join the matchmaking queue (%s). If it keeps failing, sign out and back in, then try again." % String(res.get("error", "connection failed")))
+		var why := String(res.get("error", ""))
+		if why == "":
+			why = "no error detail returned by the queue request (unexpected empty response)"
+		print("[MATCH] queue insert failed — stopping search: %s" % why)
+		queue_failed.emit("Could not join the matchmaking queue (%s). If it keeps failing, sign out and back in, then try again." % why)
 
 ## ONE shared entry into a formed Supabase match (B1): fetch the row
 ## (unless the caller already has it from a poll), verify I am in it

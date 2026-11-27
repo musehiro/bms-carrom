@@ -224,11 +224,66 @@ func _headers(auth: bool) -> PackedStringArray:
 	h.append("Content-Type: application/json")
 	return h
 
+## Human name for an HTTPRequest result code (for error strings and
+## logs — a bare "HTTP 0" never says why a request died). Pure.
+static func _http_result_name(result: int) -> String:
+	match result:
+		HTTPRequest.RESULT_SUCCESS:
+			return "ok"
+		HTTPRequest.RESULT_CHUNKED_BODY_SIZE_MISMATCH:
+			return "chunked body size mismatch"
+		HTTPRequest.RESULT_CANT_CONNECT:
+			return "could not connect to the server"
+		HTTPRequest.RESULT_CANT_RESOLVE:
+			return "could not resolve the server address"
+		HTTPRequest.RESULT_CONNECTION_ERROR:
+			return "connection error"
+		HTTPRequest.RESULT_TLS_HANDSHAKE_ERROR:
+			return "TLS handshake failed"
+		HTTPRequest.RESULT_NO_RESPONSE:
+			return "server gave no response"
+		HTTPRequest.RESULT_BODY_SIZE_LIMIT_EXCEEDED:
+			return "response too large"
+		HTTPRequest.RESULT_BODY_DECOMPRESS_FAILED:
+			return "response could not be decompressed"
+		HTTPRequest.RESULT_REQUEST_FAILED:
+			return "request failed"
+		HTTPRequest.RESULT_DOWNLOAD_FILE_CANT_OPEN:
+			return "download file could not be opened"
+		HTTPRequest.RESULT_DOWNLOAD_FILE_WRITE_ERROR:
+			return "download file write failed"
+		HTTPRequest.RESULT_REDIRECT_LIMIT_REACHED:
+			return "too many redirects"
+		HTTPRequest.RESULT_TIMEOUT:
+			return "timed out"
+		_:
+			return "unknown transport error (%d)" % result
+
+## Human name for an HTTPClient method (logs only). Pure.
+static func _http_method_name(method: int) -> String:
+	match method:
+		HTTPClient.METHOD_GET:
+			return "GET"
+		HTTPClient.METHOD_POST:
+			return "POST"
+		HTTPClient.METHOD_PUT:
+			return "PUT"
+		HTTPClient.METHOD_PATCH:
+			return "PATCH"
+		HTTPClient.METHOD_DELETE:
+			return "DELETE"
+		_:
+			return "HTTP %d" % method
+
 ## One HTTP call. Returns {ok, status, data, error}. `path` is appended
 ## to base_url (already starts with "/"). `timeout_sec` caps the wait —
 ## the default 15 s is for user-initiated calls (OTP verify, sign-in);
 ## session restore at startup passes a shorter cap so a hanging network
-## cannot stall the home screen. Never throws.
+## cannot stall the home screen. Never throws. Every failure path
+## returns a dict WITH a non-empty "error" string (2026-11-28: the
+## queue insert surfaced the "(connection failed)" DEFAULT because a
+## caller got a dict with no error key at all — that must never happen
+## again; a transport failure names its HTTPRequest result code).
 func _http(method: int, path: String, body: Dictionary = {}, auth: bool = true, extra_headers: PackedStringArray = PackedStringArray(), timeout_sec: float = 15.0) -> Dictionary:
 	if not configured:
 		return {"ok": false, "status": 0, "data": null, "error": "Supabase is not configured yet (backend_config.json is empty)."}
@@ -239,12 +294,24 @@ func _http(method: int, path: String, body: Dictionary = {}, auth: bool = true, 
 	for extra in extra_headers:
 		headers.append(extra)
 	var payload := JSON.stringify(body) if not body.is_empty() else ""
-	var err := req.request(base_url + path, headers, method, payload)
+	var url := base_url + path
+	var err := req.request(url, headers, method, payload)
 	if err != OK:
+		print("[HTTP] request could not start: %s %s err=%s" % [_http_method_name(method), url, error_string(err)])
 		req.queue_free()
 		return {"ok": false, "status": 0, "data": null, "error": "Could not start the request (%s)." % error_string(err)}
 	var res: Array = await req.request_completed
 	req.queue_free()
+	# res[0] is the HTTPRequest result code — it MUST be checked: a
+	# transport failure (connection refused, TLS error, timeout) fires
+	# request_completed with result != SUCCESS, status 0 and an empty
+	# body, which the old code read as "Request failed (HTTP 0)." with
+	# no hint of the cause. Name the result instead.
+	var result := int(res[0])
+	if result != HTTPRequest.RESULT_SUCCESS:
+		var rname := _http_result_name(result)
+		print("[HTTP] request failed: %s %s result=%d (%s)" % [_http_method_name(method), url, result, rname])
+		return {"ok": false, "status": 0, "data": null, "error": "Connection failed (%s)." % rname}
 	var status := int(res[1])
 	var raw: PackedByteArray = res[3]
 	var text := raw.get_string_from_utf8()
@@ -559,21 +626,45 @@ func update_invite(invite_id: String, status: String) -> Dictionary:
 ## existing row 403'd. The row is stamped with user_id = the Auth uid
 ## (alongside id) so it satisfies either policy convention; the SQL
 ## side adds an id-based UPDATE policy too. Never throws.
+## ROOT CAUSE (2026-11-28 03:3x): this function's [MATCH] log used
+## String(row.get("table")) / String(row.get("stake")) — but table and
+## stake are INTS, and GDScript 4.3 has NO String(int) constructor, not
+## even through a Variant: the print threw "Nonexistent 'String'
+## constructor" BEFORE the await, so the POST never left the phone and
+## the caller saw the "(connection failed)" DEFAULT. str() converts
+## anything (int, String, null) — NEVER use String() on a value that
+## might be an int. A transport failure (status 0) is retried ONCE.
 func queue_insert(row: Dictionary) -> Dictionary:
 	if user_id != "" and String(row.get("user_id", "")) == "":
 		row["user_id"] = user_id
-	print("[MATCH] queue_insert -> player=%s mode=%s table=%s stake=%s t=%s" % [
-		String(row.get("id", "")), String(row.get("mode", "")), String(row.get("table", "")),
-		String(row.get("stake", "")), Time.get_datetime_string_from_system(true, false)])
-	var res := await _http(HTTPClient.METHOD_POST, "/rest/v1/matchmaking_queue?on_conflict=id",
-		row, true, PackedStringArray(["Prefer: return=representation,resolution=merge-duplicates"]))
+	print("[MATCH] queue_insert -> player=%s mode=%s table=%s stake=%s url=%s t=%s" % [
+		str(row.get("id", "")), str(row.get("mode", "")), str(row.get("table", "")),
+		str(row.get("stake", "")), base_url + "/rest/v1/matchmaking_queue?on_conflict=id",
+		Time.get_datetime_string_from_system(true, false)])
+	var res := await _queue_insert_once(row)
+	if should_retry_queue_insert(res):
+		print("[MATCH] queue_insert transport failure, retrying once: %s" % str(res.get("error", "")))
+		res = await _queue_insert_once(row)
 	print("[MATCH] queue_insert <- ok=%s status=%s body=%s" % [
 		str(res.get("ok", false)), str(res.get("status", 0)), JSON.stringify(res.get("data"))])
-	if not bool(res["ok"]):
+	if not bool(res.get("ok", false)):
 		return res
 	var rows: Array = res["data"] if res["data"] is Array else []
 	return {"ok": true, "status": int(res["status"]),
 		"data": rows[0] if not rows.is_empty() else {}, "error": ""}
+
+## Retry the queue insert ONLY on a transport failure (status 0 — the
+## request never reached the server, so a second attempt is safe and
+## cannot double-insert). An HTTP error (403/404/5xx) is NOT retried:
+## the server answered, and retrying a 4xx would only repeat it.
+## Pure — unit-tested.
+static func should_retry_queue_insert(res: Dictionary) -> bool:
+	return not bool(res.get("ok", false)) and int(res.get("status", 0)) == 0
+
+## One queue upsert attempt (POST with the merge-duplicates Prefer).
+func _queue_insert_once(row: Dictionary) -> Dictionary:
+	return await _http(HTTPClient.METHOD_POST, "/rest/v1/matchmaking_queue?on_conflict=id",
+		row, true, PackedStringArray(["Prefer: return=representation,resolution=merge-duplicates"]))
 
 ## Delete my queue row (cancel / timeout / matched).
 func queue_delete(my_id: String) -> Dictionary:

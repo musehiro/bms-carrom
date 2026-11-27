@@ -78,6 +78,10 @@ class State:
         self.otp_redirect_fail = False  # test seam: reject OTP requests
         # that carry redirect_to (a fresh Supabase project with no
         # Redirect URLs allow-listed) — the client must retry code-only.
+        self.last_post = None  # test seam: the last POST seen
+        # {"method", "path", "headers", "body"} — read back via
+        # GET /__test__/last_post so tests can assert the exact
+        # request the client sent (URL, body, Prefer header).
 
     def new_user(self, email=None):
         uid = str(uuid.uuid4())
@@ -288,6 +292,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/health":
             self._json(200, {"ok": True})
             return
+        if path == "/__test__/last_post":
+            with STATE.lock:
+                last = STATE.last_post
+            self._json(200, last if last is not None else {})
+            return
         if path == "/realtime/v1/websocket":
             self._ws_upgrade()
             return
@@ -371,6 +380,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         body = self._read_body()
+        with STATE.lock:
+            STATE.last_post = {"method": "POST", "path": self.path,
+                               "headers": dict(self.headers), "body": body}
         if path == "/auth/v1/signup":
             uid = STATE.new_user()
             self._json(200, STATE.session(uid))

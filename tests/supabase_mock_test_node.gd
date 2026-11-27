@@ -42,6 +42,9 @@ var _mock_pid := -1
 var _saved_cfg := ""
 var _had_save := false
 var _signal_seen := false
+var _count_server: TCPServer = null # retry test: accepts + instantly drops
+var _count_accepted := 0 # connections the counting server has taken
+var _counting := false # drain the counting server in _process while set
 
 func _ready() -> void:
 	_run()
@@ -50,6 +53,13 @@ func _process(delta: float) -> void:
 	if _done:
 		return
 	_wait += delta
+	if _counting and _count_server != null:
+		# Retry test: accept each pending connection and drop it at
+		# once (the client sees a transport failure, status 0).
+		while _count_server.is_connection_available():
+			var peer := _count_server.take_connection()
+			_count_accepted += 1
+			peer.disconnect_from_host()
 	if _wait > 120.0:
 		_fail("mock test timed out")
 		_finish()
@@ -241,6 +251,75 @@ func _run() -> void:
 	_check("mock: discovery poll finds + joins the waiting match", discovered and Net._p2p_match_id == mid)
 	Net.cancel_p2p_search()
 	MatchState.clear()
+	# --- Queue insert (2026-11-28): the b2706f4 build never joined the
+	# queue — its [MATCH] log called String() on the INT table/stake
+	# fields, and GDScript 4.3 has no String(int) constructor, so
+	# queue_insert threw BEFORE the POST and the caller saw the
+	# "(connection failed)" default. These tests prove the POST leaves
+	# the phone with the right URL/body/Prefer header, every failure
+	# path carries a real non-empty error, and a transport failure
+	# retries exactly once then fails fast with the real error.
+	var qrow := NetClient.queue_row(Supabase.user_id, Save.player_name, 1, 0, 100, "2p")
+	var qins := await Supabase.queue_insert(qrow)
+	_check("mock: queue_insert posts the row (regression: String(int) throw)", bool(qins.get("ok", false)))
+	var qlast := await Supabase._http(HTTPClient.METHOD_GET, "/__test__/last_post", {}, true)
+	var qlp: Dictionary = qlast.get("data", {})
+	_check("mock: queue upsert hits the on_conflict URL", String(qlp.get("path", "")).begins_with("/rest/v1/matchmaking_queue?on_conflict=id"), String(qlp.get("path", "")))
+	var qlb: Dictionary = qlp.get("body", {})
+	_check("mock: queue upsert body has all 7 fields", String(qlb.get("id", "")) == Supabase.user_id and String(qlb.get("user_id", "")) == Supabase.user_id and String(qlb.get("display_name", "")) == Save.player_name and int(qlb.get("level", 0)) == 1 and int(qlb.get("table", -1)) == 0 and int(qlb.get("stake", -1)) == 100 and String(qlb.get("mode", "")) == "2p")
+	var qlh: Dictionary = qlp.get("headers", {})
+	var qprefer := String(qlh.get("Prefer", qlh.get("prefer", "")))
+	_check("mock: queue upsert sends the merge-duplicates Prefer", qprefer.contains("return=representation") and qprefer.contains("resolution=merge-duplicates"), qprefer)
+	var qrows := await Supabase._http(HTTPClient.METHOD_GET, "/rest/v1/matchmaking_queue", {}, true)
+	_check("mock: queue row landed on the server", (qrows.get("data", []) as Array).size() == 1)
+	# Every failure path carries a real non-empty error string.
+	var nf := await Supabase._http(HTTPClient.METHOD_GET, "/rest/v1/definitely-not-a-table", {}, true)
+	_check("mock: HTTP 404 returns a real non-empty error", not bool(nf.get("ok", false)) and String(nf.get("error", "")) != "", String(nf.get("error", "")))
+	Supabase.set_config("http://127.0.0.1:9", "test-anon-key")
+	var dead := await Supabase._http(HTTPClient.METHOD_GET, "/rest/v1/profiles", {}, true)
+	_check("mock: transport failure returns status 0 + a real error (never the bare default)", not bool(dead.get("ok", false)) and int(dead.get("status", 0)) == 0 and String(dead.get("error", "")) != "" and String(dead.get("error", "")) != "connection failed", String(dead.get("error", "")))
+	# Transport failure retries exactly once, then fails fast with the
+	# real error. The counting server accepts and instantly drops the
+	# connection (status 0 both times); _process drains it. Point the
+	# client AT the counting server first (the dead-port config above
+	# would never reach it).
+	_count_server = TCPServer.new()
+	_count_accepted = 0
+	_counting = _count_server.listen(18081) == OK
+	_check("mock: counting server listens for the retry test", _counting)
+	if _counting:
+		Supabase.set_config("http://127.0.0.1:18081", "test-anon-key")
+		var qdead := await Supabase.queue_insert(qrow)
+		await get_tree().create_timer(0.5).timeout
+		_check("mock: queue_insert on a dead connection fails fast with the real error", not bool(qdead.get("ok", false)) and String(qdead.get("error", "")).begins_with("Connection failed ("), String(qdead.get("error", "")))
+		_check("mock: transport failure retried exactly once (2 attempts)", _count_accepted == 2, str(_count_accepted))
+		_counting = false
+		_count_server.stop()
+		_count_server = null
+	Supabase.set_config(MOCK_URL, "test-anon-key", "")
+	# Back on the mock: the row is still there (the dead attempts never
+	# reached it) — clean it up so later tests see a fresh queue.
+	var qdel := await Supabase.queue_delete(Supabase.user_id)
+	_check("mock: queue row deleted after the test", bool(qdel.get("ok", false)))
+	# Net-level: start_p2p_search against the mock joins the queue and
+	# keeps searching (no queue_failed) — the full path the user taps.
+	# A FRESH player id: the mock still holds the invite match from
+	# the section above, and the search tick's matches poll would
+	# legitimately join it (the player IS in it) — that would end the
+	# search before the check. The fresh id has no matches, so the
+	# search stays searching. Restore the real uid right after.
+	var search_uid := Supabase.user_id
+	Supabase.user_id = "22222222-3333-4444-5555-666666666666"
+	var qfailed: Array = []
+	var qfail_cb := func(msg: String) -> void: qfailed.append(msg)
+	Net.queue_failed.connect(qfail_cb)
+	Net.start_p2p_search(Save.player_name, 1, 0, 100, "2p")
+	await get_tree().create_timer(1.0).timeout
+	_check("mock: start_p2p_search joins the queue with no failure", qfailed.is_empty() and Net._p2p_searching, JSON.stringify(qfailed))
+	Net.cancel_p2p_search()
+	Net.queue_failed.disconnect(qfail_cb)
+	Supabase.user_id = search_uid
+	await Supabase.queue_delete("22222222-3333-4444-5555-666666666666")
 	# --- 4p group: send to 3, all accept -> ready ---
 	var targets := [
 		{"id": "user-nimal", "name": "Nimal Perera"},
