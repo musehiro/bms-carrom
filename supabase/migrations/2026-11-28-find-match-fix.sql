@@ -4,6 +4,17 @@
 -- hyhlhngybzwnungnshff (dead project).
 -- Run AFTER supabase/migrations/2026-11-28-grants.sql.
 --
+-- CORRECTION 2026-11-28 02:29 — the live test (RUN 4) proved the function
+-- body has a REAL bug I missed on the first read: the final cleanup
+--   delete ... where id = any (select array_agg(p.id) from unnest(...) as p)
+-- compares uuid = uuid[] (42883) and aborts the whole call — the match
+-- insert rolls back. It only fires when a match is actually found, which
+-- is why find_match NEVER created a match. Fixed below to
+--   where id = any (select p.id from unnest(all_players) as p).
+-- The INSERT's (select array_agg(...)) is a scalar subquery and is fine.
+-- So this file now changes TWO things vs the old live body: p_strict
+-- (additive) + the DELETE fix. Everything else is byte-identical in logic.
+--
 -- CORRECTION 2026-11-28 01:51 — the live function logic was traced
 -- call-by-call against the queue state and is CORRECT. Do NOT rewrite it:
 --   * 14-call burst 18:41:05-18:41:21 UTC (Bm): matched:false was CORRECT,
@@ -105,7 +116,7 @@ begin
           players_json, 'waiting')
   returning id into match_id;
   delete from public.matchmaking_queue
-    where id = any (select array_agg(p.id) from unnest(all_players) as p);
+    where id = any (select p.id from unnest(all_players) as p);
   return jsonb_build_object('matched', true, 'match_id', match_id, 'players', players_json);
 end;
 $$;
