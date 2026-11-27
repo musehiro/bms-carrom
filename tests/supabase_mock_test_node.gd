@@ -251,6 +251,38 @@ func _run() -> void:
 	_check("mock: discovery poll finds + joins the waiting match", discovered and Net._p2p_match_id == mid)
 	Net.cancel_p2p_search()
 	MatchState.clear()
+	# --- Invite join fix (2026-11-28 round 3): the two phones sent
+	# invites to EACH OTHER, so two matches existed with the same
+	# players and each phone joined its own — both waited forever in
+	# different channels. These tests prove the tick polls for an
+	# existing match BEFORE calling the RPC (no second match is
+	# formed), and that while a peer has not connected the client
+	# migrates to a strictly newer match with the same players.
+	# A second accepted group (sent by me, so the mock's inviter-coin
+	# check passes — the mock has no profile for user-nimal).
+	var sentB := await Friends.send_invite("user-nimal", "Nimal Perera", 100)
+	_check("mock: invitefix second group sent", bool(sentB.get("ok", false)))
+	var gidB: String = sentB.get("group_id", "")
+	var grpB := await Supabase.list_group_invites(gidB)
+	var accB := await Friends.accept_invite((grpB.get("data", []) as Array)[0])
+	_check("mock: invitefix second group accepted", bool(accB.get("ok", false)))
+	Net.start_p2p_invite(gidB, Save.player_name, 1, 100, "2p", 0, true)
+	var joined_existing := await _wait_for_condition(func() -> bool: return MatchState.match_id == mid, 6.0)
+	_check("mock: invitefix pre-RPC poll joins the existing match, no RPC", joined_existing and Net._p2p_match_id == mid)
+	var matches_after := await Supabase._http(HTTPClient.METHOD_GET, "/rest/v1/matches?select=*", {}, true)
+	var mrows: Array = matches_after.get("data", []) if matches_after.get("data") is Array else []
+	_check("mock: invitefix pre-RPC poll formed no second match", mrows.size() == 1, str(mrows.size()))
+	# Settle migration: a newer match with the same players appears
+	# (the other phone's RPC fired before either side discovered the
+	# first one) — the client must move to it while the peer has not
+	# connected, so both phones converge on the same match.
+	var rpcB := await Supabase.call_create_match_from_invites(gidB)
+	var midB := String((rpcB.get("data", {}) as Dictionary).get("match_id", ""))
+	_check("mock: invitefix second match created for the settle test", bool(rpcB.get("ok", false)) and midB != "" and midB != mid)
+	var migrated := await _wait_for_condition(func() -> bool: return Net._p2p_match_id == midB, 8.0)
+	_check("mock: invitefix settle tick migrates to the newer same-players match", migrated and MatchState.match_id == midB)
+	Net.cancel_p2p_search()
+	MatchState.clear()
 	# --- Queue insert (2026-11-28): the b2706f4 build never joined the
 	# queue — its [MATCH] log called String() on the INT table/stake
 	# fields, and GDScript 4.3 has no String(int) constructor, so
@@ -316,10 +348,36 @@ func _run() -> void:
 	Net.start_p2p_search(Save.player_name, 1, 0, 100, "2p")
 	await get_tree().create_timer(1.0).timeout
 	_check("mock: start_p2p_search joins the queue with no failure", qfailed.is_empty() and Net._p2p_searching, JSON.stringify(qfailed))
+	# Self-heal (2026-11-28 round 3): the live log showed find_match
+	# answering "You are not in the queue." when the tick fired before
+	# the async insert landed. The tick now re-inserts the row and
+	# keeps searching instead of treating it as a dead end.
+	await get_tree().create_timer(0.5).timeout
+	await Supabase.queue_delete("22222222-3333-4444-5555-666666666666")
+	await get_tree().create_timer(4.0).timeout
+	var qafter := await Supabase._http(HTTPClient.METHOD_GET, "/rest/v1/matchmaking_queue?select=*", {}, true)
+	var qrows_heal: Array = qafter.get("data", []) if qafter.get("data") is Array else []
+	_check("mock: invitefix self-heal re-inserts the queue row", qrows_heal.any(func(r: Dictionary) -> bool: return String(r.get("id", "")) == "22222222-3333-4444-5555-666666666666"), JSON.stringify(qrows_heal))
+	_check("mock: invitefix self-heal keeps searching (no queue_failed)", qfailed.is_empty() and Net.is_p2p_searching(), JSON.stringify(qfailed))
 	Net.cancel_p2p_search()
 	Net.queue_failed.disconnect(qfail_cb)
 	Supabase.user_id = search_uid
 	await Supabase.queue_delete("22222222-3333-4444-5555-666666666666")
+	# RPC ok:false survival (2026-11-28 round 3): a group that is not
+	# fully accepted yet answers the RPC with {"ok": false} — the old
+	# tick swallowed it with NO log. The tick must log it and keep
+	# searching, not fail. A FRESH player id (as above): the pre-RPC
+	# poll must find no match for this id, so the RPC actually runs.
+	var sentC := await Friends.send_invite("user-nimal", "Nimal Perera", 100)
+	_check("mock: invitefix pending group sent", bool(sentC.get("ok", false)))
+	var gidC: String = sentC.get("group_id", "")
+	var rpc_uid := Supabase.user_id
+	Supabase.user_id = "33333333-4444-5555-6666-777777777777"
+	Net.start_p2p_invite(gidC, Save.player_name, 1, 100, "2p", 0, true)
+	await get_tree().create_timer(3.5).timeout
+	_check("mock: invitefix RPC ok:false is survived (still searching)", Net._p2p_invite_searching)
+	Net.cancel_p2p_search()
+	Supabase.user_id = rpc_uid
 	# --- 4p group: send to 3, all accept -> ready ---
 	var targets := [
 		{"id": "user-nimal", "name": "Nimal Perera"},

@@ -60,6 +60,7 @@ func _ready() -> void:
 	Net.lobby_ready_received.connect(_on_lobby_ready_received) # v11 lobby
 	Net.opponent_left.connect(_on_lobby_opponent_left) # v11 lobby only — guarded on _lobby_active; mid-match drops stay with MatchScreen
 	Net.queue_failed.connect(_on_queue_failed)
+	Net.match_notice.connect(_toast) # non-fatal matchmaking notices (validation) — toast only, search keeps polling
 	Net.connection_lost.connect(_on_connection_lost) # L4
 	# F13 Phase 2 (v11): the server's authoritative payout, forwarded
 	# to the match screen (ignored when no match is running).
@@ -201,6 +202,14 @@ func _clear() -> void:
 	# v11: the lobby popup is a child too — never leave a dangling ref
 	# to a freed panel (the lobby functions null these themselves, but
 	# _clear can also run from paths that never touched the lobby).
+	# _lobby_active MUST reset here too (2026-11-28): _clear frees the
+	# lobby panel, so a flag left true would be stale — and a stale
+	# true blocks every later _join_invite_room forever.
+	if _lobby_active:
+		print("[MATCH] LOBBY_ACTIVE false via _clear (stale flag reset — panel freed)")
+		_lobby_active = false
+		_lobby = null
+		_lobby_data = {}
 	_lobby_panel = null
 	_lobby_status = null
 	_lobby_countdown = null
@@ -293,12 +302,25 @@ func _on_invite_accept_chosen(invite: Dictionary) -> void:
 		if not bool(res.get("ok", false)):
 			_toast(String(res.get("error", "Could not accept the invite.")))
 			return
+	# STAKE_PICKER_OPEN_REQUEST (2026-11-28): the acceptor cannot reach
+	# _join_invite_room until this picker confirms — log the request so
+	# a stall here is visible instead of silent.
+	print("[MATCH] STAKE_PICKER_OPEN_REQUEST flow=invite_accept from=%s group=%s" % [
+		String(invite.get("from_name", "?")), String(invite.get("group_id", ""))])
 	_show_stake_picker(func(stake: int) -> void:
+		print("[MATCH] STAKE_PICKER_CONFIRMED flow=invite_accept group=%s stake=%s" % [
+			String(invite.get("group_id", "")), str(stake)])
 		_join_invite_room(String(invite.get("group_id", "")), String(invite.get("mode", "2p")), stake, false),
-		"Accepting %s's invite — choose YOUR stake (any amount up to your balance). Winner takes the pot (both stakes)." % String(invite.get("from_name", "a friend")))
+		"Accepting %s's invite — choose YOUR stake (any amount up to your balance). Winner takes the pot (both stakes)." % String(invite.get("from_name", "a friend")),
+		"",
+		func() -> void:
+			print("[MATCH] STAKE_PICKER_CANCELLED flow=invite_accept group=%s" % String(invite.get("group_id", "")))
+			_toast("Stake not chosen — the invite stays accepted; tap it again in the invite box to join."))
 
 func _on_invite_send_chosen(player: Dictionary) -> void:
+	print("[MATCH] STAKE_PICKER_OPEN_REQUEST flow=invite_send to=%s" % String(player.get("display_name", "?")))
 	_show_stake_picker(func(stake: int) -> void:
+		print("[MATCH] STAKE_PICKER_CONFIRMED flow=invite_send to=%s stake=%s" % [String(player.get("display_name", "?")), str(stake)])
 		var res := await Friends.send_invite(String(player.get("id", "")), String(player.get("display_name", "?")), stake)
 		if bool(res.get("ok", false)):
 			_toast("Invite sent to %s!" % String(player.get("display_name", "?")))
@@ -307,7 +329,10 @@ func _on_invite_send_chosen(player: Dictionary) -> void:
 			Net.start_match_discovery(String(res.get("group_id", "")), "2p")
 		else:
 			_toast(String(res.get("error", "Could not send the invite."))),
-		"Invite %s to a 1 vs 1 match — choose YOUR stake (any amount up to your balance). Winner takes the pot." % String(player.get("display_name", "?")))
+		"Invite %s to a 1 vs 1 match — choose YOUR stake (any amount up to your balance). Winner takes the pot." % String(player.get("display_name", "?")),
+		"",
+		func() -> void:
+			print("[MATCH] STAKE_PICKER_CANCELLED flow=invite_send to=%s" % String(player.get("display_name", "?"))))
 
 func _on_group_invite_send_chosen(players: Array) -> void:
 	# 3-player guard (v11): exactly 2 picks can never be a match.
@@ -317,7 +342,9 @@ func _on_group_invite_send_chosen(players: Array) -> void:
 	if players.size() == 2:
 		_toast("Matches are 2 players (invite 1 friend) or 4 players (invite 3 friends) — 3-player matches are not supported.")
 		return
+	print("[MATCH] STAKE_PICKER_OPEN_REQUEST flow=group_invite_send players=%d" % players.size())
 	_show_stake_picker(func(stake: int) -> void:
+		print("[MATCH] STAKE_PICKER_CONFIRMED flow=group_invite_send players=%d stake=%s" % [players.size(), str(stake)])
 		var res := await Friends.send_group_invite(players, stake)
 		if bool(res.get("ok", false)):
 			_toast("4-player invite sent — the match starts when all accept!")
@@ -325,7 +352,10 @@ func _on_group_invite_send_chosen(players: Array) -> void:
 			Net.start_match_discovery(String(res.get("group_id", "")), "4p")
 		else:
 			_toast(String(res.get("error", "Could not send the invites."))),
-		"Invite %d friends to a doubles match — choose YOUR stake (any amount up to your balance). The winning TEAM splits the pot." % players.size())
+		"Invite %d friends to a doubles match — choose YOUR stake (any amount up to your balance). The winning TEAM splits the pot." % players.size(),
+		"",
+		func() -> void:
+			print("[MATCH] STAKE_PICKER_CANCELLED flow=group_invite_send players=%d" % players.size()))
 
 func _on_invite_received(invite: Dictionary) -> void:
 	_toast("New invite from %s!" % String(invite.get("from_name", "a friend")))
@@ -401,11 +431,30 @@ func _on_group_failed(group_id: String, reason: String) -> void:
 	_toast(reason)
 
 func _join_invite_room(group_id: String, mode: String, stake: int, is_inviter: bool) -> void:
+	# JOIN_INVITE_ENTER (2026-11-28): log every entry with the guard
+	# state — the single most useful line for the next phone test is
+	# the acceptor's last [MATCH] line, and this is where the invite
+	# flow either starts or silently dies.
+	var _match_open := _match != null and is_instance_valid(_match)
+	print("[MATCH] JOIN_INVITE_ENTER group=%s mode=%s stake=%s is_inviter=%s lobby_active=%s match_open=%s" % [
+		group_id, mode, str(stake), str(is_inviter), str(_lobby_active), str(_match_open)])
 	# Already in a lobby / match (e.g. discovery found this match
 	# first): joining again would start a second resolution loop whose
-	# 180 s timeout could kill the live lobby — do nothing.
-	if _lobby_active or _match != null:
-		return
+	# 180 s timeout could kill the live lobby — do nothing. NEVER
+	# silent (2026-11-28): the old bare `return` hid the stall.
+	if _lobby_active or _match_open:
+		# Stale-flag self-heal: the flag says a lobby is open but the
+		# panel is gone (a _clear() freed it without resetting the
+		# flag) — reset and continue instead of blocking every later
+		# invite forever. A live lobby panel means the return is
+		# benign (the lobby is already open for this match).
+		if _lobby_active and (_lobby_panel == null or not is_instance_valid(_lobby_panel)):
+			print("[MATCH] INVITE_BLOCKED stale lobby flag — no live panel, resetting and continuing")
+			_close_lobby()
+		else:
+			print("[MATCH] INVITE_BLOCKED lobby_active=%s match_open=%s — already in a lobby/match, not starting a second resolution loop" % [str(_lobby_active), str(_match_open)])
+			_toast("You're already in a lobby — finish or cancel it first.")
+			return
 	# The invite-resolution loop supersedes the sender-side discovery
 	# poll (it polls the same matches rows, plus the RPC) — stop the
 	# discovery so only one poll loop runs.
@@ -453,6 +502,7 @@ func _join_invite_room(group_id: String, mode: String, stake: int, is_inviter: b
 		# v11 P2P: no server room — both sides resolve the match via
 		# create_match_from_invites, then connect phone-to-phone.
 		# Net emits `matched` when the mesh is up; the lobby runs as usual.
+		print("[MATCH] INVITE_P2P_START group=%s mode=%s stake=%s is_inviter=%s" % [group_id, mode, str(stake), str(is_inviter)])
 		Net.start_p2p_invite(group_id, Save.player_name, Save.level(), stake, mode, _search_table, is_inviter)
 	elif Net.is_connected_to_server():
 		# F13 Phase 2: send the Supabase identity with the invite join
@@ -875,9 +925,18 @@ func _on_online_lobby_refresh() -> void:
 ## The same picker with a caller-chosen continuation + intro note, so
 ## the LAN flows (host/join) can reuse it with their own wording.
 ## `title` overrides the picker's title (World Tour uses its own).
-func _show_stake_picker(on_confirm: Callable, note: String = "", title: String = "") -> void:
+func _show_stake_picker(on_confirm: Callable, note: String = "", title: String = "", on_cancel: Callable = Callable()) -> void:
 	var parent: Control = _home if _home else self
 	var pop := UiKit.stake_picker(Save.coins, on_confirm, note, title) if title != "" else UiKit.stake_picker(Save.coins, on_confirm, note)
+	# STAKE_PICKER_CANCELLED (2026-11-28): the picker's X dismisses it
+	# WITHOUT calling on_confirm — the old code never logged that, so
+	# an abandoned picker looked exactly like a stalled join. The
+	# close button's own handler (inside UiKit.stake_picker) frees the
+	# popup; this second handler only logs + runs the caller's cancel.
+	pop["close"].pressed.connect(func() -> void:
+		print("[MATCH] STAKE_PICKER_CANCELLED")
+		if on_cancel.is_valid():
+			on_cancel.call())
 	parent.add_child(pop["dim"])
 
 # ------------------------------------------------------- nearby (v6, LAN)
@@ -1186,6 +1245,7 @@ func _open_lobby(data: Dictionary) -> void:
 	_lobby_data = data
 	_lobby = OnlineLobby.from_matched(data, Save.player_name, Save.level(), _search_stake)
 	_lobby_active = true
+	print("[MATCH] LOBBY_ACTIVE true (lobby opened match=%s)" % String(data.get("match_id", "?")))
 	_lobby_elapsed = 0.0
 	_lobby_row_labels.clear()
 	_lobby_panel = Control.new()
@@ -1316,6 +1376,8 @@ func _cancel_lobby() -> void:
 
 ## Free the lobby popup and clear lobby state (no navigation).
 func _close_lobby() -> void:
+	if _lobby_active:
+		print("[MATCH] LOBBY_ACTIVE false (lobby closed)")
 	_lobby_active = false
 	_lobby = null
 	_lobby_data = {}

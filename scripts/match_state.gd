@@ -128,6 +128,39 @@ static func pick_match_row(rows: Array, my_id: String, group_id: String = "", mo
 			return newest.call(moded)
 	return newest.call(valid)
 
+## Pick the NEWER match to migrate to while waiting for the peer
+## (2026-11-28 split-brain fix): two cross-invites can form TWO
+## matches with the same players, one per group, and each phone joins
+## the one its own RPC made — then both wait forever in different
+## channels. While the peer has not connected yet, the phone keeps
+## polling; if a match appears with the SAME player set and a NEWER
+## created_at, both phones converge on it (newest is a total order,
+## so both sides pick the same row). Returns {} when there is no such
+## row. Pure — tested.
+static func pick_newer_match(rows: Array, my_id: String, current_match_id: String, current_created_at: String, current_player_ids: Array) -> Dictionary:
+	var mine: Array = (current_player_ids as Array).duplicate()
+	mine.sort()
+	var best: Dictionary = {}
+	var best_created := ""
+	for r in rows:
+		if not (r is Dictionary):
+			continue
+		if String(r.get("id", "")) == "" or String(r.get("id", "")) == current_match_id:
+			continue
+		if not bool(validate_match_row(r, my_id).get("ok", false)):
+			continue
+		var ids: Array = (r.get("player_ids", []) as Array).duplicate()
+		ids.sort()
+		if ids != mine:
+			continue # a match with different players — never migrate to it
+		var created := String(r.get("created_at", ""))
+		if created == "" or created <= current_created_at:
+			continue # not strictly newer — the current match stays
+		if best.is_empty() or created > best_created:
+			best = r
+			best_created = created
+	return best
+
 ## Store a validated row. Returns false (and stores nothing) when the
 ## row fails validation — the caller keeps polling instead of joining
 ## a match that is not theirs / not joinable.

@@ -63,6 +63,7 @@ func _initialize() -> void:
 	_test_v11_p2p()
 	_test_v11_session_persist()
 	_test_match_fix()
+	_test_invite_join_fix()
 	_test_queue_insert_fix()
 	_test_auth_fix_loading()
 	_test_google_signin_deep_link()
@@ -1265,6 +1266,59 @@ func _test_match_fix() -> void:
 		"topic": "realtime:public:invites", "event": "phx_reply",
 		"payload": {"status": "ok", "response": {}}, "ref": "1"}))
 	_check("matchfix: accepted invites join still parses as joined", String(join_ok.get("kind", "")) == "joined")
+
+func _test_invite_join_fix() -> void:
+	# Round 3 (2026-11-28): two cross-invites formed TWO matches with
+	# the same players, and each phone joined its own — both waited
+	# forever in different channels. The fixes: poll before the RPC
+	# (join the existing match instead of forming a second one),
+	# migrate to a strictly newer same-players match while the peer
+	# has not connected, self-heal when find_match says the queue row
+	# is gone, and never silently swallow a validation failure.
+	var MatchStateScript: GDScript = load("res://scripts/match_state.gd")
+	var me := "uid-me"
+	var opp := "uid-opp"
+	var players2 := [
+		{"id": me, "name": "Me", "level": 5, "stake": 100, "seat": 0},
+		{"id": opp, "name": "Opp", "level": 5, "stake": 100, "seat": 1},
+	]
+	var players3 := [
+		{"id": me, "name": "Me", "level": 5, "stake": 100, "seat": 0},
+		{"id": opp, "name": "Opp", "level": 5, "stake": 100, "seat": 1},
+		{"id": "uid-third", "name": "Third", "level": 5, "stake": 100, "seat": 2},
+	]
+	var row_a := {"id": "m-a", "group_id": "grp-a", "mode": "2p", "table": 0,
+		"player_ids": [me, opp], "players": players2, "status": "waiting",
+		"created_at": "2026-11-28T04:28:51+00:00"}
+	var row_b := {"id": "m-b", "group_id": "grp-b", "mode": "2p", "table": 0,
+		"player_ids": [me, opp], "players": players2, "status": "waiting",
+		"created_at": "2026-11-28T04:29:12+00:00"}
+	var row_older := {"id": "m-older", "group_id": "grp-old", "mode": "2p", "table": 0,
+		"player_ids": [me, opp], "players": players2, "status": "waiting",
+		"created_at": "2026-11-28T04:28:00+00:00"}
+	var row_3p := {"id": "m-3p", "group_id": "grp-3p", "mode": "2p", "table": 0,
+		"player_ids": [me, opp, "uid-third"], "players": players3, "status": "waiting",
+		"created_at": "2026-11-28T04:30:00+00:00"}
+	var row_started := {"id": "m-started", "group_id": "grp-s", "mode": "2p", "table": 0,
+		"player_ids": [me, opp], "players": players2, "status": "started",
+		"created_at": "2026-11-28T04:31:00+00:00"}
+	# pick_newer_match: the newer same-players match wins.
+	_check("invitefix: newer same-players match is picked", String(MatchStateScript.pick_newer_match([row_b], me, "m-a", "2026-11-28T04:28:51+00:00", [me, opp]).get("id", "")) == "m-b")
+	_check("invitefix: newest of several newer rows wins", String(MatchStateScript.pick_newer_match([row_a, row_b], me, "m-older", "2026-11-28T04:28:00+00:00", [me, opp]).get("id", "")) == "m-b")
+	_check("invitefix: older row is never picked", MatchStateScript.pick_newer_match([row_older], me, "m-a", "2026-11-28T04:28:51+00:00", [me, opp]).is_empty())
+	_check("invitefix: same match id is never picked", MatchStateScript.pick_newer_match([row_a], me, "m-a", "2026-11-28T04:28:51+00:00", [me, opp]).is_empty())
+	_check("invitefix: different players are never picked", MatchStateScript.pick_newer_match([row_3p], me, "m-a", "2026-11-28T04:28:51+00:00", [me, opp]).is_empty())
+	_check("invitefix: invalid (started) row is never picked", MatchStateScript.pick_newer_match([row_started], me, "m-a", "2026-11-28T04:28:51+00:00", [me, opp]).is_empty())
+	_check("invitefix: no rows means no migration", MatchStateScript.pick_newer_match([], me, "m-a", "2026-11-28T04:28:51+00:00", [me, opp]).is_empty())
+	# pick_match_row already prefers the group; within one group the
+	# newest row wins (the second RPC for the same group returns the
+	# same match, so this is the discovery path's tiebreak).
+	_check("invitefix: pick takes the newest row of the same group", String(MatchStateScript.pick_match_row([row_a, row_b], me, "grp-b").get("id", "")) == "m-b")
+	# Self-heal predicate: exactly the SQL function's error text.
+	_check("invitefix: 'not in the queue' error is detected", NetClient.is_not_in_queue_error({"matched": false, "error": "You are not in the queue."}))
+	_check("invitefix: plain matched:false is not the queue error", not NetClient.is_not_in_queue_error({"matched": false}))
+	_check("invitefix: a different error is not the queue error", not NetClient.is_not_in_queue_error({"matched": false, "error": "A player staked more coins than they own."}))
+	_check("invitefix: empty data is not the queue error", not NetClient.is_not_in_queue_error({}))
 
 func _test_v11_session_persist() -> void:
 	# Refresh-token grant path (pure).

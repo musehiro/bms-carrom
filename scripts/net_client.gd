@@ -61,6 +61,11 @@ signal shot_received(data: Dictionary)
 signal state_received(data: Dictionary)
 signal opponent_left
 signal queue_failed(message: String)
+## Non-fatal matchmaking notice (2026-11-28): a join/validation problem
+## worth showing the player WITHOUT killing the search — Main toasts it
+## and the search keeps polling. queue_failed is fatal (it closes the
+## search popup), so a transient failure must never use it.
+signal match_notice(message: String)
 ## F13 Phase 2 (v11): the server's authoritative payout for a finished
 ## online match — {type:"settlement", payout:int, pot:int,
 ## verified:true}. Main forwards it to MatchScreen, which credits the
@@ -97,6 +102,9 @@ const P2P_CONNECT_TIMEOUT := 20.0
 const P2P_POLL_INTERVAL := 2.0
 ## P2P invite wait (same as the old server room hold): 180 s.
 const P2P_INVITE_TIMEOUT := 180.0
+## find_match's "not in the queue" error (SQL function text): the
+## self-heal re-inserts the row when the RPC answers exactly this.
+const NOT_IN_QUEUE_ERROR := "You are not in the queue."
 
 ## True when the WebRTC classes loaded (webrtc-native plugin present).
 ## The startup guard: ONLINE degrades gracefully when false — Main
@@ -133,6 +141,10 @@ var _p2p_connected_peers := {} # peer_id -> bool (mesh peer_connected)
 var _p2p_all_connected := false
 var _p2p_connect_elapsed := 0.0
 var _p2p_searching := false # random queue search in progress (P2P)
+var _p2p_search_starting := false # insert in flight — the first tick
+	# must not fire until the queue row is confirmed landed (2026-11-28:
+	# the tick fired on the next frame, before the async insert landed,
+	# and find_match answered "You are not in the queue.").
 var _p2p_search := {} # {name, level, table, stake, mode, strict}
 var _p2p_search_elapsed := 0.0
 var _p2p_widened := false # ±4 window after 30 s (plan §1.3)
@@ -141,6 +153,12 @@ var _p2p_poll_busy := false # ONE flag for the whole tick (find_match +
 	# the discovery polls): held from tick start to tick end on EVERY
 	# path, so two find_match RPCs can never overlap and a slow call
 	# can never start a second one behind it (the 2026-11-28 burst).
+var _p2p_last_validate_fail_id := "" # last match_id whose validation
+var _p2p_last_validate_fail_reason := "" # failure was toasted — the
+	# tick retries every 2 s, so the same failure must not toast-spam.
+var _p2p_settle_accum := 0.0 # settle poll cadence while waiting for
+	# the peer (split-brain convergence, 2026-11-28)
+var _p2p_settle_busy := false # one settle poll at a time
 var _p2p_invite_searching := false # invite match resolution in progress
 var _p2p_invite := {} # {group_id, name, level, stake, mode, table, is_inviter}
 var _p2p_invite_elapsed := 0.0
@@ -245,6 +263,15 @@ func _process(delta: float) -> void:
 			_p2p_invite_searching = false
 			_fail_p2p("Not everyone joined in time — ask your friend to send the invite again.")
 			return
+	# Settle poll (2026-11-28 split-brain): joined a match but the peer
+	# has not connected yet — keep polling for a NEWER match with the
+	# same players and migrate to it, so two cross-invites converge on
+	# one match instead of waiting forever in different channels.
+	if _p2p_match_id != "" and not _p2p_all_connected and not _p2p_failed and not _p2p_joining:
+		_p2p_settle_accum += delta
+		if _p2p_settle_accum >= P2P_POLL_INTERVAL and not _p2p_settle_busy:
+			_p2p_settle_accum = 0.0
+			_p2p_settle_tick()
 	if _mesh != null and not _p2p_all_connected and not _p2p_failed:
 		_p2p_poll_connections(delta)
 
@@ -532,14 +559,24 @@ func start_p2p_search(player_name: String, level: int, table: int, stake: int = 
 	_p2p_widened = widen
 	_p2p_poll_accum = P2P_POLL_INTERVAL
 	_p2p_poll_busy = false
-	_p2p_searching = true
-	print("[MATCH] search started player=%s mode=%s table=%s stake=%s widen=%s strict=%s" % [
+	_p2p_search_starting = true
+	print("[MATCH] search starting player=%s mode=%s table=%s stake=%s widen=%s strict=%s — waiting for the queue insert before the first tick" % [
 		_p2p_my_id, mode, str(table), str(stake), str(widen), str(strict)])
-	# Queue insert is async — the poll loop below starts regardless;
-	# find_match errors ("not in the queue") until the row lands, and
-	# the first successful poll pairs us. A failed insert surfaces on
-	# the next poll as a queue error instead of hanging silently.
-	_queue_insert_async(player_name, level, table, stake, mode)
+	# The first find_match tick fires ONLY once the queue insert is
+	# CONFIRMED landed (2026-11-28: the tick fired on the next frame,
+	# before the async insert landed, and find_match answered "You are
+	# not in the queue." — a wasted tick on every search). A failed
+	# insert fails fast inside _queue_insert_async, as before.
+	var ok := await _queue_insert_async(player_name, level, table, stake, mode)
+	if not _p2p_search_starting:
+		return # cancelled while the insert was in flight
+	_p2p_search_starting = false
+	if not ok:
+		return # _queue_insert_async already surfaced the failure
+	_p2p_searching = true
+	_p2p_poll_accum = P2P_POLL_INTERVAL # first find_match on the next frame
+	print("[MATCH] search started player=%s mode=%s table=%s stake=%s widen=%s strict=%s (queue confirmed)" % [
+		_p2p_my_id, mode, str(table), str(stake), str(widen), str(strict)])
 
 ## The matchmaking_queue row for PostgREST. user_id rides alongside id
 ## (both = the Auth uid): the live queue UPDATE policy was keyed on
@@ -550,14 +587,17 @@ static func queue_row(my_id: String, player_name: String, level: int, table: int
 	return {"id": my_id, "user_id": my_id, "display_name": player_name,
 		"level": level, "table": table, "stake": maxi(0, stake), "mode": mode}
 
-func _queue_insert_async(player_name: String, level: int, table: int, stake: int, mode: String) -> void:
+## Insert my queue row. Returns true once the row is confirmed on the
+## server, false when the insert failed (the failure is already
+## surfaced) or the search was cancelled while it was in flight.
+func _queue_insert_async(player_name: String, level: int, table: int, stake: int, mode: String) -> bool:
 	var row := queue_row(_p2p_my_id, player_name, level, table, stake, mode)
 	var sb2 := _sb()
 	if sb2 == null:
-		return
+		return false
 	var res = await sb2.queue_insert(row)
-	if not _p2p_searching:
-		return # cancelled while the insert was in flight
+	if not _p2p_search_starting:
+		return false # cancelled while the insert was in flight
 	if not bool(res.get("ok", false)):
 		# A failed insert is SHOWN, not searched past: without a queue
 		# row find_match can never pair us, so polling on would only
@@ -571,11 +611,22 @@ func _queue_insert_async(player_name: String, level: int, table: int, stake: int
 		# _http always return a real "error" string; an empty one means
 		# the response carried no detail, and the message says so.
 		_p2p_searching = false
+		_p2p_search_starting = false
 		var why := String(res.get("error", ""))
 		if why == "":
 			why = "no error detail returned by the queue request (unexpected empty response)"
 		print("[MATCH] queue insert failed — stopping search: %s" % why)
 		queue_failed.emit("Could not join the matchmaking queue (%s). If it keeps failing, sign out and back in, then try again." % why)
+		return false
+	print("[MATCH] queue insert confirmed player=%s mode=%s stake=%s" % [_p2p_my_id, mode, str(stake)])
+	return true
+
+## Pure self-heal check (2026-11-28): find_match answered "You are not
+## in the queue." — my row is gone (cancelled elsewhere / expired), so
+## the tick re-inserts it and keeps going instead of polling forever
+## against a row that does not exist. Pure — unit-tested.
+static func is_not_in_queue_error(data: Dictionary) -> bool:
+	return String(data.get("error", "")) == NOT_IN_QUEUE_ERROR
 
 ## ONE shared entry into a formed Supabase match (B1): fetch the row
 ## (unless the caller already has it from a poll), verify I am in it
@@ -608,7 +659,18 @@ func join_match(match_id: String, known_row: Dictionary = {}) -> bool:
 	var MatchStateScript: GDScript = load("res://scripts/match_state.gd")
 	var v: Dictionary = MatchStateScript.validate_match_row(row, _p2p_my_id)
 	if not bool(v.get("ok", false)):
-		print("[MATCH] join_match %s rejected: %s" % [match_id, String(v.get("reason", ""))])
+		# NEVER silent: a validation failure means the server handed
+		# us a match we cannot join — log the whole row (it says why)
+		# and toast it once per match+reason, so the player is not
+		# left staring at WAITING forever. The search keeps polling:
+		# this is a notice, not a failure (queue_failed would close
+		# the popup and kill the search).
+		var reason := String(v.get("reason", ""))
+		print("[MATCH] VALIDATE_FAIL match=%s reason=%s row=%s" % [match_id, reason, JSON.stringify(row)])
+		if match_id != _p2p_last_validate_fail_id or reason != _p2p_last_validate_fail_reason:
+			_p2p_last_validate_fail_id = match_id
+			_p2p_last_validate_fail_reason = reason
+			match_notice.emit("Couldn't join that match (%s). Still searching…" % reason)
 		_p2p_joining = false
 		return false
 	var players: Array = []
@@ -618,6 +680,7 @@ func join_match(match_id: String, known_row: Dictionary = {}) -> bool:
 		players = ms.players
 	else:
 		players = row.get("players", [])
+	print("[MATCH] VALIDATE_OK match=%s seat=%d players=%d" % [match_id, int(v.get("my_seat", -1)), players.size()])
 	_p2p_joining = false
 	_begin_p2p_match(match_id, players)
 	return _p2p_match_id == match_id
@@ -679,6 +742,15 @@ func _p2p_tick() -> void:
 				await join_match(String(data.get("match_id", "")))
 				_p2p_poll_busy = false
 				return
+			elif is_not_in_queue_error(data):
+				# Self-heal (2026-11-28): my queue row is gone — put it
+				# back and keep polling. No fail-fast: the re-insert
+				# either lands (the next tick pairs us) or the next
+				# tick says "not in the queue" again and we retry.
+				print("[MATCH] find_match says not in queue — re-inserting row (self-heal)")
+				var s := _p2p_search
+				var healed = await sb3.queue_insert(queue_row(_p2p_my_id, String(s.get("name", "Player")), int(s.get("level", 1)), int(s.get("table", 0)), int(s.get("stake", 0)), String(s.get("mode", "2p"))))
+				print("[MATCH] self-heal re-insert ok=%s" % str(bool(healed.get("ok", false))))
 		else:
 			# 404 / 5xx / network error: TRANSIENT — log it and keep
 			# polling. The next tick retries (2026-11-28: the one
@@ -701,10 +773,37 @@ func _p2p_tick() -> void:
 	if _p2p_invite_searching:
 		var gid := String(_p2p_invite.get("group_id", ""))
 		var gmode := String(_p2p_invite.get("mode", "2p"))
+		var MatchStateScript2: GDScript = load("res://scripts/match_state.gd")
+		# Pre-RPC check (2026-11-28 split-brain): a match for this
+		# player pair may ALREADY exist — the other side's accept
+		# formed it (two cross-invites = two groups for the same two
+		# players). Join the newest such match instead of calling the
+		# RPC and forming a SECOND match in a different channel.
+		var pre_grows: Array = await sb3.poll_matches_by_group(gid)
+		if not _p2p_invite_searching:
+			_p2p_poll_busy = false
+			return
+		var pre_row: Dictionary = MatchStateScript2.pick_match_row(pre_grows, _p2p_my_id, gid, gmode)
+		if pre_row.is_empty():
+			var pre_mrows: Array = await sb3.poll_matches_for_me(_p2p_my_id)
+			if not _p2p_invite_searching:
+				_p2p_poll_busy = false
+				return
+			pre_row = MatchStateScript2.pick_match_row(pre_mrows, _p2p_my_id, gid, gmode)
+		if not pre_row.is_empty():
+			print("[MATCH] invite pre-RPC poll found match %s — joining it, no RPC call" % String(pre_row.get("id", "")))
+			await join_match(String(pre_row.get("id", "")), pre_row)
+			_p2p_poll_busy = false
+			return
 		var res2 = await sb3.call_create_match_from_invites(gid)
 		if not _p2p_invite_searching:
 			_p2p_poll_busy = false
 			return
+		# INVITE_RPC_RESPONSE (2026-11-28): log EVERY RPC answer with
+		# its data — an {"ok": false} answer used to be silently
+		# ignored, which hid the invite stall completely.
+		print("[MATCH] INVITE_RPC_RESPONSE group=%s ok=%s status=%s data=%s" % [
+			gid, str(res2.get("ok", false)), str(res2.get("status", 0)), JSON.stringify(res2.get("data", {}))])
 		if bool(res2.get("ok", false)):
 			var data2: Dictionary = res2.get("data", {})
 			if bool(data2.get("ok", false)):
@@ -712,6 +811,7 @@ func _p2p_tick() -> void:
 				await join_match(String(data2.get("match_id", "")))
 				_p2p_poll_busy = false
 				return
+			print("[MATCH] INVITE_RPC answered ok=false: %s" % JSON.stringify(data2))
 		else:
 			print("[MATCH] create_match_from_invites failed (transient, retrying next tick): ok=%s status=%s error=%s" % [
 				str(res2.get("ok", false)), str(res2.get("status", 0)), String(res2.get("error", ""))])
@@ -719,7 +819,6 @@ func _p2p_tick() -> void:
 		if not _p2p_invite_searching:
 			_p2p_poll_busy = false
 			return
-		var MatchStateScript2: GDScript = load("res://scripts/match_state.gd")
 		var grow: Dictionary = MatchStateScript2.pick_match_row(grows, _p2p_my_id, gid, gmode)
 		if not grow.is_empty():
 			await join_match(String(grow.get("id", "")), grow)
@@ -759,6 +858,7 @@ func _p2p_tick() -> void:
 ## status='waiting' filter in find_match is therefore harmless.
 func cancel_p2p_search() -> void:
 	_p2p_searching = false
+	_p2p_search_starting = false
 	_p2p_invite_searching = false
 	stop_match_discovery()
 	if _p2p_my_id != "":
@@ -789,7 +889,7 @@ func start_p2p_invite(group_id: String, player_name: String, level: int, stake: 
 	_p2p_poll_accum = P2P_POLL_INTERVAL # first RPC call on the next frame
 	_p2p_poll_busy = false
 	_p2p_invite_searching = true
-	print("[MATCH] invite resolution started player=%s group=%s mode=%s is_inviter=%s" % [
+	print("[MATCH] INVITE_SEARCH_START player=%s group=%s mode=%s is_inviter=%s" % [
 		_p2p_my_id, group_id, mode, str(is_inviter)])
 
 ## Build the `matched` payload Main (and the lobby) consume, from the
@@ -822,14 +922,18 @@ static func p2p_matched_payload(players: Array, my_seat: int, match_id: String) 
 ## re-searches from the toast, the old search never resumes behind
 ## their back).
 func _begin_p2p_match(match_id: String, players: Array) -> void:
+	print("[MATCH] P2P_BEGIN match=%s players=%d" % [match_id, players.size()])
 	if match_id == "" or players.is_empty():
+		print("[MATCH] P2P_BEGIN_ABORT match=%s reason=empty match or no players" % match_id)
 		_fail_p2p("The match could not start — no match was formed. Try searching again.")
 		return
 	if not webrtc_available():
+		print("[MATCH] P2P_BEGIN_ABORT match=%s reason=webrtc unavailable" % match_id)
 		_fail_p2p("Online play is unavailable in this build — the WebRTC plugin did not load.")
 		return
 	_p2p_my_seat = _seat_of(players, _p2p_my_id)
 	if _p2p_my_seat < 0:
+		print("[MATCH] P2P_BEGIN_ABORT match=%s reason=no seat for me in the roster" % match_id)
 		_fail_p2p("The match could not start — you are not in it. Try searching again.")
 		return
 	# The search is over: a match was found (join_match validated it).
@@ -855,10 +959,12 @@ func _begin_p2p_match(match_id: String, players: Array) -> void:
 		sb7.queue_delete(_p2p_my_id)
 	_mesh = ClassDB.instantiate("WebRTCMultiplayerPeer")
 	if _mesh == null:
+		print("[MATCH] P2P_BEGIN_ABORT match=%s reason=mesh class unavailable" % match_id)
 		_fail_p2p("Online play is unavailable in this build — the WebRTC plugin did not load.")
 		return
 	var err: int = _mesh.create_mesh(_p2p_my_seat + 1)
 	if err != OK:
+		print("[MATCH] P2P_BEGIN_ABORT match=%s reason=create_mesh %s" % [match_id, error_string(err)])
 		_mesh = null
 		_fail_p2p("Could not start the online connection (%s)." % error_string(err))
 		return
@@ -872,6 +978,7 @@ func _begin_p2p_match(match_id: String, players: Array) -> void:
 		if P2PSignalling.should_offer(_p2p_my_seat, seat):
 			var conn = _p2p_create_conn(seat + 1)
 			if conn == null:
+				print("[MATCH] P2P_BEGIN_ABORT match=%s reason=connection to seat %d unavailable" % [match_id, seat])
 				_fail_p2p("Could not start the online connection.")
 				return
 			# The offer goes out via session_description_created; the
@@ -879,9 +986,43 @@ func _begin_p2p_match(match_id: String, players: Array) -> void:
 			_mesh.add_peer(conn, seat + 1)
 			var oerr: int = conn.create_offer()
 			if oerr != OK:
+				print("[MATCH] P2P_BEGIN_ABORT match=%s reason=create_offer seat %d %s" % [match_id, seat, error_string(oerr)])
 				_fail_p2p("Could not start the online connection (%s)." % error_string(oerr))
 				return
 	print("[Net] P2P match %s — seat %d of %d, offering to higher seats" % [match_id, _p2p_my_seat, _p2p_players.size()])
+
+## Settle poll (2026-11-28 split-brain): joined a match but the peer
+## has not connected yet — look for a NEWER match with the same
+## players and migrate to it, so two cross-invites converge on one
+## match. Runs every 2 s from _process while waiting for the peer.
+## Migration tears the old mesh down and joins the newer match; the
+## old match row is left alone (the 20 s connect timeout would have
+## expired it, and stale rows are cleaned before the next test).
+func _p2p_settle_tick() -> void:
+	if _p2p_settle_busy:
+		return
+	if _p2p_match_id == "" or _p2p_all_connected or _p2p_failed or _p2p_joining:
+		return
+	_p2p_settle_busy = true
+	var sb := _sb()
+	var ms := _match_state()
+	if sb == null or ms == null:
+		_p2p_settle_busy = false
+		return
+	var rows: Array = await sb.poll_matches_for_me(_p2p_my_id)
+	if _p2p_match_id == "" or _p2p_all_connected or _p2p_failed:
+		_p2p_settle_busy = false
+		return # peer connected / failed while polling — nothing to do
+	var MatchStateScript: GDScript = load("res://scripts/match_state.gd")
+	var newer: Dictionary = MatchStateScript.pick_newer_match(rows, _p2p_my_id, _p2p_match_id, String(ms.created_at), ms.player_ids)
+	_p2p_settle_busy = false
+	if newer.is_empty():
+		return
+	var from_id := _p2p_match_id
+	var to_id := String(newer.get("id", ""))
+	print("[MATCH] SETTLE_MIGRATE from=%s to=%s — newer match with the same players" % [from_id, to_id])
+	_clear_p2p()
+	await join_match(to_id, newer)
 
 ## Create one WebRTCPeerConnection for a remote peer (untyped — see
 ## the state comment above) and wire its 3 signals. Returns null when
