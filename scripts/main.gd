@@ -17,6 +17,7 @@ var _search_players := 2 # 2 or 4 — how many players this search is for
 var _search_elapsed := 0.0
 var _searching_active := false
 var _search_widened := false
+var _search_strict := false # SAME-2-PLAYER search: same level only (p_strict)
 var _search_mode := "" # "internet" | "host" | "join" | "invite" — which search is running
 var _lobby: OnlineLobby = null # v11: the post-match lobby (waiting/ready) — null when no lobby is open
 var _lobby_active := false
@@ -151,6 +152,11 @@ func _process(delta: float) -> void:
 			# (INVITE_ROOM_TIMEOUT), so the popup must time out at
 			# the same point instead of spinning forever.
 			if _search_elapsed >= 180.0:
+				# Stop Net's invite polling too: the popup closing
+				# alone used to leave it running, and a match found
+				# afterwards was dropped (or its own 180 s timeout
+				# fired queue_failed over a dead search).
+				Net.cancel_p2p_search()
 				_close_search_popup()
 				_toast("Not everyone joined in time — ask your friend to send the invite again.")
 				return
@@ -296,6 +302,9 @@ func _on_invite_send_chosen(player: Dictionary) -> void:
 		var res := await Friends.send_invite(String(player.get("id", "")), String(player.get("display_name", "?")), stake)
 		if bool(res.get("ok", false)):
 			_toast("Invite sent to %s!" % String(player.get("display_name", "?")))
+			# B3: discover the match from here on — the acceptor may
+			# form it before the 10 s group poll fires.
+			Net.start_match_discovery(String(res.get("group_id", "")), "2p")
 		else:
 			_toast(String(res.get("error", "Could not send the invite."))),
 		"Invite %s to a 1 vs 1 match — choose YOUR stake (any amount up to your balance). Winner takes the pot." % String(player.get("display_name", "?")))
@@ -312,6 +321,8 @@ func _on_group_invite_send_chosen(players: Array) -> void:
 		var res := await Friends.send_group_invite(players, stake)
 		if bool(res.get("ok", false)):
 			_toast("4-player invite sent — the match starts when all accept!")
+			# B3: discover the match from here on (see 2p above).
+			Net.start_match_discovery(String(res.get("group_id", "")), "4p")
 		else:
 			_toast(String(res.get("error", "Could not send the invites."))),
 		"Invite %d friends to a doubles match — choose YOUR stake (any amount up to your balance). The winning TEAM splits the pot." % players.size())
@@ -383,9 +394,22 @@ func _on_group_ready(group_id: String, invites: Array) -> void:
 	_join_invite_room(group_id, mode, stake, true)
 
 func _on_group_failed(group_id: String, reason: String) -> void:
+	# The group is dead — no match can form for it, so the discovery
+	# poll started when the invite was sent must stop too, or it
+	# would poll matches forever for a dead group.
+	Net.stop_match_discovery()
 	_toast(reason)
 
 func _join_invite_room(group_id: String, mode: String, stake: int, is_inviter: bool) -> void:
+	# Already in a lobby / match (e.g. discovery found this match
+	# first): joining again would start a second resolution loop whose
+	# 180 s timeout could kill the live lobby — do nothing.
+	if _lobby_active or _match != null:
+		return
+	# The invite-resolution loop supersedes the sender-side discovery
+	# poll (it polls the same matches rows, plus the RPC) — stop the
+	# discovery so only one poll loop runs.
+	Net.stop_match_discovery()
 	if group_id == "":
 		_toast("That invite has no group — ask your friend to send it again.")
 		return
@@ -643,6 +667,7 @@ func _open_mode_choice() -> void:
 	add_child(_mode)
 	_mode.bot_chosen.connect(_start_solo_direct)
 	_mode.two_players_chosen.connect(_on_play_two_players)
+	_mode.same_two_players_chosen.connect(_on_play_same_two_players)
 	_mode.four_players_chosen.connect(_on_play_four_players)
 	_mode.search_friend_chosen.connect(_open_friends_invite)
 	_mode.tour_chosen.connect(func() -> void:
@@ -806,6 +831,8 @@ func _on_online_lobby_invite(player: Dictionary) -> void:
 	var res := await Friends.send_invite(String(player.get("id", "")), String(player.get("display_name", "?")), _online_lobby_stake)
 	if bool(res.get("ok", false)):
 		_toast("Invite sent to %s!" % String(player.get("display_name", "?")))
+		# B3: discover the match from here on (see _on_invite_send_chosen).
+		Net.start_match_discovery(String(res.get("group_id", "")), "2p")
 	else:
 		_toast(String(res.get("error", "Could not send the invite.")))
 
@@ -819,6 +846,8 @@ func _on_online_lobby_group_invite(players: Array) -> void:
 	var res := await Friends.send_group_invite(players, _online_lobby_stake)
 	if bool(res.get("ok", false)):
 		_toast("4-player invite sent — the match starts when all accept!")
+		# B3: discover the match from here on (see _on_invite_send_chosen).
+		Net.start_match_discovery(String(res.get("group_id", "")), "4p")
 	else:
 		_toast(String(res.get("error", "Could not send the invites.")))
 
@@ -1010,7 +1039,7 @@ func _open_aim_assist() -> void:
 
 # -------------------------------------------------------------- matchmaking
 
-func _start_matchmaking(stake: int, host_ip: String = "", players: int = 2) -> void:
+func _start_matchmaking(stake: int, host_ip: String = "", players: int = 2, widen: bool = false, strict: bool = false) -> void:
 	# The stake was validated in the picker; re-check defensively (the
 	# balance can only have changed via a shop purchase meanwhile).
 	if not Stakes.valid_stake(stake, Save.coins):
@@ -1020,7 +1049,8 @@ func _start_matchmaking(stake: int, host_ip: String = "", players: int = 2) -> v
 	_search_players = players
 	_search_table = Stakes.band_for_stake(stake)
 	_search_elapsed = 0.0
-	_search_widened = false
+	_search_widened = widen
+	_search_strict = strict
 	_search_mode = "internet"
 	_searching_active = true
 	_searching = Control.new()
@@ -1055,7 +1085,7 @@ func _start_matchmaking(stake: int, host_ip: String = "", players: int = 2) -> v
 		# v11 P2P: no server — queue in Supabase, pair via find_match,
 		# connect phone-to-phone. Net emits `matched` when the mesh is
 		# up, and the lobby flow below runs unchanged.
-		Net.start_p2p_search(Save.player_name, Save.level(), _search_table, _search_stake, "4p" if _search_players == 4 else "2p")
+		Net.start_p2p_search(Save.player_name, Save.level(), _search_table, _search_stake, "4p" if _search_players == 4 else "2p", _search_widened, _search_strict)
 	elif Net.is_connected_to_server():
 		# F13 Phase 2: Supabase identity rides with the queue request
 		# (see _join_invite_room above). Empty when not signed in.
@@ -1084,14 +1114,67 @@ func _on_net_connected() -> void:
 func start_random_match(stake: int, players: int = 2) -> void:
 	_start_matchmaking(stake, "", players)
 
-func _on_matched(data: Dictionary) -> void:
-	if not _searching_active:
+## Random matchmaking entry API for the Play screen (B6, 2026-11-28) —
+## THE function the UI agent wires buttons to, including the new
+## SAME 2 PLAYER button. `mode` is "2p" or "4p"; `widen` starts the
+## search in the ±4 window (default false = ±2, widening to ±4 after
+## 30 s on its own); `strict` is the SAME-LEVEL search (p_strict —
+## same level only, default false). The stake is the auto stake
+## (the lobby's standard 100, capped at the balance); a broke player
+## gets the broke panel, same as the old ONLINE path. Existing call
+## sites (_start_auto_match, start_random_match) are unchanged — this
+## is the new single entry point on top of them.
+##   SAME 2 PLAYER button -> start_matchmaking("2p", false, true)
+##   2 PLAYERS button     -> start_matchmaking("2p")
+##   4 PLAYERS button     -> start_matchmaking("4p")
+func start_matchmaking(mode: String, widen: bool = false, strict: bool = false) -> void:
+	if CoinLoop.is_broke(Save.coins):
+		_show_broke_panel("online")
 		return
+	var players := 4 if mode == "4p" else 2
+	_start_matchmaking(mini(PlayMenuScreen.AUTO_STAKE, Save.coins), "", players, widen, strict)
+
+## SAME 2 PLAYER button handler (B6): strict same-level 1 vs 1. The UI
+## agent adds the button + its signal on the Play screen and connects
+## that signal to this handler — no other wiring needed.
+func _on_play_same_two_players() -> void:
+	start_matchmaking("2p", false, true)
+
+func _on_matched(data: Dictionary) -> void:
+	# A match found by DISCOVERY (invite sender sitting on home, not
+	# searching) arrives here with _searching_active false — it must
+	# still open the lobby (2026-11-28: the sender never discovered
+	# the match). Only ignore it when a match or lobby is already live.
+	if not _searching_active and (_match != null or _lobby_active):
+		return
+	if not _searching_active:
+		# Discovery case: my stake / band were never set by a search —
+		# take them from the payload's own seat (the matches row
+		# carries every player's stake), so the lobby + match use the
+		# real stakes instead of a stale 0.
+		_derive_search_stakes_from_payload(data)
 	# v11: a match no longer starts the instant the server pairs
 	# players — it opens the LOBBY first (roster + READY), and the
 	# MatchScreen is built only from _start_match_from_lobby, which
 	# keeps the F2/F3 setup-before-add_child contract.
 	_open_lobby(data)
+
+## Take my stake + band from a matched payload's players array (the
+## row carries every player's stake). No-op when the payload has no
+## players array naming me (legacy 2p server payloads) — the search
+## stakes stand then.
+func _derive_search_stakes_from_payload(data: Dictionary) -> void:
+	if not data.has("players"):
+		return
+	var my_id := Supabase.user_id
+	if my_id == "":
+		return
+	for p in (data["players"] as Array):
+		if p is Dictionary and String(p.get("id", "")) == my_id:
+			_search_stake = maxi(0, int(p.get("stake", 0)))
+			_search_players = 4 if String(data.get("mode", "2p")) == "4p" else 2
+			_search_table = Stakes.band_for_stake(_search_stake)
+			return
 
 ## v11 lobby: show the matched roster and wait for READY taps.
 ## The search popup is gone; the home screen was cleared like the

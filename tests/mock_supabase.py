@@ -318,12 +318,20 @@ class Handler(BaseHTTPRequestHandler):
             if "player_ids=cs.{" in raw_q:
                 want = raw_q.split("player_ids=cs.{", 1)[1].split("}", 1)[0]
                 rows = [r for r in rows if want in r.get("player_ids", [])]
+            match_id = self._eq(query, "id")
             group_id = self._eq(query, "group_id")
             status = self._eq(query, "status")
+            if match_id is not None:
+                rows = [r for r in rows if r.get("id") == match_id]
             if group_id is not None:
                 rows = [r for r in rows if r.get("group_id") == group_id]
             if status is not None:
-                rows = [r for r in rows if r.get("status") == status]
+                # v11 match-fix: polls use status=in.(waiting,ready,playing)
+                if status.startswith("in.(") and status.endswith(")"):
+                    wanted = set(s.strip() for s in status[4:-1].split(","))
+                    rows = [r for r in rows if r.get("status") in wanted]
+                else:
+                    rows = [r for r in rows if r.get("status") == status]
             self._json(200, rows)
             return
         if path == "/rest/v1/presence":

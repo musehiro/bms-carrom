@@ -213,6 +213,34 @@ func _run() -> void:
 	_check("mock: group has the one pending invite", bool(grp.get("ok", false)) and (grp.get("data", []) as Array).size() == 1 and String((grp.get("data", []) as Array)[0].get("status", "")) == "pending")
 	var acc := await Friends.accept_invite((grp.get("data", []) as Array)[0])
 	_check("mock: invite accepted", bool(acc.get("ok", false)) and String((acc.get("invite", {}) as Dictionary).get("status", "")) == "accepted")
+	# --- join_match (2026-11-28): the accepted group forms a 'waiting'
+	# matches row via the RPC, and Net.join_match fetches it, validates
+	# it (player_ids + status), stores it in MatchState and begins the
+	# mesh — the ONE shared entry into a formed match. The mesh itself
+	# cannot connect in the sandbox (UDP blocked), so the test asserts
+	# up to the mesh begin, then tears the P2P state down again.
+	var rpc := await Supabase.call_create_match_from_invites(gid)
+	var mid: String = String((rpc.get("data", {}) as Dictionary).get("match_id", ""))
+	_check("mock: create_match_from_invites forms the match", bool(rpc.get("ok", false)) and bool((rpc.get("data", {}) as Dictionary).get("ok", false)) and mid != "")
+	# Direct join (explicit match_id; the discovery poll is NOT running
+	# yet, so no tick can race this call). _p2p_my_id is set directly
+	# — the test never searched, so no search set it.
+	Net._p2p_my_id = Supabase.user_id
+	var joined: bool = await Net.join_match(mid)
+	_check("mock: join_match joins the invite match", joined and MatchState.match_id == mid and MatchState.my_seat == 0 and Net._p2p_match_id == mid)
+	_check("mock: MatchState stores the waiting match", MatchState.status == "waiting" and MatchState.mode == "2p" and MatchState.players.size() == 2)
+	var fetched := await Supabase.get_match_by_id(mid)
+	_check("mock: get_match_by_id fetches the row", String(fetched.get("id", "")) == mid and String(fetched.get("status", "")) == "waiting")
+	Net.cancel_p2p_search()
+	MatchState.clear()
+	_check("mock: cancel tears the P2P state down", Net._p2p_match_id == "" and not Net.is_p2p_searching())
+	# Discovery join: the sender-side poll finds the same 'waiting'
+	# row (preferring the group) and joins it with no RPC call.
+	Net.start_match_discovery(gid, "2p")
+	var discovered := await _wait_for_condition(func() -> bool: return MatchState.match_id == mid, 6.0)
+	_check("mock: discovery poll finds + joins the waiting match", discovered and Net._p2p_match_id == mid)
+	Net.cancel_p2p_search()
+	MatchState.clear()
 	# --- 4p group: send to 3, all accept -> ready ---
 	var targets := [
 		{"id": "user-nimal", "name": "Nimal Perera"},

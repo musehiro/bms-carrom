@@ -36,6 +36,11 @@ signal group_failed(group_id: String, reason: String)
 
 const INVITE_EXPIRY_SECONDS := 24 * 3600
 const GROUP_POLL_SECONDS := 10.0
+## Incoming-invite poll (2026-11-28, B4): pending invites addressed to
+## me, every 2 s while listening (see _poll_incoming). The receiving
+## phone never SHOWED an invite because incoming invites were only
+## loaded at login (refresh) and otherwise relied on Realtime alone.
+const INCOMING_POLL_SECONDS := 2.0
 const MAX_GROUP_TARGETS := 3
 ## §11 online lobby presence: heartbeat every ~30 s on the ONE existing
 ## socket (presence rows are PostgREST, not a second socket); rows older
@@ -58,6 +63,8 @@ var _presence_busy := false
 var _presence_last_ok := true
 
 var _poll_timer := 0.0
+var _incoming_timer := 0.0
+var _incoming_busy := false
 var _listening := false
 
 func _ready() -> void:
@@ -73,6 +80,13 @@ func _process(delta: float) -> void:
 	if _presence_timer >= PRESENCE_HEARTBEAT_SECONDS and not _presence_busy:
 		_presence_timer = 0.0
 		_heartbeat_presence_async()
+	# B4 incoming-invite poll (2 s): new invites surface even when a
+	# Realtime event was missed or the channel join was rejected.
+	# Runs on every frame, NOT behind the group-poll early-return.
+	_incoming_timer += delta
+	if _incoming_timer >= INCOMING_POLL_SECONDS and not _incoming_busy:
+		_incoming_timer = 0.0
+		_poll_incoming()
 	_poll_timer += delta
 	if _poll_timer < GROUP_POLL_SECONDS:
 		return
@@ -83,6 +97,7 @@ func _process(delta: float) -> void:
 ## loads the current pending invites once.
 func start_listening() -> void:
 	_listening = true
+	_incoming_timer = INCOMING_POLL_SECONDS # first incoming poll on the next frame
 	if Supabase.configured and Save.account_id != "":
 		Supabase.connect_realtime(Save.account_id)
 		refresh()
@@ -306,6 +321,11 @@ func cancel_invite(invite: Dictionary) -> Dictionary:
 	# the server — the error below says so, and the next refresh()
 	# re-tracks it, so it can be cancelled again from the box.
 	_remove_outgoing_group(group_id)
+	# The sender was discovering this group's match (B3) — stop it,
+	# or the discovery poll would run forever on a dead group.
+	var net := _net()
+	if net != null and net.has_method("stop_match_discovery"):
+		net.stop_match_discovery()
 	for row in rows:
 		var res := await Supabase.update_invite(String(row.get("id", "")), "cancelled")
 		if not bool(res.get("ok", false)):
@@ -445,6 +465,54 @@ func _on_realtime_invite(record: Dictionary) -> void:
 
 # -------------------------------------------------------------- group poll
 
+## B4: poll pending invites addressed to me every 2 s while listening.
+## Incoming invites used to be loaded only at login (refresh) and
+## otherwise relied on Realtime alone — a missed or rejected Realtime
+## event meant the receiving phone NEVER showed the invite (no banner,
+## no badge, nothing). This poll is the backstop: genuinely new rows
+## surface through invite_received (Main shows the banner + toast, the
+## home badge updates via invites_changed); rows that vanished
+## server-side (cancelled / expired) drop silently; already-expired
+## rows are marked expired on the server (L11) instead of reappearing.
+## Cheap indexed query (to_id + status=pending). Never re-emits a row
+## already known — a re-delivered row must not re-show the banner.
+func _poll_incoming() -> void:
+	if _incoming_busy or Save.account_id == "":
+		return
+	_incoming_busy = true
+	var res := await Supabase.list_incoming_invites(Save.account_id)
+	_incoming_busy = false
+	if not _listening:
+		return
+	if not bool(res.get("ok", false)):
+		return
+	var fresh: Array = res.get("data", [])
+	var fresh_ids := {}
+	for inv in fresh:
+		fresh_ids[String(inv.get("id", ""))] = true
+	var changed := false
+	for i in range(incoming.size() - 1, -1, -1):
+		if not fresh_ids.has(String(incoming[i].get("id", ""))):
+			incoming.remove_at(i)
+			changed = true
+	for inv in fresh:
+		if is_expired(inv):
+			# L11: mark it expired on the server (fire-and-forget)
+			# instead of only hiding it.
+			_expire_invite(inv)
+			continue
+		var known := false
+		for old in incoming:
+			if String(old.get("id", "")) == String(inv.get("id", "")):
+				known = true
+				break
+		if not known:
+			incoming.append(inv)
+			changed = true
+			invite_received.emit(inv)
+	if changed:
+		invites_changed.emit()
+
 func _poll_outgoing_groups() -> void:
 	var seen := {}
 	for inv in outgoing:
@@ -497,6 +565,17 @@ func _mark_group_consumed(group_id: String) -> void:
 	Save.save()
 
 # ------------------------------------------------------------------ internals
+
+## The Net autoload, resolved dynamically (NOT by identifier): -s
+## headless tests load this script without autoloads registered (the
+## same reason Net uses _sb() for Supabase). Null only in tests.
+func _net() -> Node:
+	if not is_inside_tree():
+		return null
+	var root := get_tree().root
+	if root == null:
+		return null
+	return root.get_node_or_null("Net")
 
 func _track_outgoing(row: Dictionary, mode: String) -> void:
 	outgoing.append(row)

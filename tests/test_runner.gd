@@ -62,6 +62,7 @@ func _initialize() -> void:
 	_test_v11_coin_loop()
 	_test_v11_p2p()
 	_test_v11_session_persist()
+	_test_match_fix()
 	_test_auth_fix_loading()
 	_test_google_signin_deep_link()
 	_test_coin_colours_literal()
@@ -1166,6 +1167,103 @@ func _test_v11_coin_loop() -> void:
 
 func _test_v11_p2p() -> void:
 	_run_suite("p2p", "tests/p2p_test.gd")
+
+# ------------------------------------------------- match fix (2026-11-28)
+## Shared join_match validation (MatchState), discovery picking,
+## find_match p_strict body, queue-row user_id, Realtime join
+## rejection surfacing. Pure — no network, no autoloads (the
+## MatchState script is loaded directly, like Friends in p2p_test).
+func _test_match_fix() -> void:
+	var MatchStateScript: GDScript = load("res://scripts/match_state.gd")
+	var me := "uid-me"
+	var opp := "uid-opp"
+	var players2 := [
+		{"id": me, "name": "Me", "level": 5, "stake": 100, "seat": 0},
+		{"id": opp, "name": "Opp", "level": 5, "stake": 100, "seat": 1},
+	]
+	var row_waiting := {"id": "m-1", "group_id": null, "mode": "2p", "table": 0,
+		"player_ids": [me, opp], "players": players2, "status": "waiting",
+		"created_at": "2026-11-28T01:00:00+00:00"}
+	# Validation: waiting/ready/playing join; 'started' never does.
+	var ok_waiting: Dictionary = MatchStateScript.validate_match_row(row_waiting, me)
+	_check("matchfix: waiting row validates, seat 0", bool(ok_waiting.get("ok", false)) and int(ok_waiting.get("my_seat", -1)) == 0)
+	var row_ready := row_waiting.duplicate(true)
+	row_ready["status"] = "ready"
+	_check("matchfix: ready row validates", bool(MatchStateScript.validate_match_row(row_ready, me).get("ok", false)))
+	var row_playing := row_waiting.duplicate(true)
+	row_playing["status"] = "playing"
+	_check("matchfix: playing row validates", bool(MatchStateScript.validate_match_row(row_playing, me).get("ok", false)))
+	var row_started := row_waiting.duplicate(true)
+	row_started["status"] = "started"
+	var started: Dictionary = MatchStateScript.validate_match_row(row_started, me)
+	_check("matchfix: 'started' row is rejected (nothing ever sets it)", not bool(started.get("ok", true)) and String(started.get("reason", "")).contains("started"))
+	var row_finished := row_waiting.duplicate(true)
+	row_finished["status"] = "finished"
+	_check("matchfix: finished row is rejected", not bool(MatchStateScript.validate_match_row(row_finished, me).get("ok", true)))
+	_check("matchfix: empty row is rejected", not bool(MatchStateScript.validate_match_row({}, me).get("ok", true)))
+	var row_not_mine := row_waiting.duplicate(true)
+	row_not_mine["player_ids"] = [opp, "uid-third"]
+	_check("matchfix: row without me is rejected", not bool(MatchStateScript.validate_match_row(row_not_mine, me).get("ok", true)))
+	var row_no_players := row_waiting.duplicate(true)
+	row_no_players["players"] = []
+	_check("matchfix: row with no players is rejected", not bool(MatchStateScript.validate_match_row(row_no_players, me).get("ok", true)))
+	# Seat from the players array (seat 1 when I am second).
+	var row_seat1 := row_waiting.duplicate(true)
+	row_seat1["players"] = [
+		{"id": opp, "name": "Opp", "level": 5, "stake": 100, "seat": 0},
+		{"id": me, "name": "Me", "level": 5, "stake": 100, "seat": 1},
+	]
+	row_seat1["player_ids"] = [opp, me]
+	_check("matchfix: seat comes from the players array", int(MatchStateScript.validate_match_row(row_seat1, me).get("my_seat", -1)) == 1)
+	# Store + matched payload (same shape the lobby consumes).
+	var ms: Node = MatchStateScript.new()
+	_check("matchfix: set_from_row stores a valid row", ms.set_from_row(row_waiting, me) and ms.match_id == "m-1" and ms.my_seat == 0 and ms.is_in_match())
+	var payload: Dictionary = ms.matched_payload()
+	_check("matchfix: stored match builds the lobby payload", String(payload.get("opponent", "")) == "Opp" and int(payload.get("opp_stake", 0)) == 100 and String(payload.get("match_id", "")) == "m-1")
+	_check("matchfix: set_from_row rejects a bad row and stores nothing", not ms.set_from_row(row_started, me) and ms.match_id == "m-1")
+	ms.clear()
+	_check("matchfix: clear drops the stored match", ms.match_id == "" and not ms.is_in_match())
+	ms.free()
+	# Discovery picking: group first, then mode, then newest.
+	var old_row := {"id": "m-old", "group_id": null, "mode": "2p", "table": 0,
+		"player_ids": [me, opp], "players": players2, "status": "waiting",
+		"created_at": "2026-11-28T01:00:00+00:00"}
+	var new_row := {"id": "m-new", "group_id": null, "mode": "2p", "table": 0,
+		"player_ids": [me, opp], "players": players2, "status": "waiting",
+		"created_at": "2026-11-28T01:05:00+00:00"}
+	var group_row := {"id": "m-group", "group_id": "grp-9", "mode": "4p", "table": 0,
+		"player_ids": [me, opp], "players": players2, "status": "waiting",
+		"created_at": "2026-11-28T00:00:00+00:00"}
+	_check("matchfix: pick takes the newest row", String(MatchStateScript.pick_match_row([old_row, new_row], me).get("id", "")) == "m-new")
+	_check("matchfix: pick prefers the invite group over newer rows", String(MatchStateScript.pick_match_row([new_row, group_row], me, "grp-9").get("id", "")) == "m-group")
+	_check("matchfix: pick prefers the wanted mode", String(MatchStateScript.pick_match_row([new_row, group_row], me, "", "4p").get("id", "")) == "m-group")
+	_check("matchfix: pick skips invalid rows", String(MatchStateScript.pick_match_row([row_started, new_row], me).get("id", "")) == "m-new")
+	_check("matchfix: pick returns {} when nothing is joinable", MatchStateScript.pick_match_row([row_started], me).is_empty())
+	_check("matchfix: pick returns {} for no rows", MatchStateScript.pick_match_row([], me).is_empty())
+	# find_match body: p_strict only when strict (PostgREST rejects an
+	# RPC arg the function does not have yet — sending it always would
+	# break every non-strict call until the SQL lands).
+	var body_plain: Dictionary = SupabaseClient.find_match_body("2p", false)
+	_check("matchfix: plain find_match body has mode + widen, no p_strict", String(body_plain.get("p_mode", "")) == "2p" and bool(body_plain.get("p_widen", true)) == false and not body_plain.has("p_strict"))
+	var body_wide: Dictionary = SupabaseClient.find_match_body("4p", true)
+	_check("matchfix: widened find_match body carries p_widen", bool(body_wide.get("p_widen", false)) and String(body_wide.get("p_mode", "")) == "4p" and not body_wide.has("p_strict"))
+	var body_strict: Dictionary = SupabaseClient.find_match_body("2p", false, true)
+	_check("matchfix: strict find_match body carries p_strict=true", bool(body_strict.get("p_strict", false)) and String(body_strict.get("p_mode", "")) == "2p")
+	# Queue row: user_id rides alongside id (both = the Auth uid).
+	var qrow: Dictionary = NetClient.queue_row("uid-1", "Me", 5, 0, 100, "2p")
+	_check("matchfix: queue row carries id + user_id = the Auth uid", String(qrow.get("id", "")) == "uid-1" and String(qrow.get("user_id", "")) == "uid-1")
+	_check("matchfix: queue row clamps a negative stake", int(NetClient.queue_row("uid-1", "Me", 5, 0, -50, "2p").get("stake", -1)) == 0)
+	# Realtime: a rejected invites-channel join surfaces as
+	# realtime_error (it used to be swallowed as a heartbeat, so live
+	# invites silently never arrived).
+	var join_err := SupabaseClient.parse_realtime_message(JSON.stringify({
+		"topic": "realtime:public:invites", "event": "phx_reply",
+		"payload": {"status": "error", "response": {"reason": "invalid column for filter"}}, "ref": "2"}))
+	_check("matchfix: rejected invites join parses as realtime_error", String(join_err.get("kind", "")) == "realtime_error" and String((join_err.get("record", {}) as Dictionary).get("message", "")).contains("invalid column"))
+	var join_ok := SupabaseClient.parse_realtime_message(JSON.stringify({
+		"topic": "realtime:public:invites", "event": "phx_reply",
+		"payload": {"status": "ok", "response": {}}, "ref": "1"}))
+	_check("matchfix: accepted invites join still parses as joined", String(join_ok.get("kind", "")) == "joined")
 
 func _test_v11_session_persist() -> void:
 	# Refresh-token grant path (pure).

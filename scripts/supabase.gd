@@ -554,9 +554,21 @@ func update_invite(invite_id: String, status: String) -> Dictionary:
 # ENet path via Net's transport switch).
 
 ## Insert (or refresh) my matchmaking_queue row.
+## Belt and braces (2026-11-28): the live queue UPDATE policy was
+## keyed on user_id while rows carry id = auth uid, so an upsert of an
+## existing row 403'd. The row is stamped with user_id = the Auth uid
+## (alongside id) so it satisfies either policy convention; the SQL
+## side adds an id-based UPDATE policy too. Never throws.
 func queue_insert(row: Dictionary) -> Dictionary:
+	if user_id != "" and String(row.get("user_id", "")) == "":
+		row["user_id"] = user_id
+	print("[MATCH] queue_insert -> player=%s mode=%s table=%s stake=%s t=%s" % [
+		String(row.get("id", "")), String(row.get("mode", "")), String(row.get("table", "")),
+		String(row.get("stake", "")), Time.get_datetime_string_from_system(true, false)])
 	var res := await _http(HTTPClient.METHOD_POST, "/rest/v1/matchmaking_queue?on_conflict=id",
 		row, true, PackedStringArray(["Prefer: return=representation,resolution=merge-duplicates"]))
+	print("[MATCH] queue_insert <- ok=%s status=%s body=%s" % [
+		str(res.get("ok", false)), str(res.get("status", 0)), JSON.stringify(res.get("data"))])
 	if not bool(res["ok"]):
 		return res
 	var rows: Array = res["data"] if res["data"] is Array else []
@@ -568,39 +580,105 @@ func queue_delete(my_id: String) -> Dictionary:
 	return await _http(HTTPClient.METHOD_DELETE,
 		"/rest/v1/matchmaking_queue?id=eq.%s" % my_id.uri_encode(), {}, true)
 
+## The find_match RPC body. p_strict is sent ONLY when strict is true:
+## the live function gains p_strict additively, and PostgREST rejects
+## an RPC call carrying an argument the function does not have yet —
+## sending it always would break every non-strict call until the SQL
+## lands. Strict = same-level only (window 0); default = the normal
+## ±2 window (±4 widened). Pure — unit-tested.
+static func find_match_body(mode: String, widen: bool, strict: bool = false) -> Dictionary:
+	var body := {"p_mode": mode, "p_widen": widen}
+	if strict:
+		body["p_strict"] = true
+	return body
+
 ## The atomic pairing RPC. Returns the raw RPC dict: {matched, match_id,
 ## players} or {matched:false, error?}. The caller must have queued first.
-func call_find_match(mode: String, widen: bool) -> Dictionary:
-	return await _http(HTTPClient.METHOD_POST, "/rest/v1/rpc/find_match",
-		{"p_mode": mode, "p_widen": widen}, true)
+## A 404 / 5xx / network error here is TRANSIENT (2026-11-28: the one
+## call that should have matched died on a PostgREST 42883 schema-cache
+## error) — the caller retries in 2-3 s, never treats it as fatal.
+## [MATCH] logs every call and every response, greppable in the log.
+func call_find_match(mode: String, widen: bool, strict: bool = false) -> Dictionary:
+	print("[MATCH] find_match -> player=%s mode=%s widen=%s strict=%s t=%s" % [
+		user_id, mode, str(widen), str(strict), Time.get_datetime_string_from_system(true, false)])
+	var res := await _http(HTTPClient.METHOD_POST, "/rest/v1/rpc/find_match",
+		find_match_body(mode, widen, strict), true)
+	print("[MATCH] find_match <- ok=%s status=%s body=%s" % [
+		str(res.get("ok", false)), str(res.get("status", 0)), JSON.stringify(res.get("data"))])
+	return res
 
 ## The invite-match RPC. Returns {ok, match_id, players} once every
 ## invite in the group is accepted, else {ok:false}.
 func call_create_match_from_invites(group_id: String) -> Dictionary:
-	return await _http(HTTPClient.METHOD_POST, "/rest/v1/rpc/create_match_from_invites",
+	print("[MATCH] create_match_from_invites -> player=%s group=%s t=%s" % [
+		user_id, group_id, Time.get_datetime_string_from_system(true, false)])
+	var res := await _http(HTTPClient.METHOD_POST, "/rest/v1/rpc/create_match_from_invites",
 		{"p_group_id": group_id}, true)
+	print("[MATCH] create_match_from_invites <- ok=%s status=%s body=%s" % [
+		str(res.get("ok", false)), str(res.get("status", 0)), JSON.stringify(res.get("data"))])
+	return res
+
+## Fetch one matches row by id (join_match). Returns the row dict or {}.
+## The id filter is exact on PostgREST; the id on the returned row is
+## still checked, so a stray row can never be joined by mistake.
+func get_match_by_id(match_id: String) -> Dictionary:
+	print("[MATCH] get_match -> player=%s id=%s t=%s" % [
+		user_id, match_id, Time.get_datetime_string_from_system(true, false)])
+	var res := await _http(HTTPClient.METHOD_GET,
+		"/rest/v1/matches?select=*&id=eq.%s" % match_id.uri_encode(), {}, true)
+	print("[MATCH] get_match <- ok=%s status=%s body=%s" % [
+		str(res.get("ok", false)), str(res.get("status", 0)), JSON.stringify(res.get("data"))])
+	if not bool(res["ok"]):
+		return {}
+	var rows: Array = res["data"] if res["data"] is Array else []
+	for row in rows:
+		if row is Dictionary and String(row.get("id", "")) == match_id:
+			return row
+	return {}
+
+## All joinable matches rows I am in, newest first. Status is the
+## in.(waiting,ready,playing) set — a match NEVER moves to 'started'
+## (nothing sets it), so waiting-only would work today but would miss
+## a row the server later marks ready/playing. [] on any error: the
+## caller retries next tick, never treats it as fatal.
+func poll_matches_for_me(my_id: String) -> Array:
+	print("[MATCH] poll_matches_for_me -> player=%s t=%s" % [
+		my_id, Time.get_datetime_string_from_system(true, false)])
+	var res := await _http(HTTPClient.METHOD_GET,
+		"/rest/v1/matches?select=*&player_ids=cs.{%s}&status=in.(waiting,ready,playing)&order=created_at.desc" % my_id.uri_encode(),
+		{}, true)
+	print("[MATCH] poll_matches_for_me <- ok=%s status=%s body=%s" % [
+		str(res.get("ok", false)), str(res.get("status", 0)), JSON.stringify(res.get("data"))])
+	if not bool(res["ok"]):
+		return []
+	return res["data"] if res["data"] is Array else []
 
 ## Poll for a matches row I am in (the OTHER side of a random pairing
 ## learns it was matched this way — REST polling, unlimited on the free
-## tier, no Realtime messages). Returns the row dict or {}.
+## tier, no Realtime messages). Returns the row dict or {}. Legacy
+## single-row helper over poll_matches_for_me (newest first).
 func poll_match_for_me(my_id: String) -> Dictionary:
-	var res := await _http(HTTPClient.METHOD_GET,
-		"/rest/v1/matches?select=*&player_ids=cs.{%s}&status=eq.waiting" % my_id.uri_encode(),
-		{}, true)
-	if not bool(res["ok"]):
-		return {}
-	var rows: Array = res["data"] if res["data"] is Array else []
+	var rows := await poll_matches_for_me(my_id)
 	return rows[0] if not rows.is_empty() else {}
+
+## All joinable matches rows for an invite group, newest first.
+func poll_matches_by_group(group_id: String) -> Array:
+	print("[MATCH] poll_matches_by_group -> player=%s group=%s t=%s" % [
+		user_id, group_id, Time.get_datetime_string_from_system(true, false)])
+	var res := await _http(HTTPClient.METHOD_GET,
+		"/rest/v1/matches?select=*&group_id=eq.%s&status=in.(waiting,ready,playing)&order=created_at.desc" % group_id.uri_encode(),
+		{}, true)
+	print("[MATCH] poll_matches_by_group <- ok=%s status=%s body=%s" % [
+		str(res.get("ok", false)), str(res.get("status", 0)), JSON.stringify(res.get("data"))])
+	if not bool(res["ok"]):
+		return []
+	return res["data"] if res["data"] is Array else []
 
 ## Poll for a matches row for an invite group (the invitee learns the
 ## match id this way; the inviter gets it from the RPC return).
+## Legacy single-row helper over poll_matches_by_group (newest first).
 func poll_match_by_group(group_id: String) -> Dictionary:
-	var res := await _http(HTTPClient.METHOD_GET,
-		"/rest/v1/matches?select=*&group_id=eq.%s&status=eq.waiting" % group_id.uri_encode(),
-		{}, true)
-	if not bool(res["ok"]):
-		return {}
-	var rows: Array = res["data"] if res["data"] is Array else []
+	var rows := await poll_matches_by_group(group_id)
 	return rows[0] if not rows.is_empty() else {}
 
 ## Mark a matches row expired (best-effort — a dead match must not
@@ -693,17 +771,14 @@ func disconnect_realtime() -> void:
 func _join_realtime_channel() -> void:
 	if _ws == null:
 		return
+	# The live join MUST be the same shape the tests check: build it
+	# from the one static helper, never a second hand-written copy
+	# (a drifted copy is how a wrong-table / wrong-column filter
+	# ships — every from_id filter in this file is on the invites
+	# table, which is the only table that HAS from_id; matches,
+	# presence and matchmaking_queue do not).
 	_ws_ref += 1
-	var join := {
-		"topic": "realtime:public:invites",
-		"event": "phx_join",
-		"payload": {"config": {"postgres_changes": [
-			{"event": "*", "schema": "public", "table": "invites", "filter": "to_id=eq.%s" % _ws_my_id},
-			{"event": "*", "schema": "public", "table": "invites", "filter": "from_id=eq.%s" % _ws_my_id},
-		]}},
-		"ref": str(_ws_ref),
-	}
-	_ws.send_text(JSON.stringify(join))
+	_ws.send_text(JSON.stringify(realtime_join_payload(_ws_my_id, str(_ws_ref))))
 
 ## v11 P2P (§1.4): join the match Broadcast channel on the SAME socket
 ## as the invites channel. Safe to call before the socket is open —
@@ -769,6 +844,15 @@ func _handle_realtime_text(text: String) -> void:
 	match String(parsed.get("kind", "")):
 		"joined":
 			realtime_connected.emit()
+		"realtime_error":
+			# The invites channel join was REJECTED (e.g. a filter the
+			# server cannot apply — the P0001 "invalid column for
+			# filter" class of error). This used to be swallowed as a
+			# heartbeat, so live invites silently never arrived and
+			# only the poll backstop could find them. Surface it.
+			var reason := String((parsed.get("record", {}) as Dictionary).get("message", ""))
+			print("[MATCH] Realtime invites join rejected: %s" % reason)
+			realtime_failed.emit("Realtime invites channel rejected: %s" % reason)
 		"invite":
 			realtime_invite_changed.emit(parsed.get("record", {}))
 		"broadcast":
@@ -783,7 +867,10 @@ func _handle_realtime_text(text: String) -> void:
 
 ## Pure parser for Realtime (phoenix) messages — unit-tested with canned
 ## payloads. Returns {} for anything that is not a recognised message.
-## Kinds: "joined" (our channel join was accepted), "invite" (a
+## Kinds: "joined" (our channel join was accepted), "realtime_error"
+## (our invites channel join was REJECTED — the payload's reason is in
+## "record"."message"; a rejected join used to be swallowed as a
+## heartbeat, so live invites silently never arrived), "invite" (a
 ## postgres_changes INSERT/UPDATE on invites, with the row in "record"),
 ## "broadcast" (a Broadcast "signal" on a carrom-match-* channel, with
 ## the message in "record"), "heartbeat" (a phx_reply to our heartbeat).
@@ -795,8 +882,15 @@ static func parse_realtime_message(text: String) -> Dictionary:
 	var topic := String(data.get("topic", ""))
 	if event == "phx_reply":
 		var payload: Dictionary = data.get("payload", {})
-		if String(payload.get("status", "")) == "ok" and topic == "realtime:public:invites":
+		var pstatus := String(payload.get("status", ""))
+		if pstatus == "ok" and topic == "realtime:public:invites":
 			return {"kind": "joined"}
+		if pstatus == "error" and topic == "realtime:public:invites":
+			var resp: Dictionary = payload.get("response", {})
+			var reason := String(resp.get("reason", resp.get("message", "")))
+			if reason == "":
+				reason = JSON.stringify(payload)
+			return {"kind": "realtime_error", "record": {"message": reason}}
 		return {"kind": "heartbeat"}
 	if event == "postgres_changes" and topic == "realtime:public:invites":
 		var payload2: Dictionary = data.get("payload", {})
