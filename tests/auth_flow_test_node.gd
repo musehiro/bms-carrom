@@ -138,6 +138,10 @@ func _run() -> void:
 	await _frames(3)
 	var google_btn_on := _find_button(_main._auth, "Continue with Google")
 	_check("auth: Google button back when the provider is on", google_btn_on != null and google_btn_on.is_visible_in_tree())
+	# --- A11 (Google sign-in, 2026-11-27): the dead "Create Your
+	# Account" pill is gone — it did nothing when tapped, and REGISTER
+	# is already there.
+	_check("auth: dead Create Your Account pill is gone", _find_label_containing(_main._auth, "Create Your Account") == null)
 	# --- A5: register screen is full (benefits + footer at the bottom) ---
 	_check("auth: benefits panel present", _find_label_containing(_main._auth, "saved to your account forever") != null)
 	_check("auth: free-to-play / no-ads line present", _find_label_containing(_main._auth, "No ads until you play") != null)
@@ -188,6 +192,22 @@ func _run() -> void:
 	await _frames(2)
 	_check("auth: CANCEL drops the pending Google return", not Accounts.is_return_pending())
 	_check("auth: CANCEL brings the Google button back enabled", _main._auth._google_button != null and not _main._auth._google_button.disabled)
+	# --- A12 (Google sign-in, 2026-11-27): the deep-link return file
+	# is consumed. The Java side (GodotApp.onNewIntent / onCreate)
+	# writes the browser-return URI to user://auth_callback.txt and
+	# Accounts polls it while a return is pending. Simulate the Java
+	# write: a pending return + the file with a code URI -> the file
+	# is consumed (deleted) and the pending return ends. The code
+	# exchange itself has no backend here, so it fails — the point is
+	# the return is never left hanging on a file nobody reads.
+	Accounts.debug_begin_pending_return("google")
+	var cb := FileAccess.open(Supabase.AUTH_CALLBACK_FILE, FileAccess.WRITE)
+	cb.store_string("com.musehiro.carrom://auth-callback?code=TESTCODE123&state=x")
+	cb.close()
+	Accounts._check_pending_callback_file()
+	_check("auth: deep-link callback file is consumed", not FileAccess.file_exists(Supabase.AUTH_CALLBACK_FILE))
+	_check("auth: pending return ends after the callback is consumed", not Accounts.is_return_pending())
+	await _frames(3)
 	# --- A7: RESEND CODE exists (hidden until a code is sent) ---
 	_check("auth: RESEND CODE button exists", _main._auth._resend_button != null)
 	_check("auth: RESEND CODE hidden until a code is sent", not _main._auth._resend_button.is_visible_in_tree())
@@ -270,13 +290,16 @@ func _run() -> void:
 	# Wood background, BMS crown logo, mini board, and a gold bar that
 	# fills with real progress — not the old teal screen with dots.
 	_main._show_loading("LOADING GAME", "Starting…")
-	await _frames(2)
 	var ls = _main._loading
 	_check("loading: screen is shown", ls != null)
+	_check("loading: bar starts at 0 on a fresh screen", ls._bar.value == 0.0)
+	await _frames(2)
 	ls._process(0.6)
 	_check("loading: bar auto-advances over the 1.2 s wait", ls._bar.value >= 50.0)
 	ls.set_progress(0.5)
 	_check("loading: bar shows real progress (50%)", ls._bar.value == 50.0)
+	ls.set_progress(1.0)
+	_check("loading: bar reaches 100", ls._bar.value == 100.0)
 	ls.set_progress(2.0)
 	_check("loading: progress clamps at 100%", ls._bar.value == 100.0)
 	ls.set_progress(-1.0)

@@ -36,10 +36,12 @@ extends Control
 ##     a failed or cancelled browser trip never leaves the player stuck
 ##     on "Signing in with Google…"; after ~60 s an explanatory message
 ##     is added too. Every failure shows an error — never silently
-##     nothing. While the project's Google provider is OFF
-##     (google_enabled false in backend_config.json — the new project,
-##     2026-11-27), the button is hidden and a note points at Gmail +
-##     code instead. The OTP email's "Sign in" link uses the same
+##     nothing. If the project's Google provider is ever OFF
+##     (google_enabled false in backend_config.json), the button is
+##     hidden and a note points at Gmail + code instead, so the player
+##     never lands on GoTrue's 400 "Unsupported provider" page — but
+##     Google is the normal path now (provider enabled, 2026-11-27).
+##     The OTP email's "Sign in" link uses the same
 ##     platform return, so tapping it signs the player in — the 6-digit
 ##     code stays the primary path.
 ##
@@ -170,26 +172,15 @@ func _ready() -> void:
 	why.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	why.add_theme_color_override("font_color", Color(0.96, 0.95, 0.92))
 	root.add_child(why)
-	# ---- "Create Your Account" header pill (reference welcome screen).
-	# No emoji glyph — the bundled fonts carry no emoji, so the pill is
-	# text only (an emoji would render as an empty box).
-	var create_pill := PanelContainer.new()
-	create_pill.add_theme_stylebox_override("panel", UiKit.panel_style(Color(0.05, 0.35, 0.22, 0.97), UiKit.GOLD, 20, 2))
-	var create_label := Label.new()
-	create_label.text = "Create Your Account"
-	create_label.add_theme_font_size_override("font_size", 26)
-	create_label.add_theme_color_override("font_color", Color(0.96, 0.95, 0.92))
-	create_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	create_pill.add_child(create_label)
-	root.add_child(create_pill)
 	# ---- Google (first — the way most players sign in) ----
 	_google_button = _make_google_button()
 	root.add_child(_google_button)
-	# While the project's Google provider is OFF (google_enabled false
-	# in backend_config.json — the new project, 2026-11-27), the button
-	# is hidden and this note points at Gmail + code instead: opening
-	# the authorize URL would land the player on GoTrue's 400
-	# "Unsupported provider" page with no way back into the game.
+	# If the project's Google provider is ever OFF (google_enabled
+	# false in backend_config.json), the button is hidden and this
+	# note points at Gmail + code instead: opening the authorize URL
+	# would land the player on GoTrue's 400 "Unsupported provider"
+	# page with no way back into the game. Google is on now
+	# (2026-11-27), so the button shows; the gate stays as a net.
 	_google_note = UiKit.muted_label("Google sign-in isn't set up yet —\nregister with your Gmail + code below.", 17)
 	_google_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_google_note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

@@ -247,23 +247,27 @@ jobs:
       - name: Import project
         run: godot --headless --import
 
-      - name: Restore tracked Android customizations (auth deep link)
+      - name: Restore tracked Android customizations (auth deep link + splash theme)
         run: |
           set -e
           # The BinDecode editor plugin installs the stock Android build
           # template during `godot --import` (android/build/build.gradle is
           # absent from the repo — the 178 MB template cannot be pushed),
-          # which overwrites the two tracked customizations below with
+          # which overwrites the tracked customizations below with
           # stock files. Restore them from git before the export, or the
           # built APK ships the stock GodotApp with no auth-callback
           # intent filter (v9 proved this empirically: binary manifest
-          # had no auth-callback, dex held only the stock GodotApp).
+          # had no auth-callback, dex held only the stock GodotApp) and
+          # the stock grey + small-icon system splash (2026-11-27).
           # The export itself does not reinstall (build.gradle now
           # exists), so the restore survives into the Gradle build.
-          git checkout -- android/build/AndroidManifest.xml android/build/src/com/godot/game/GodotApp.java
+          git checkout -- android/build/AndroidManifest.xml android/build/src/com/godot/game/GodotApp.java android/build/res/values/themes.xml android/build/res/drawable/splash_icon_transparent.xml
           grep -q "auth-callback" android/build/AndroidManifest.xml || { echo "ERROR: intent filter missing from AndroidManifest.xml"; exit 1; }
           grep -q "onNewIntent" android/build/src/com/godot/game/GodotApp.java || { echo "ERROR: onNewIntent missing from GodotApp.java"; exit 1; }
-          echo "Android customizations restored (intent filter + onNewIntent present)."
+          grep -q "#100D0A" android/build/res/values/themes.xml || { echo "ERROR: dark splash background missing from themes.xml"; exit 1; }
+          grep -q "splash_icon_transparent" android/build/res/values/themes.xml || { echo "ERROR: transparent splash icon missing from themes.xml"; exit 1; }
+          test -f android/build/res/drawable/splash_icon_transparent.xml || { echo "ERROR: transparent splash drawable missing"; exit 1; }
+          echo "Android customizations restored (intent filter + onNewIntent + dark splash theme present)."
 
       - name: Export debug APK
         run: |

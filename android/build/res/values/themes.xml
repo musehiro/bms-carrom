@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+	<style name="GodotAppMainTheme" parent="@android:style/Theme.Black.NoTitleBar"/>
+
+	<!-- Android 12+ system splash (Google sign-in + splash fix,
+	     2026-11-27). BEFORE: windowSplashScreenBackground was
+	     @mipmap/icon_background (grey — generated from the broken
+	     icon.png) and the animated icon was @mipmap/icon_foreground
+	     (the small carrom-board icon), so launch flashed grey + a
+	     small icon BEFORE the game's own loading art. NOW: the
+	     background is the same dark brown as the boot splash
+	     (project.godot boot_splash/bg_color #100D0A) and the icon is
+	     a transparent drawable, so the system splash is a plain dark
+	     screen that blends seamlessly into the engine boot splash
+	     (art/bms_splash.png — the game's own loading art, first
+	     thing the player sees). Tracked in git and restored by the
+	     CI "Restore tracked Android customizations" step, because
+	     `godot --import` reinstalls the stock template over it. -->
+	<style name="GodotAppSplashTheme" parent="Theme.SplashScreen">
+		<!-- Set the splash screen background, animated icon, and animation
+   duration. -->
+		<item name="android:windowSplashScreenBackground">#100D0A</item>
+
+		<!-- Use windowSplashScreenAnimatedIcon to add a drawable or an animated
+			 drawable. One of these is required. -->
+		<item name="windowSplashScreenAnimatedIcon">@drawable/splash_icon_transparent</item>
+
+		<!-- Set the theme of the Activity that directly follows your splash
+		screen. This is required. -->
+		<item name="postSplashScreenTheme">@style/GodotAppMainTheme</item>
+	</style>
+</resources>

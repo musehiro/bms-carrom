@@ -63,6 +63,7 @@ func _initialize() -> void:
 	_test_v11_p2p()
 	_test_v11_session_persist()
 	_test_auth_fix_loading()
+	_test_google_signin_deep_link()
 	# The SIGN OUT button test lives in tests/supabase_mock_test_node.gd
 	# (mock: home has a SIGN OUT button …), NOT here: in -s script mode
 	# home.gd's first compile runs before the autoloads register, so the
@@ -1115,6 +1116,78 @@ func _test_auth_fix_loading() -> void:
 	DirAccess.remove_absolute("user://test_cfg_off.json")
 	DirAccess.remove_absolute("user://test_cfg_on.json")
 	DirAccess.remove_absolute("user://test_cfg_absent.json")
+
+func _read_text_file(path: String) -> String:
+	if not FileAccess.file_exists(path):
+		return ""
+	return FileAccess.get_file_as_string(path)
+
+## Google sign-in + splash (2026-11-27): the deep-link return path,
+## the shipped config with Google on, the removed dead pill, and the
+## dark system splash. Static file checks — they guard the exact
+## files the APK ships, so a regression (e.g. a `godot --import`
+## clobbering the Android customizations back to stock, which is
+## exactly what happened to the previous task's working copy) fails
+## the suite instead of shipping silently broken.
+##
+## NOTE on the deep link: it was VERIFIED, not re-implemented. The
+## v11 activity-alias + GodotApp.onNewIntent was already in the repo
+## at the branch tip — the previous investigation read the STOCK
+## files a local import had installed over the working copy and
+## concluded the return was never built. The user's empty-browser
+## trip at 05:11 was the Redirect URLs not being allow-listed yet
+## (added 05:12, server-side). These checks pin the return path in
+## place so it can never silently vanish again.
+func _test_google_signin_deep_link() -> void:
+	# Shipped config: Google ON, new project, no old-project ref.
+	var client := SupabaseClient.new()
+	client.load_config("res://backend_config.json")
+	_check("googlesignin: shipped config loads", client.configured)
+	_check("googlesignin: shipped config has Google on", client.google_enabled)
+	_check("googlesignin: shipped config points at the new project", client.base_url.contains("qigrifiqtarjgklfxmfg.supabase.co"))
+	var cfg_text := _read_text_file("res://backend_config.json")
+	_check("googlesignin: shipped config has no old-project ref", not cfg_text.contains("hyhlhngybzwnungnshff"))
+	client.free()
+	# Deep link: manifest alias + GodotApp.java handler.
+	var manifest := _read_text_file("res://android/build/AndroidManifest.xml")
+	var alias_pos := manifest.find("<activity-alias")
+	var alias_end := manifest.find("</activity-alias>", alias_pos)
+	var alias_block := manifest.substr(alias_pos, alias_end - alias_pos) if alias_pos >= 0 and alias_end > alias_pos else ""
+	_check("googlesignin: manifest has the auth-callback activity-alias", alias_block.contains("AuthCallbackAlias"))
+	_check("googlesignin: manifest alias targets GodotApp", alias_block.contains("com.godot.game.GodotApp"))
+	_check("googlesignin: manifest deep-link filter is VIEW + BROWSABLE", alias_block.contains("android.intent.action.VIEW") and alias_block.contains("android.intent.category.BROWSABLE"))
+	_check("googlesignin: manifest filter is the carrom scheme + auth-callback host", alias_block.contains("com.musehiro.carrom") and alias_block.contains("auth-callback"))
+	var activity_pos := manifest.find("<activity")
+	var activity_end := manifest.find("</activity>", activity_pos)
+	var activity_block := manifest.substr(activity_pos, activity_end - activity_pos) if activity_pos >= 0 and activity_end > activity_pos else ""
+	_check("googlesignin: the activity itself has no deep-link filter (the merger drops it)", not activity_block.contains("auth-callback"))
+	var java := _read_text_file("res://android/build/src/com/godot/game/GodotApp.java")
+	_check("googlesignin: GodotApp handles the warm return (onNewIntent)", java.contains("onNewIntent"))
+	_check("googlesignin: GodotApp handles the cold start (onCreate reads the intent)", java.contains("handleDeepLink(getIntent())"))
+	_check("googlesignin: GodotApp writes auth_callback.txt", java.contains("auth_callback.txt"))
+	_check("googlesignin: GodotApp writes into the app files dir (Godot user://)", java.contains("getFilesDir()"))
+	_check("googlesignin: GodotApp guards the scheme + host", java.contains("com.musehiro.carrom") and java.contains("auth-callback"))
+	# Removed pill: no "Create Your Account" text in the auth screen.
+	var auth_src := _read_text_file("res://scripts/auth_screen.gd")
+	_check("googlesignin: dead Create Your Account pill is gone", not auth_src.contains("Create Your Account"))
+	# Startup loading reads 0 -> 100 (main.gd startup path).
+	var main_src := _read_text_file("res://scripts/main.gd")
+	_check("googlesignin: startup loading starts at 0", main_src.contains("set_progress(0.0)"))
+	_check("googlesignin: startup loading reaches 1.0 before home", main_src.contains("set_progress(1.0)"))
+	# Boot splash: the game's own loading art, dark bg, short minimum.
+	var proj := _read_text_file("res://project.godot")
+	_check("googlesignin: boot splash is the loading art", proj.contains("boot_splash/image=\"res://art/bms_splash.png\""))
+	_check("googlesignin: boot splash is fullsize", proj.contains("boot_splash/fullsize=true"))
+	_check("googlesignin: boot splash bg is the dark brown", proj.contains("boot_splash/bg_color=Color(0.063, 0.051, 0.039, 1)"))
+	# System splash theme: dark background, transparent icon, drawable exists.
+	var theme := _read_text_file("res://android/build/res/values/themes.xml")
+	_check("googlesignin: system splash background is dark #100D0A", theme.contains("#100D0A"))
+	_check("googlesignin: system splash icon is the transparent drawable", theme.contains("splash_icon_transparent"))
+	_check("googlesignin: system splash background item is the dark colour, not the grey mipmap", theme.contains("windowSplashScreenBackground\">#100D0A"))
+	_check("googlesignin: system splash icon item is the transparent drawable, not the board mipmap", theme.contains("windowSplashScreenAnimatedIcon\">@drawable/splash_icon_transparent"))
+	_check("googlesignin: transparent splash drawable exists", FileAccess.file_exists("res://android/build/res/drawable/splash_icon_transparent.xml"))
+	var drawable := _read_text_file("res://android/build/res/drawable/splash_icon_transparent.xml")
+	_check("googlesignin: transparent splash drawable is transparent", drawable.contains("transparent"))
 
 func _write_text_file(path: String, text: String) -> void:
 	var f := FileAccess.open(path, FileAccess.WRITE)

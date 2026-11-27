@@ -81,9 +81,10 @@ func _ready() -> void:
 		# Returning player: show the loading screen (not a black
 		# screen) while the saved session is restored — the restore
 		# can take seconds on a slow network, and a black screen reads
-		# as a hang. The bar moves at real step boundaries.
+		# as a hang. The bar moves at real step boundaries, from 0 to
+		# a full 100 (held briefly) before home — never a half bar.
 		_show_loading("LOADING GAME", "Starting…")
-		_loading.set_progress(0.15)
+		_loading.set_progress(0.0)
 		_loading.set_status("Restoring your sign-in…")
 		# Restore the saved Supabase session FIRST (refresh token) —
 		# Friends uses the Auth uid for Realtime and presence, and
@@ -96,6 +97,12 @@ func _ready() -> void:
 		_loading.set_status("Loading your tables…")
 		Friends.start_listening()
 		_loading.set_progress(0.9)
+		# Finish the bar: 1.0 + a short hold, so the player actually
+		# sees a full bar before home — the loading screen reads
+		# 0 -> 100, it never stops at 90%.
+		_loading.set_progress(1.0)
+		_loading.set_status("Ready!")
+		await get_tree().create_timer(0.15).timeout
 		_show_home()
 	else:
 		# First screen: register / sign in (mandatory — no guest mode).
