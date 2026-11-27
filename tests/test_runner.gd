@@ -985,10 +985,12 @@ func _test_save_ad_reward_at() -> void:
 	_check("v10 save: negative count clamps to the first step", s.ad_reward_at(-3) == 150)
 	s.queue_free()
 
-## Literal coin colours (2026-11-27): a piece must read as its NAME.
-## White = a white face, black = a black face — the old blue-centre
-## white / gold-ring black read as yellow and blue on the board.
-## Pins BoardView.piece_palette() so the colours can never drift again.
+## One colour per piece (2026-11-27, Buddhika's rule: "white means
+## white, black means black — a piece can't have two kinds of
+## colours"). The thin accent band and the centre dot are GONE (the
+## white piece had black around it, the black piece brown/gold), and
+## the queen's gold star goes with them. Pins
+## BoardView.piece_palette() so the colours can never drift again.
 func _lum(c: Color) -> float:
 	return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
 
@@ -998,19 +1000,20 @@ func _test_coin_colours_literal() -> void:
 	var queen: Dictionary = BoardView.piece_palette("queen", "classic")
 	var wb: Color = white["base"]
 	var bb: Color = black["base"]
-	var wd: Color = white["dot"]
-	var bd: Color = black["dot"]
+	_check("coins: white palette is one colour only (no rim/dot keys)", white.size() == 1 and not white.has("rim") and not white.has("dot"), str(white))
+	_check("coins: black palette is one colour only (no rim/dot keys)", black.size() == 1 and not black.has("rim") and not black.has("dot"), str(black))
+	_check("coins: queen palette is one colour only (no star key)", queen.size() == 1 and not queen.has("dot"), str(queen))
 	_check("coins: white face is white (all channels > 0.9)", wb.r > 0.9 and wb.g > 0.9 and wb.b > 0.9, str(wb))
 	_check("coins: white face has no blue tint", wb.b - wb.r < 0.05, str(wb))
 	_check("coins: black face is black (all channels < 0.1)", bb.r < 0.1 and bb.g < 0.1 and bb.b < 0.1, str(bb))
 	_check("coins: black face has no gold tint", bb.r < 0.1, str(bb))
 	_check("coins: white vs black unmistakable (luminance gap > 0.7)", _lum(wb) - _lum(bb) > 0.7, str(_lum(wb) - _lum(bb)))
-	_check("coins: white centre dot is dark (lum < 0.25)", _lum(wd) < 0.25, str(wd))
-	_check("coins: black centre dot is light (lum > 0.8)", _lum(bd) > 0.8, str(bd))
 	var qb: Color = queen["base"]
 	_check("coins: queen face is red (r > 0.6, g < 0.3)", qb.r > 0.6 and qb.g < 0.3, str(qb))
-	_check("coins: queen star is gold", (queen["dot"] as Color).is_equal_approx(Color(1.0, 0.85, 0.25)))
-	_check("coins: white accent is dark, not blue", (white["rim"] as Color).b - (white["rim"] as Color).r < 0.1, str(white["rim"]))
+	_check("coins: queen is neither white nor black", _lum(qb) > 0.15 and _lum(qb) < 0.7, str(_lum(qb)))
+	# The striker is NOT a coin: it keeps its shop ring/emblem.
+	var striker: Dictionary = BoardView.piece_palette("striker", "classic")
+	_check("coins: striker palette keeps its ring (not a coin)", striker.has("rim") and striker.has("base"), str(striker))
 
 ## Ad ladder, multi-ad tiers (2026-11-27): each FREE COINS tier pays
 ## out only after its ads are watched (2, 3, 4, 5, 6) and the grant is

@@ -97,11 +97,14 @@ func _ready() -> void:
 		_loading.set_status("Loading your tables…")
 		Friends.start_listening()
 		_loading.set_progress(0.9)
-		# Finish the bar: 1.0 + a short hold, so the player actually
-		# sees a full bar before home — the loading screen reads
-		# 0 -> 100, it never stops at 90%.
+		# Finish the bar: target 1.0, then WAIT until it has visibly
+		# filled (the 1.5 s minimum pace) + a short hold, so the
+		# player actually SEES 0 -> 100 before home — never a jump
+		# straight to a full bar.
 		_loading.set_progress(1.0)
 		_loading.set_status("Ready!")
+		if is_instance_valid(_loading):
+			await _loading.await_full()
 		await get_tree().create_timer(0.15).timeout
 		_show_home()
 	else:
@@ -441,18 +444,23 @@ func _join_invite_room(group_id: String, mode: String, stake: int, is_inviter: b
 ## gold/red/wood artwork family as home and auth — wood photo
 ## background, the golden crown "BMS CARROM" logo, a mini carrom
 ## board in the middle, and at the bottom the title with a gold
-## progress bar that fills with REAL progress. The bar auto-advances
-## 0 -> 1 over 1.2 s by default (the tap -> loading -> board pause);
-## set_progress() switches it to manual (startup steps) and clamps.
-## The old teal screen with animated dots is gone.
+## progress bar that fills with REAL progress. The bar ALWAYS
+## animates: set_progress() only sets a TARGET; the displayed bar
+## climbs toward it at a fixed pace — a full 0 -> 1 takes
+## MIN_VISIBLE_S (1.5 s) — so the player SEES the bar fill and only
+## then enters. The old behaviour (set_progress jumped the bar
+## instantly, so on a fast load it went straight to 100 in one go)
+## is the bug Buddhika reported. The old teal screen with animated
+## dots is gone.
 class LoadingScreen:
 	extends Control
 	var _bar: ProgressBar
 	var _status: Label
 	var _board_holder: Control
 	var _mini: BoardView
-	var _elapsed := 0.0
-	var _duration := 1.2 # 0 = manual (set_progress drives the bar)
+	var _target := 1.0 # where the bar is heading (set_progress sets this)
+	var _shown := 0.0 # where the bar visibly is (animated toward _target)
+	const MIN_VISIBLE_S := 1.5 # a full 0 -> 100 takes at least this long
 
 	func _init(title_text: String, sub_text: String) -> void:
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -546,19 +554,42 @@ class LoadingScreen:
 		_mini.position = Vector2(-20, -250) * s
 		_mini.scale = Vector2(s, s)
 
-	## Real progress: 0.0 empty, 1.0 full. Clamped — never over/under.
-	## Also switches the bar to manual: the auto-advance stops.
+	## Real progress target: 0.0 empty, 1.0 full. Clamped — never
+	## over/under. The bar does NOT jump to it: _process animates the
+	## displayed bar toward the target at the 1.5 s pace, so even a
+	## fast load shows the fill happening.
 	func set_progress(f: float) -> void:
-		_duration = 0.0
-		_bar.value = clampf(f, 0.0, 1.0) * 100.0
+		_target = clampf(f, 0.0, 1.0)
+		if _shown > _target:
+			_shown = _target
+			_bar.value = _shown * 100.0
+
+	## Snap the bar to an exact value at once (screenshot mode only:
+	## captures the loading screen at 25 / 60 / 90 %). Never used by
+	## the game itself — the real bar only ever animates.
+	func snap_progress(f: float) -> void:
+		_target = clampf(f, 0.0, 1.0)
+		_shown = _target
+		_bar.value = _shown * 100.0
+
+	## True once the bar has visibly filled to 100.
+	func is_full() -> bool:
+		return _shown >= 1.0
+
+	## Wait until the bar has visibly filled to 100 (the 1.5 s
+	## minimum pace) — callers must not enter home/the board before
+	## this, or the player never sees the fill.
+	func await_full() -> void:
+		while is_instance_valid(self) and _shown < 1.0:
+			await get_tree().process_frame
 
 	func set_status(text: String) -> void:
 		_status.text = text
 
 	func _process(delta: float) -> void:
-		if _duration > 0.0:
-			_elapsed += delta
-			_bar.value = clampf(_elapsed / _duration, 0.0, 1.0) * 100.0
+		if _shown < _target:
+			_shown = minf(_target, _shown + delta / MIN_VISIBLE_S)
+			_bar.value = _shown * 100.0
 
 ## Show the loading screen (no timer — the caller drives what happens
 ## next). The screenshot mode uses this to capture the screen itself.
@@ -567,12 +598,13 @@ func _show_loading(title_text: String, sub_text: String) -> void:
 	_loading = LoadingScreen.new(title_text, sub_text)
 	add_child(_loading)
 
-## Show the loading screen, wait ~1.2 s, then run `then`. Tap ->
-## loading -> board: a short pause, not a choice.
+## Show the loading screen, wait until the bar has visibly filled
+## (~1.5 s), then run `then`. Tap -> loading -> board: a short
+## pause, not a choice — and the player sees the fill, not a flash.
 func _show_loading_then(title_text: String, sub_text: String, then: Callable) -> void:
 	_show_loading(title_text, sub_text)
 	var token := _loading
-	await get_tree().create_timer(1.2).timeout
+	await _loading.await_full()
 	if _loading != token or not is_instance_valid(token):
 		return # the screen went away meanwhile — do not start the match
 	_loading = null
@@ -1559,6 +1591,27 @@ func _run_shot_mode() -> void:
 			# v10: the solo loading screen (tap SOLO -> this -> board).
 			_show_loading("GETTING READY", "Solo — free practice vs a random bot.")
 			_capture_after(1.0)
+		"loading25":
+			# Loading screen frozen at 25 % (proof the bar fills).
+			_show_loading("LOADING GAME", "Starting…")
+			_loading.snap_progress(0.25)
+			_capture_after(0.3)
+		"loading60":
+			# Loading screen frozen at 60 %.
+			_show_loading("LOADING GAME", "Starting…")
+			_loading.snap_progress(0.60)
+			_capture_after(0.3)
+		"loading90":
+			# Loading screen frozen at 90 %.
+			_show_loading("LOADING GAME", "Starting…")
+			_loading.snap_progress(0.90)
+			_capture_after(0.3)
+		"loadinglive":
+			# Loading screen mid-fill, live (no snap): captured 0.75 s
+			# in, the bar must be about half full — proof the real
+			# animation runs, not just the frozen values.
+			_show_loading("LOADING GAME", "Starting…")
+			_capture_after(0.75)
 		"tourwin0":
 			# v10: a World Tour win with stake 0 — the earn offer, never ◉ 0.
 			Save.coins = 1000

@@ -397,16 +397,21 @@ func _draw_labels() -> void:
 ## black read as yellow and blue on the board). Queen stays red with
 ## a gold star. Returns {base, rim, outline, dot}. Pure — the coin
 ## tests pin these values so the colours can never drift again.
+## One colour per piece (2026-11-27, Buddhika's rule: "white means
+## white, black means black — a piece can't have two kinds of
+## colours"). The thin accent band and the centre dot are GONE: the
+## white piece had black around it and the black piece had brown
+## (gold) around it, so coins and the queen carry ONLY their base
+## colour now. Depth comes from same-colour shading in _draw_piece
+## and the soft drop shadow beneath — never a second colour on the
+## piece. The striker is NOT a coin: it keeps its shop ring/emblem.
 static func piece_palette(kind: String, striker_id: String) -> Dictionary:
 	if kind == "white":
-		return {"base": Color(0.97, 0.97, 0.95), "rim": Color(0.13, 0.14, 0.19),
-			"outline": Color(0.13, 0.14, 0.19), "dot": Color(0.13, 0.14, 0.19)}
+		return {"base": Color(0.97, 0.97, 0.95)}
 	if kind == "black":
-		return {"base": Color(0.05, 0.05, 0.06), "rim": Color(0.85, 0.68, 0.25),
-			"outline": Color(0.93, 0.91, 0.84), "dot": Color(0.93, 0.91, 0.84)}
+		return {"base": Color(0.05, 0.05, 0.06)}
 	if kind == "queen":
-		return {"base": Color(0.78, 0.12, 0.16), "rim": Color(0.5, 0.05, 0.08),
-			"outline": Color(0.20, 0.04, 0.06), "dot": Color(1.0, 0.85, 0.25)}
+		return {"base": Color(0.78, 0.12, 0.16)}
 	var s: Dictionary = ShopData.striker_by_id(striker_id)
 	var base: Color = s["color"]
 	var lum := 0.2126 * base.r + 0.7152 * base.g + 0.0722 * base.b
@@ -425,60 +430,50 @@ func _draw_piece(p: Dictionary) -> void:
 	draw_circle(pos + Vector2(2, 4), r + 2.0, Color(0, 0, 0, 0.16), true, -1.0, true)
 	draw_circle(pos + Vector2(2, 3), r, Color(0, 0, 0, 0.42), true, -1.0, true)
 	var kind: String = p["kind"]
-	# Literal coin colours (2026-11-27): a piece must read as its NAME.
-	# The previous blue-centre white / gold-ring black read as yellow
-	# and blue on the board, so the faces are literal now: white = a
-	# white face, black = a black face. Only a THIN accent band (a
-	# tenth of the radius) and a SMALL centre dot tell them apart —
-	# the face itself is never blue or gold. Queen stays red + gold
-	# star; the striker is untouched.
+	# One colour per piece (2026-11-27): white = solid white, black =
+	# solid black, queen = solid red. No rim, no ring, no dot, no
+	# star. The old thin accent band read as black around the white
+	# piece and brown (gold) around the black piece — both are gone,
+	# and the queen's gold star and gold glow ring go with them.
+	# Depth comes only from same-colour shading: a lighter shade of
+	# the piece's own colour for the gloss, a darker shade for the
+	# bottom inner shadow. The striker keeps its shop look (not a coin).
 	var pal: Dictionary = piece_palette(kind, striker_id)
 	var base: Color = pal["base"]
-	var rim: Color = pal["rim"]
-	var outline: Color = pal["outline"]
-	var dot_col: Color = pal["dot"]
-	# Thin accent band for coins (r*0.10 — the old 0.23 band is what
-	# made the rim colour dominate the face); queen and striker keep
-	# the thicker band, which is part of their look.
-	var outline_w: float = r * 0.10 if (kind == "white" or kind == "black") else r * 0.23
 	# Glowing orange halo around the striker on your turn.
 	if kind == "striker" and your_turn:
+		var rim: Color = pal["rim"]
 		var pulse := 0.55 + 0.35 * sin(Time.get_ticks_msec() / 180.0)
 		draw_circle(pos, r + 7.0, Color(1.0, 0.55, 0.15, 0.10 + 0.08 * pulse), true, -1.0, true)
 		draw_arc(pos, r + 7.0, 0, TAU, 40, Color(1.0, 0.55, 0.15, 0.5 + 0.3 * pulse), 3.0, true)
 		# Second, wider pulsing ring (skipped on low-end GPUs).
 		if not quality_low:
 			draw_circle(pos, r + 14.0, Color(1.0, 0.55, 0.15, 0.05 + 0.04 * pulse), true, -1.0, true)
-	# Steady warm glow ring around the queen so she pops on any board.
-	if kind == "queen":
-		draw_circle(pos, r + 6.0, Color(1.0, 0.75, 0.25, 0.10), true, -1.0, true)
-		draw_arc(pos, r + 6.0, 0, TAU, 40, Color(1.0, 0.75, 0.25, 0.35), 3.0, true)
-	# Layered edge: thin outline band, then the coloured rim ring (2 px),
-	# then the face. Nothing here changes r or pos (physics is untouched).
-	draw_circle(pos, r, outline, true, -1.0, true)
-	draw_circle(pos, r - outline_w, rim, true, -1.0, true)
-	draw_circle(pos, r - outline_w - 2.0, base, true, -1.0, true)
-	# Thin outer ring — dark for the white coin (it vanishes on pale
-	# beech without it), gold for the black coin (it vanishes on the
-	# dark shop boards without it). Striker: no ring; its sun emblem
-	# + halo already mark it.
+	# The face: ONE solid circle of the piece's own colour, full radius.
+	draw_circle(pos, r, base, true, -1.0, true)
+	# Same-colour shading only: gloss = a lighter shade of the face,
+	# specular = the face colour itself at high alpha, bottom inner
+	# shadow = a darker shade of the face. Nothing here is a second
+	# colour — a white piece is white through and through, a black
+	# piece black, a red queen red.
+	var gloss := base.lightened(0.18)
+	var spec := base.lightened(0.35)
+	var shade := base.darkened(0.25)
 	if kind == "white":
-		draw_arc(pos, r + 2.0, 0, TAU, 32, dot_col, 2.0, true)
+		# lightened() on a 0.97 face is already ~1.0, so name the
+		# shades explicitly: a slightly darker white for the gloss
+		# patch, white for the specular, darker white for the shadow.
+		gloss = Color(0.88, 0.88, 0.86)
+		spec = Color(1, 1, 1)
+		shade = Color(0.80, 0.80, 0.78)
 	elif kind == "black":
-		draw_arc(pos, r + 2.0, 0, TAU, 32, rim, 2.0, true)
-	# Centre motif (coins only; the striker gets a sun emblem below).
-	# Coins: ONE small dot — dark on white, light on black. No big
-	# centre disc any more: the disc is what made the faces read blue
-	# and gold. Queen: gold five-point star.
-	if kind == "white" or kind == "black":
-		draw_circle(pos, r * 0.15, dot_col, true, -1.0, true)
+		gloss = Color(0.22, 0.22, 0.24)
+		spec = Color(0.38, 0.38, 0.42)
+		shade = Color(0.02, 0.02, 0.03)
 	elif kind == "queen":
-		var star := PackedVector2Array()
-		for k in range(10):
-			var ang := -PI / 2.0 + float(k) * PI / 5.0
-			var rad := r * 0.42 if k % 2 == 0 else r * 0.18
-			star.append(pos + Vector2(cos(ang), sin(ang)) * rad)
-		draw_colored_polygon(star, dot_col)
+		gloss = Color(0.92, 0.28, 0.32)
+		spec = Color(1.0, 0.5, 0.55)
+		shade = Color(0.55, 0.08, 0.12)
 	# Gloss highlight + bright specular dot (coins look glossy, not flat).
 	# Kept inside the face so the white gloss never washes out the edge.
 	# On black the gloss is smaller and fainter, so the face stays black.
@@ -489,19 +484,21 @@ func _draw_piece(p: Dictionary) -> void:
 		gloss_a = 0.35
 		gloss_r = r * 0.22
 		dot_a = 0.5
-	draw_circle(pos + Vector2(-r * 0.22, -r * 0.25), gloss_r, Color(1, 1, 1, gloss_a), true, -1.0, true)
-	draw_circle(pos + Vector2(-r * 0.30, -r * 0.34), r * 0.14, Color(1, 1, 1, dot_a), true, -1.0, true)
-	# Bottom inner shadow for depth, hugging the face edge.
-	draw_arc(pos, r - outline_w - 3.0, PI * 0.15, PI * 0.85, 16, Color(0, 0, 0, 0.30), 2.0, true)
+	draw_circle(pos + Vector2(-r * 0.22, -r * 0.25), gloss_r, Color(gloss, gloss_a), true, -1.0, true)
+	draw_circle(pos + Vector2(-r * 0.30, -r * 0.34), r * 0.14, Color(spec, dot_a), true, -1.0, true)
+	# Bottom inner shadow for depth, hugging the face edge — same
+	# colour family as the face.
+	draw_arc(pos, r - 3.0, PI * 0.15, PI * 0.85, 16, Color(shade, 0.45), 2.0, true)
 	if kind == "striker":
 		# Sun emblem: red-orange face + rays (Carrom Pool gold striker).
+		var rim2: Color = pal["rim"]
 		var sun := Color(0.9, 0.35, 0.12)
 		draw_circle(pos, r * 0.3, sun, true, -1.0, true)
 		for k in range(8):
 			var a := TAU * float(k) / 8.0
 			var d := Vector2(cos(a), sin(a))
 			draw_line(pos + d * (r * 0.36), pos + d * (r * 0.52), sun, 2.0, true)
-		draw_arc(pos, r * 0.62, 0, TAU, 32, rim, 2.0, true)
+		draw_arc(pos, r * 0.62, 0, TAU, 32, rim2, 2.0, true)
 
 func _draw_aim_guide() -> void:
 	var from := aim_from

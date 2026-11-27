@@ -313,24 +313,47 @@ func _run() -> void:
 	_main._home._toggle_invite_box()
 	Friends.incoming = []
 	Friends.outgoing = []
-	# --- L6 (auth fix, 2026-11-27): the loading screen is the new look ---
-	# Wood background, BMS crown logo, mini board, and a gold bar that
-	# fills with real progress — not the old teal screen with dots.
+	# --- L6 (auth fix, 2026-11-27; bar animation, 2026-11-27): the
+	# loading screen is the new look — wood background, BMS crown
+	# logo, mini board, and a gold bar that fills with real progress,
+	# not the old teal screen with dots. The bar ALWAYS animates:
+	# set_progress() only sets a TARGET; the displayed bar climbs
+	# toward it over at least 1.5 s, so the player SEES 0 -> 100
+	# instead of a jump straight to a full bar.
 	_main._show_loading("LOADING GAME", "Starting…")
 	var ls = _main._loading
 	_check("loading: screen is shown", ls != null)
 	_check("loading: bar starts at 0 on a fresh screen", ls._bar.value == 0.0)
+	_check("loading: not full at start", not ls.is_full())
 	await _frames(2)
-	ls._process(0.6)
-	_check("loading: bar auto-advances over the 1.2 s wait", ls._bar.value >= 50.0)
+	# Half the minimum fill time -> about half full (the bar animates
+	# on its own toward the 1.0 target; _process is also called by the
+	# tree, so drive it explicitly for a deterministic value).
+	ls._process(0.75)
+	_check("loading: bar ~50 after 0.75 s of animation", ls._bar.value > 40.0 and ls._bar.value < 60.0, str(ls._bar.value))
+	# set_progress() must NOT jump the bar: it only sets the target.
 	ls.set_progress(0.5)
-	_check("loading: bar shows real progress (50%)", ls._bar.value == 50.0)
+	_check("loading: set_progress does not jump the bar", ls._bar.value > 40.0 and ls._bar.value < 60.0, str(ls._bar.value))
+	# Driving the bar with a 0.5 target: it stops at 50, never past it.
+	ls._process(3.0)
+	_check("loading: bar stops at the target (50%)", ls._bar.value > 49.0 and ls._bar.value < 51.0, str(ls._bar.value))
+	_check("loading: not full at 50%", not ls.is_full())
+	# Full fill: target 1.0, another 0.75 s of animation -> 100.
 	ls.set_progress(1.0)
-	_check("loading: bar reaches 100", ls._bar.value == 100.0)
+	ls._process(0.75)
+	_check("loading: bar reaches 100 after the full 1.5 s", ls._bar.value >= 99.0, str(ls._bar.value))
+	_check("loading: full once the bar reaches 100", ls.is_full())
+	# await_full returns at once when the bar is already full.
+	await ls.await_full()
+	_check("loading: await_full returns when full", ls.is_full())
+	# Clamping: over/under targets clamp, never over/under.
 	ls.set_progress(2.0)
-	_check("loading: progress clamps at 100%", ls._bar.value == 100.0)
+	_check("loading: progress clamps at 100% target", ls._target <= 1.0, str(ls._target))
 	ls.set_progress(-1.0)
-	_check("loading: progress clamps at 0%", ls._bar.value == 0.0)
+	_check("loading: progress clamps at 0% (bar snaps back)", ls._bar.value == 0.0, str(ls._bar.value))
+	# Snap is instant (screenshot mode only).
+	ls.snap_progress(0.9)
+	_check("loading: snap sets the bar at once (90%)", ls._bar.value > 89.0 and ls._bar.value < 91.0, str(ls._bar.value))
 	ls.set_status("Restoring your sign-in…")
 	_check("loading: status text updates", ls._status.text == "Restoring your sign-in…")
 	_check("loading: BMS crown logo is shown", _find_texture_with(ls, "logo_carrom_loading.png") != null)
