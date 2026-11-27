@@ -16,7 +16,7 @@
 	     (art/bms_splash.png — the game's own loading art, first
 	     thing the player sees). Tracked in git and restored by the
 	     CI "Restore tracked Android customizations" step, because
-	     `godot --import` reinstalls the stock template over it. -->
+	     the godot import reinstalls the stock template over it. -->
 	<style name="GodotAppSplashTheme" parent="Theme.SplashScreen">
 		<!-- Set the splash screen background, animated icon, and animation
    duration. -->
