@@ -165,12 +165,12 @@ func _run() -> void:
 		var no_mm: bool = not _main._searching_active and _main._searching == null
 		_check("D: PLAY does not start matchmaking", no_mm)
 		await _frames(3)
-		# v11: PLAY opens the three-big-button menu (a child of Main,
-		# not a popup on home) — it must offer PLAY WITH A BOT, PLAY
-		# WITH THE WORLD and PLAY WITH FRIENDS.
+		# 2026-11-28 redesign: PLAY opens the three-big-button menu (a
+		# child of Main, not a popup on home) — it must offer PLAY
+		# WITH A BOT, 2 PLAYERS — 1 VS 1 and 4 PLAYERS — DOUBLES.
 		# NOTE: home is freed by _open_mode_choice, so do NOT touch it
 		# after the emit (accessing it segfaults the test runner).
-		var mode_ok := _main._mode != null and _main._mode.bot_button != null and _main._mode.world_button != null and _main._mode.friends_button != null
+		var mode_ok := _main._mode != null and _main._mode.bot_button != null and _main._mode.two_players_button != null and _main._mode.four_players_button != null
 		print("INFO: after PLAY pressed: searching_active=", _main._searching_active, " mode screen=", mode_ok)
 		_check("D: PLAY opens the three-button Play menu", mode_ok)
 	# --- E: online search offers a labelled-BOT fallback after ~12 s ---

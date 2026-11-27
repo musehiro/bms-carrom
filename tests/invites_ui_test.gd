@@ -11,8 +11,9 @@ extends SceneTree
 ##   * invite expiry math — invite_age_seconds / is_expired (24 h).
 ##   * invite row + join-room message shapes (2p invitee, 4p inviter).
 ##   * the PLAY menu — exactly THREE big buttons, each routing to the
-##     right choice (bot / world / friends), plus the secondary
-##     World Tour / NEARBY buttons and BACK.
+##     right choice (bot / 2 players auto-connect / 4 players
+##     auto-connect), plus the secondary World Tour / NEARBY buttons
+##     and BACK.
 ## The live backend half (send -> accept -> group_ready signal,
 ## decline/expiry/cancel against the mock) lives in
 ## tests/invites_flow_test_node.gd + tests/invites_flow_test.tscn.
@@ -181,11 +182,11 @@ func _collect_label_texts(node: Node, out: Array) -> void:
 func _test_play_menu_buttons() -> void:
 	var scr := _make_menu()
 	var big: Array = []
-	for bname in ["BotButton", "WorldButton", "FriendsButton"]:
+	for bname in ["BotButton", "TwoPlayersButton", "FourPlayersButton"]:
 		var b := scr.find_child(bname, true, false) as Button
 		if b != null:
 			big.append(b)
-	_check("play menu: exactly the three big buttons exist (bot / world / friends)",
+	_check("play menu: exactly the three big buttons exist (bot / 2 players / 4 players)",
 		big.size() == 3, "found=%d" % big.size())
 	var all_big := true
 	var all_3d := true
@@ -200,9 +201,11 @@ func _test_play_menu_buttons() -> void:
 	_collect_label_texts(scr, texts)
 	var joined := " ".join(texts)
 	_check("play menu: bot button says BOT", joined.contains("BOT"))
-	_check("play menu: world button says WORLD", joined.contains("WORLD"))
-	_check("play menu: friends button says FRIENDS", joined.contains("FRIENDS"))
-	_check("play menu: friends button says 2 or 4 players", joined.contains("2 or 4 players"))
+	_check("play menu: 2-players button says 1 VS 1", joined.contains("1 VS 1"))
+	_check("play menu: 4-players button says DOUBLES", joined.contains("DOUBLES"))
+	_check("play menu: auto-connect buttons say Auto-connect", joined.contains("Auto-connect"))
+	_check("play menu: no WORLD / FRIENDS buttons any more", not joined.contains("PLAY WITH THE WORLD") and not joined.contains("PLAY WITH FRIENDS"))
+	_check("play menu: SEARCH FRIEND still reachable (separate entry)", joined.contains("SEARCH FRIEND"))
 	_check("play menu: World Tour still reachable (secondary)", joined.contains("WORLD TOUR"))
 	_check("play menu: NEARBY still reachable (secondary)", joined.contains("NEARBY"))
 	scr.free()
@@ -211,23 +214,24 @@ func _test_play_menu_routing() -> void:
 	# Each button press must emit exactly its own signal — and no other.
 	var scr := _make_menu()
 	scr.bot_chosen.connect(func() -> void: _seen.append("bot"))
-	scr.world_chosen.connect(func() -> void: _seen.append("world"))
-	scr.friends_chosen.connect(func() -> void: _seen.append("friends"))
+	scr.two_players_chosen.connect(func() -> void: _seen.append("two_players"))
+	scr.four_players_chosen.connect(func() -> void: _seen.append("four_players"))
 	scr.tour_chosen.connect(func() -> void: _seen.append("tour"))
 	scr.nearby_chosen.connect(func() -> void: _seen.append("nearby"))
+	scr.search_friend_chosen.connect(func() -> void: _seen.append("search_friend"))
 	scr.go_back.connect(func() -> void: _seen.append("back"))
 	_seen.clear()
 	(scr.find_child("BotButton", true, false) as Button).pressed.emit()
 	_check("play menu routing: BOT button routes to bot (solo vs AI)",
 		_seen == ["bot"], str(_seen))
 	_seen.clear()
-	(scr.find_child("WorldButton", true, false) as Button).pressed.emit()
-	_check("play menu routing: WORLD button routes to world (random matchmaking)",
-		_seen == ["world"], str(_seen))
+	(scr.find_child("TwoPlayersButton", true, false) as Button).pressed.emit()
+	_check("play menu routing: 2 PLAYERS button routes to two_players (auto-connect 1 vs 1)",
+		_seen == ["two_players"], str(_seen))
 	_seen.clear()
-	(scr.find_child("FriendsButton", true, false) as Button).pressed.emit()
-	_check("play menu routing: FRIENDS button routes to friends (invite flow)",
-		_seen == ["friends"], str(_seen))
+	(scr.find_child("FourPlayersButton", true, false) as Button).pressed.emit()
+	_check("play menu routing: 4 PLAYERS button routes to four_players (auto-connect doubles)",
+		_seen == ["four_players"], str(_seen))
 	_seen.clear()
 	(scr.find_child("TourButton", true, false) as Button).pressed.emit()
 	_check("play menu routing: WORLD TOUR button still routes to tour",
@@ -236,6 +240,10 @@ func _test_play_menu_routing() -> void:
 	(scr.find_child("NearbyButton", true, false) as Button).pressed.emit()
 	_check("play menu routing: NEARBY button still routes to nearby",
 		_seen == ["nearby"], str(_seen))
+	_seen.clear()
+	(scr.find_child("SearchFriendButton", true, false) as Button).pressed.emit()
+	_check("play menu routing: SEARCH FRIEND button routes to search_friend (name-search / invite flow)",
+		_seen == ["search_friend"], str(_seen))
 	_seen.clear()
 	(scr.find_child("BackButton", true, false) as Button).pressed.emit()
 	_check("play menu routing: BACK routes home", _seen == ["back"], str(_seen))

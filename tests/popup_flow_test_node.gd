@@ -13,14 +13,21 @@ extends Node
 ## (random matchmaking, same stake picker + 2P/4P choice as v10
 ## ONLINE), PLAY WITH FRIENDS (invite box). The old SOLO / ONLINE
 ## tiles are gone; the checks below follow the new buttons.
+## 2026-11-28 redesign (user): the menu is now PLAY WITH A BOT,
+## 2 PLAYERS — 1 VS 1 (auto-connect, find_match '2p', stake 100, no
+## stake picker, no invites) and 4 PLAYERS — DOUBLES (auto-connect,
+## find_match '4p'). WORLD and FRIENDS are gone from the menu; the
+## Online Lobby + invite flow still live behind the home ONLINE tile.
 ## Verifies:
-##   F1: real tap on PLAY opens the Play menu (BOT + WORLD + FRIENDS)
+##   F1: real tap on PLAY opens the Play menu (BOT + 2 PLAYERS + 4 PLAYERS + SEARCH FRIEND)
 ##   F1b: real tap on BACK returns to the home screen
 ##   F2: real tap on PLAY WITH A BOT shows the loading screen (no difficulty popup)
 ##   F3: after the loading screen a solo match starts vs a random bot
-##   F4: real tap on PLAY WITH THE WORLD opens the stake picker; quick 100 + FIND
-##      OPPONENT starts the search popup (with the 12 s BOT fallback
+##   F4: real tap on 2 PLAYERS — 1 VS 1 starts the search popup at
+##      stake 100 with NO stake picker (with the 12 s BOT fallback
 ##      visible after fast-forward)
+##   F5: real tap on 4 PLAYERS — DOUBLES starts the 4p search popup
+##      (3 more players), and CANCEL closes it
 ##   L3: the home ONLINE tile also opens the stake picker and the
 ##      2P/4P choice — before the fix it jumped straight to 2-player
 ##      matchmaking with no player-count choice.
@@ -142,22 +149,25 @@ func _run() -> void:
 		return
 	print("INFO: PLAY rect=", play_btn.get_global_rect())
 	await _tap(_center(play_btn))
-	# v11: the menu names its three big buttons (BotButton / WorldButton
-	# / FriendsButton) — use them directly instead of label prefixes.
+	# v11: the menu names its three big buttons (BotButton /
+	# TwoPlayersButton / FourPlayersButton) — use them directly
+	# instead of label prefixes.
 	var bot_btn: Button = _main._mode.bot_button if _main._mode != null else null
-	var world_btn: Button = _main._mode.world_button if _main._mode != null else null
-	var friends_btn: Button = _main._mode.friends_button if _main._mode != null else null
-	print("INFO: after PLAY tap: bot=", bot_btn, " world=", world_btn, " friends=", friends_btn, " mode_screen=", _main._mode, " searching_active=", _main._searching_active)
+	var two_btn: Button = _main._mode.two_players_button if _main._mode != null else null
+	var four_btn: Button = _main._mode.four_players_button if _main._mode != null else null
+	var search_btn: Button = _main._mode.search_friend_button if _main._mode != null else null
+	print("INFO: after PLAY tap: bot=", bot_btn, " two_players=", two_btn, " four_players=", four_btn, " search_friend=", search_btn, " mode_screen=", _main._mode, " searching_active=", _main._searching_active)
 	_check("F1: PLAY opens the menu with PLAY WITH A BOT", bot_btn != null)
-	_check("F1: PLAY opens the menu with PLAY WITH THE WORLD", world_btn != null)
-	_check("F1: PLAY opens the menu with PLAY WITH FRIENDS", friends_btn != null)
+	_check("F1: PLAY opens the menu with 2 PLAYERS — 1 VS 1", two_btn != null)
+	_check("F1: PLAY opens the menu with 4 PLAYERS — DOUBLES", four_btn != null)
+	_check("F1: PLAY opens the menu with SEARCH FRIEND", search_btn != null)
 	if bot_btn == null:
 		print("INFO: main subtree after PLAY tap:")
 		_dump(_main, "")
 		_finish()
 		return
 	print("INFO: BOT rect=", bot_btn.get_global_rect(), " mf=", bot_btn.mouse_filter)
-	print("INFO: WORLD rect=", world_btn.get_global_rect(), " mf=", world_btn.mouse_filter)
+	print("INFO: 2P rect=", two_btn.get_global_rect(), " mf=", two_btn.mouse_filter)
 	print("INFO: mode screen subtree:")
 	_dump(bot_btn.get_parent().get_parent(), "")
 	# What control does the viewport think is under the BOT button?
@@ -173,8 +183,8 @@ func _run() -> void:
 		play_btn = _find_button(home, "▶")
 		await _tap(_center(play_btn))
 		bot_btn = _main._mode.bot_button if _main._mode != null else null
-		world_btn = _main._mode.world_button if _main._mode != null else null
-		_check("F1b: PLAY again reopens the menu", bot_btn != null and world_btn != null)
+		two_btn = _main._mode.two_players_button if _main._mode != null else null
+		_check("F1b: PLAY again reopens the menu", bot_btn != null and two_btn != null)
 		if bot_btn == null:
 			_finish()
 			return
@@ -201,53 +211,61 @@ func _run() -> void:
 	_check("F3: loading finishes and a solo match starts", _main._match != null)
 	if _main._match != null:
 		_check("F3: solo match is free (no stake)", _main._match.your_stake == 0 and _main._match.mode == "solo")
-	# --- F4: PLAY WITH THE WORLD path — stake picker, then search popup ---
+	# --- F4 (2026-11-28): 2 PLAYERS — 1 VS 1 auto-connects — NO stake
+	# picker, straight to the search popup at stake 100 ---
 	_main._show_home()
 	await _frames(5)
 	home = _main._home
 	play_btn = _find_button(home, "▶")
 	await _tap(_center(play_btn))
-	world_btn = _main._mode.world_button if _main._mode != null else null
-	_check("F4: PLAY menu PLAY WITH THE WORLD exists", world_btn != null)
-	if world_btn == null:
+	two_btn = _main._mode.two_players_button if _main._mode != null else null
+	_check("F4: PLAY menu 2 PLAYERS — 1 VS 1 exists", two_btn != null)
+	if two_btn == null:
 		_finish()
 		return
-	await _tap(_center(world_btn))
-	var quick100 := _find_button(_main, "100")
-	print("INFO: after WORLD tap: quick100=", quick100)
-	_check("F4: PLAY WITH THE WORLD opens stake picker (100)", quick100 != null)
-	if quick100 != null:
+	Net.queue_failed.disconnect(_main._on_queue_failed)
+	await _tap(_center(two_btn))
+	var picker_btn := _find_button(_main, "100")
+	print("INFO: after 2 PLAYERS tap: searching=", _main._searching, " active=", _main._searching_active, " stake=", _main._search_stake, " picker100=", picker_btn)
+	_check("F4: 2 PLAYERS skips the stake picker (no 100 quick button)", picker_btn == null)
+	_check("F4: 2 PLAYERS starts the search popup", _main._searching != null and _main._searching_active)
+	_check("F4: search stake is 100", _main._search_stake == 100)
+	if _main._searching != null:
+		_main._search_elapsed = 11.9
+		await _frames(30)
+		var bot_visible: bool = _main._search_bot_button != null and is_instance_valid(_main._search_bot_button) and _main._search_bot_button.visible
+		print("INFO: bot fallback visible after 12 s: ", bot_visible)
+		_check("F4: search offers BOT fallback after 12 s", bot_visible)
+		# Tap the BOT fallback -> practice match starts.
+		if bot_visible:
+			var search_bot_btn: Button = _main._search_bot_button
+			await _tap(_center(search_bot_btn))
+			print("INFO: after BOT tap: match=", _main._match)
+			_check("F4: BOT fallback starts a practice match", _main._match != null)
+	# --- F5 (2026-11-28): 4 PLAYERS — DOUBLES auto-connects (3 more
+	# players), and CANCEL leaves the search ---
+	_main._show_home()
+	await _frames(5)
+	home = _main._home
+	play_btn = _find_button(home, "▶")
+	await _tap(_center(play_btn))
+	four_btn = _main._mode.four_players_button if _main._mode != null else null
+	_check("F5: PLAY menu 4 PLAYERS — DOUBLES exists", four_btn != null)
+	if four_btn == null:
+		_finish()
+		return
+	if Net.queue_failed.is_connected(_main._on_queue_failed):
 		Net.queue_failed.disconnect(_main._on_queue_failed)
-		await _tap(_center(quick100))
-		var find_btn := _find_button(_main, "FIND OPPONENT")
-		_check("F4: stake picker has FIND OPPONENT", find_btn != null)
-		if find_btn == null:
-			_finish()
-			return
-		await _tap(_center(find_btn))
-		# v6: after the stake comes the 2P/4P choice — tap 2 PLAYERS.
-		var two_btn := _find_button(_main, "2 PLAYERS")
-		print("INFO: after FIND OPPONENT tap: 2p choice=", two_btn)
-		_check("F4: stake confirm opens the 2P/4P choice", two_btn != null)
-		if two_btn == null:
-			_finish()
-			return
-		await _tap(_center(two_btn))
-		print("INFO: after 2 PLAYERS tap: searching=", _main._searching, " active=", _main._searching_active, " stake=", _main._search_stake)
-		_check("F4: 2 PLAYERS starts the search popup", _main._searching != null and _main._searching_active)
-		_check("F4: search stake is 100", _main._search_stake == 100)
-		if _main._searching != null:
-			_main._search_elapsed = 11.9
-			await _frames(30)
-			var bot_visible: bool = _main._search_bot_button != null and is_instance_valid(_main._search_bot_button) and _main._search_bot_button.visible
-			print("INFO: bot fallback visible after 12 s: ", bot_visible)
-			_check("F4: search offers BOT fallback after 12 s", bot_visible)
-			# Tap the BOT fallback -> practice match starts.
-			if bot_visible:
-				var search_bot_btn: Button = _main._search_bot_button
-				await _tap(_center(search_bot_btn))
-				print("INFO: after BOT tap: match=", _main._match)
-				_check("F4: BOT fallback starts a practice match", _main._match != null)
+	await _tap(_center(four_btn))
+	print("INFO: after 4 PLAYERS tap: searching=", _main._searching, " active=", _main._searching_active, " stake=", _main._search_stake)
+	_check("F5: 4 PLAYERS starts the search popup", _main._searching != null and _main._searching_active)
+	_check("F5: search stake is 100", _main._search_stake == 100)
+	_check("F5: 4p search looks for 3 more players", _main._search_status != null and String(_main._search_status.text).contains("3 more players"))
+	var cancel_btn := _find_button(_main, "CANCEL")
+	_check("F5: search popup has CANCEL", cancel_btn != null)
+	if cancel_btn != null:
+		await _tap(_center(cancel_btn))
+		_check("F5: CANCEL closes the search popup", _main._searching == null and not _main._searching_active)
 	# --- L3: home ONLINE tile — stake picker, then the 2P/4P choice
 	# (same as PLAY → ONLINE; before the fix it went straight to
 	# 2-player matchmaking) ---

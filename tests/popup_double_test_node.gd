@@ -121,9 +121,9 @@ func _run() -> void:
 	# Android-style tap on PLAY.
 	await _tap_android(_center(play_btn))
 	var bot_btn: Button = _main._mode.bot_button if _main._mode != null else null
-	var world_btn: Button = _main._mode.world_button if _main._mode != null else null
-	print("INFO: after PLAY android-tap: bot=", bot_btn, " world=", world_btn)
-	_check("PLAY opens the menu (android tap)", bot_btn != null and world_btn != null)
+	var two_btn: Button = _main._mode.two_players_button if _main._mode != null else null
+	print("INFO: after PLAY android-tap: bot=", bot_btn, " two_players=", two_btn)
+	_check("PLAY opens the menu (android tap)", bot_btn != null and two_btn != null)
 	if bot_btn == null:
 		_finish()
 		return

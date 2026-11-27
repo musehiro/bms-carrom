@@ -630,17 +630,21 @@ func _start_solo_direct() -> void:
 # ---------------------------------------------------------- mode choice (v3, v10 direct play)
 
 func _open_mode_choice() -> void:
-	# v11: PLAY opens the three-big-button menu (PlayMenuScreen) — bot,
-	# world, friends — instead of the v3/v10 four-tile mode screen.
-	# Same full-screen plain-button layout (proven on Buddhika's phone),
-	# no popup overlay. World Tour + NEARBY live on as smaller buttons
-	# on the same screen, so no mode is removed.
+	# 2026-11-28 Play-screen redesign (user): PLAY opens the
+	# three-big-button menu (PlayMenuScreen) — bot, 2 players
+	# (auto-connect 1 vs 1), 4 players (auto-connect doubles) —
+	# instead of the v3/v10 four-tile mode screen. Same full-screen
+	# plain-button layout (proven on Buddhika's phone), no popup
+	# overlay. World Tour + NEARBY live on as smaller buttons on the
+	# same screen, and SEARCH FRIEND opens the name-search / invite
+	# flow, so no mode is removed.
 	_clear()
 	_mode = PlayMenuScreen.new()
 	add_child(_mode)
 	_mode.bot_chosen.connect(_start_solo_direct)
-	_mode.world_chosen.connect(_show_online_stake)
-	_mode.friends_chosen.connect(_open_friends_invite)
+	_mode.two_players_chosen.connect(_on_play_two_players)
+	_mode.four_players_chosen.connect(_on_play_four_players)
+	_mode.search_friend_chosen.connect(_open_friends_invite)
 	_mode.tour_chosen.connect(func() -> void:
 		_show_stake_picker(func(stake: int) -> void: _start_tour_random(stake),
 			"World Tour — a random advanced computer champion (BOT), near your level. Your stake is mirrored by the bot — winner takes the pot (both stakes).",
@@ -648,10 +652,31 @@ func _open_mode_choice() -> void:
 	_mode.nearby_chosen.connect(_open_nearby)
 	_mode.go_back.connect(_show_home)
 
-## v11: PLAY WITH FRIENDS — back home with the invite box open, so
-## the player can search by name and send a 2p or 4p invite. The box
-## is the invite flow (send -> accept -> group ready -> join room);
-## this is only the route into it.
+## 2026-11-28 Play-screen redesign (user): 2 PLAYERS / 4 PLAYERS
+## auto-connect — tap and the player is queued straight into random
+## matchmaking (find_match via _start_matchmaking: "FINDING
+## OPPONENT" popup, CANCEL leaves the queue). No stake picker, no
+## invites from these buttons. The stake is the lobby's standard 100;
+## a player with fewer coins stakes their whole balance instead (as
+## long as it covers MIN_STAKE); a broke player gets the broke panel,
+## same as the old ONLINE path.
+func _on_play_two_players() -> void:
+	_start_auto_match(2)
+
+func _on_play_four_players() -> void:
+	_start_auto_match(4)
+
+func _start_auto_match(players: int) -> void:
+	if CoinLoop.is_broke(Save.coins):
+		_show_broke_panel("online")
+		return
+	_start_matchmaking(mini(PlayMenuScreen.AUTO_STAKE, Save.coins), "", players)
+
+## SEARCH FRIEND (Play screen, user 2026-11-28) — back home with the
+## invite box open, so the player can search by name and send a 2p or
+## 4p invite. The box is the invite flow (send -> accept -> group
+## ready -> join room); this is only the route into it. The 2P/4P
+## auto-connect buttons never touch this — only SEARCH FRIEND does.
 func _open_friends_invite() -> void:
 	_show_home()
 	if _home:
