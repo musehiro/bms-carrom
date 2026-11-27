@@ -18,12 +18,19 @@ const XP_PER_WIN := 50
 const XP_PER_QUEEN := 25
 const XP_PER_LEVEL := 500
 
-# Rewarded-ad ladder: per-ad coin payout grows with each ad watched
-# today — 1st +150, 2nd +200, 3rd +250, 4th +300, 5th and beyond +400.
-# Resets at midnight (local day). Total rewarded-ad coins are capped at
-# 2,500/day (exactly 8 ads: 150+200+250+300+400*4), so the ladder cannot
-# be farmed without limit.
+# Rewarded-ad ladder: per-tier coin payout grows with each tier
+# claimed today — 1st +150, 2nd +200, 3rd +250, 4th +300, 5th and
+# beyond +400. Resets at midnight (local day). Total rewarded-ad
+# coins are capped at 2,500/day (38 ads to reach it on the FREE COINS
+# ladder: tiers pay 150+200+250+300+400 = 1,300 over 2+3+4+5+6 = 20
+# ads, then three more +400 claims at 6 ads each = 18 ads), so the
+# ladder cannot be farmed without limit.
 const AD_LADDER := [150, 200, 250, 300, 400]
+## Ads each ladder tier needs before its amount is paid (FREE COINS
+## ladder only — every other rewarded ad still pays one tier per ad).
+## Tier 1 (+150) needs 2 ads, tier 2 (+200) needs 3, then 4, 5, 6:
+## the bigger the amount, the more ads it takes to earn it.
+const AD_LADDER_ADS := [2, 3, 4, 5, 6]
 const DAILY_AD_COIN_CAP := 2500
 
 var coins: int = STARTING_COINS
@@ -50,9 +57,11 @@ var sound_on: bool = true
 var player_name: String = "Player"
 var daily_streak: int = 0
 var last_daily_claim: String = "" # YYYY-MM-DD
-var ad_count_today: int = 0 # rewarded ads watched today (ladder position)
+var ad_count_today: int = 0 # tier payouts claimed today (ladder position)
 var ad_coins_today: int = 0 # ladder coins earned today (capped)
 var ad_date: String = "" # YYYY-MM-DD the ad counters belong to
+var ad_tier_progress: int = 0 # ads watched toward the CURRENT ladder tier (FREE COINS flow)
+var ad_progress_tier: int = 0 # tier index the progress belongs to (stale progress is discarded)
 var aim_assist_until: int = 0 # unix time; 0 = inactive
 var aim_assist_ads_progress: int = 0 # 0..1 ads watched toward next hour
 var interstitial_counter: int = 0 # matches since last interstitial
@@ -142,6 +151,8 @@ func load_save() -> void:
 	ad_count_today = int(_cfg.get_value("ads", "ad_count_today", 0))
 	ad_coins_today = int(_cfg.get_value("ads", "ad_coins_today", 0))
 	ad_date = String(_cfg.get_value("ads", "ad_date", ""))
+	ad_tier_progress = int(_cfg.get_value("ads", "ad_tier_progress", 0))
+	ad_progress_tier = int(_cfg.get_value("ads", "ad_progress_tier", 0))
 	aim_assist_until = int(_cfg.get_value("ads", "aim_assist_until", 0))
 	aim_assist_ads_progress = int(_cfg.get_value("ads", "aim_assist_ads_progress", 0))
 	interstitial_counter = int(_cfg.get_value("ads", "interstitial_counter", 0))
@@ -191,6 +202,8 @@ func save() -> void:
 	_cfg.set_value("ads", "ad_count_today", ad_count_today)
 	_cfg.set_value("ads", "ad_coins_today", ad_coins_today)
 	_cfg.set_value("ads", "ad_date", ad_date)
+	_cfg.set_value("ads", "ad_tier_progress", ad_tier_progress)
+	_cfg.set_value("ads", "ad_progress_tier", ad_progress_tier)
 	_cfg.set_value("ads", "aim_assist_until", aim_assist_until)
 	_cfg.set_value("ads", "aim_assist_ads_progress", aim_assist_ads_progress)
 	_cfg.set_value("ads", "interstitial_counter", interstitial_counter)
@@ -277,16 +290,23 @@ func today_str() -> String:
 	return "%04d-%02d-%02d" % [d["year"], d["month"], d["day"]]
 
 ## --- Rewarded-ad ladder (v5) -----------------------------------------
-## Every rewarded ad watched pays the current tier and advances the ladder;
-## the cap (2,500 coins/day) is the only limit. Ads watched for Aim-Assist
-## or the Daily Bonus pay the ladder amount too, on top of unlocking that
-## reward — one rule for every rewarded ad, so the player always knows
-## what an ad is worth.
+## Two ways to earn from the ladder, one rule for the amount:
+##  * FREE COINS ladder: a tier pays out only after its ads are watched
+##    (tier 1: 2 ads for +150, tier 2: 3 ads for +200, then 4, 5, 6).
+##    Intermediate ads pay nothing — the amount is granted exactly
+##    once, on the last ad, and it is exactly the amount the button
+##    showed (ad_claim_amount()).
+##  * Every OTHER rewarded ad (Daily Bonus, Aim-Assist, broke-panel,
+##    solo-win, win-double) still pays one tier per ad, on top of
+##    unlocking its own reward. The cap (2,500 coins/day) is the only
+##    limit for both paths.
 
 func _ad_reset_if_new_day() -> void:
 	if ad_date != today_str():
 		ad_count_today = 0
 		ad_coins_today = 0
+		ad_tier_progress = 0
+		ad_progress_tier = 0
 		ad_date = today_str()
 		save()
 
@@ -297,11 +317,54 @@ func ad_next_reward() -> int:
 		return 0
 	return ad_reward_at(ad_count_today)
 
-## The ladder amount for the Nth ad watched today (0-based count).
-## Pure — lets a caller price two ads ahead (the win screen's
+## The ladder amount for the Nth tier claimed today (0-based count).
+## Pure — lets a caller price two tiers ahead (the win screen's
 ## "WATCH 2 ADS -> EARN" offer) without advancing the ladder.
 func ad_reward_at(count: int) -> int:
 	return AD_LADDER[mini(maxi(count, 0), AD_LADDER.size() - 1)]
+
+## Ads the current ladder tier needs before its amount is paid.
+func ad_ads_needed() -> int:
+	_ad_reset_if_new_day()
+	return AD_LADDER_ADS[mini(maxi(ad_count_today, 0), AD_LADDER_ADS.size() - 1)]
+
+## Ads already watched toward the current tier (0 when the tier moved
+## on since the progress was earned — stale progress never counts).
+func ad_progress() -> int:
+	_ad_reset_if_new_day()
+	if ad_progress_tier != ad_count_today:
+		return 0
+	return ad_tier_progress
+
+## Ads still to watch before the current tier pays out.
+func ad_ads_remaining() -> int:
+	return maxi(0, ad_ads_needed() - ad_progress())
+
+## Exact coins the current tier pays when its ads are done. The daily
+## cap can shrink it — the button shows this number, and the grant
+## pays exactly this number, never more.
+func ad_claim_amount() -> int:
+	_ad_reset_if_new_day()
+	if ad_coins_today >= DAILY_AD_COIN_CAP:
+		return 0
+	return mini(ad_reward_at(ad_count_today), DAILY_AD_COIN_CAP - ad_coins_today)
+
+## Count one watched ad toward the current tier. Returns the new
+## progress. Progress earned for an older tier is discarded first.
+func record_ladder_ad_progress() -> int:
+	_ad_reset_if_new_day()
+	if ad_progress_tier != ad_count_today:
+		ad_progress_tier = ad_count_today
+		ad_tier_progress = 0
+	ad_tier_progress += 1
+	save()
+	return ad_tier_progress
+
+## Clear the current tier's progress (called when the tier pays out).
+func reset_ladder_progress() -> void:
+	ad_tier_progress = 0
+	ad_progress_tier = ad_count_today
+	save()
 
 func ad_cap_reached() -> bool:
 	_ad_reset_if_new_day()

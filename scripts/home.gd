@@ -389,7 +389,15 @@ func refresh() -> void:
 		_free_coins_button.text = "FREE COINS\ncap reached"
 		_free_coins_button.disabled = true
 	else:
-		_free_coins_button.text = "FREE COINS\n+%d" % Save.ad_next_reward()
+		# The tile states the deal exactly: the coins the tier pays
+		# and how many ads it takes (2 for the first tier, then 3, 4,
+		# 5, 6). While a tier is part-watched it shows the ads left.
+		var amount := Save.ad_claim_amount()
+		var remaining := Save.ad_ads_remaining()
+		if Save.ad_progress() > 0:
+			_free_coins_button.text = "FREE COINS\n+%d · %d more %s" % [amount, remaining, "ad" if remaining == 1 else "ads"]
+		else:
+			_free_coins_button.text = "FREE COINS\n+%d · Watch %d %s" % [amount, remaining, "ad" if remaining == 1 else "ads"]
 		_free_coins_button.disabled = false
 	if Save.aim_assist_active():
 		var left := Save.aim_assist_remaining_sec()
@@ -739,25 +747,29 @@ func _build_ladder() -> void:
 		var label := Label.new()
 		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		label.add_theme_font_size_override("font_size", 16)
+		# Each chip shows its tier, its coins AND its ad count
+		# (tier 1: 2 ads, then 3, 4, 5, 6) — the price is visible
+		# before the player taps anything.
+		var chip_text := "%s +%d\n%d ads" % [tier_names[i], Save.AD_LADDER[i], Save.AD_LADDER_ADS[i]]
 		if capped or i + 1 < current:
 			# Done: dimmed, ticked.
 			style.bg_color = Color(0.10, 0.28, 0.30)
 			style.border_color = Color(0.83, 0.69, 0.22, 0.25)
 			style.set_border_width_all(1)
-			label.text = "✓ %s +%d" % [tier_names[i], Save.AD_LADDER[i]]
+			label.text = "✓ " + chip_text
 			label.add_theme_color_override("font_color", UiKit.MUTED)
 		elif i + 1 == current:
 			# Current tier: gold, unmissable.
 			style.bg_color = UiKit.GOLD
 			style.border_color = UiKit.GOLD_LIGHT
 			style.set_border_width_all(2)
-			label.text = "%s +%d" % [tier_names[i], Save.AD_LADDER[i]]
+			label.text = chip_text
 			label.add_theme_color_override("font_color", UiKit.DARK_TEXT)
 		else:
 			style.bg_color = Color(0.08, 0.38, 0.40)
 			style.border_color = UiKit.GOLD
 			style.set_border_width_all(1)
-			label.text = "%s +%d" % [tier_names[i], Save.AD_LADDER[i]]
+			label.text = chip_text
 			label.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
 		chip.add_theme_stylebox_override("panel", style)
 		chip.size_flags_horizontal = Control.SIZE_EXPAND_FILL

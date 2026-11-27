@@ -64,6 +64,8 @@ func _initialize() -> void:
 	_test_v11_session_persist()
 	_test_auth_fix_loading()
 	_test_google_signin_deep_link()
+	_test_coin_colours_literal()
+	_test_ad_ladder_multi_ad()
 	# The SIGN OUT button test lives in tests/supabase_mock_test_node.gd
 	# (mock: home has a SIGN OUT button …), NOT here: in -s script mode
 	# home.gd's first compile runs before the autoloads register, so the
@@ -981,6 +983,124 @@ func _test_save_ad_reward_at() -> void:
 	_check("v10 save: ladder step 4 is 400", s.ad_reward_at(4) == 400)
 	_check("v10 save: ladder clamps past the last step", s.ad_reward_at(99) == 400)
 	_check("v10 save: negative count clamps to the first step", s.ad_reward_at(-3) == 150)
+	s.queue_free()
+
+## Literal coin colours (2026-11-27): a piece must read as its NAME.
+## White = a white face, black = a black face — the old blue-centre
+## white / gold-ring black read as yellow and blue on the board.
+## Pins BoardView.piece_palette() so the colours can never drift again.
+func _lum(c: Color) -> float:
+	return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+
+func _test_coin_colours_literal() -> void:
+	var white: Dictionary = BoardView.piece_palette("white", "classic")
+	var black: Dictionary = BoardView.piece_palette("black", "classic")
+	var queen: Dictionary = BoardView.piece_palette("queen", "classic")
+	var wb: Color = white["base"]
+	var bb: Color = black["base"]
+	var wd: Color = white["dot"]
+	var bd: Color = black["dot"]
+	_check("coins: white face is white (all channels > 0.9)", wb.r > 0.9 and wb.g > 0.9 and wb.b > 0.9, str(wb))
+	_check("coins: white face has no blue tint", wb.b - wb.r < 0.05, str(wb))
+	_check("coins: black face is black (all channels < 0.1)", bb.r < 0.1 and bb.g < 0.1 and bb.b < 0.1, str(bb))
+	_check("coins: black face has no gold tint", bb.r < 0.1, str(bb))
+	_check("coins: white vs black unmistakable (luminance gap > 0.7)", _lum(wb) - _lum(bb) > 0.7, str(_lum(wb) - _lum(bb)))
+	_check("coins: white centre dot is dark (lum < 0.25)", _lum(wd) < 0.25, str(wd))
+	_check("coins: black centre dot is light (lum > 0.8)", _lum(bd) > 0.8, str(bd))
+	var qb: Color = queen["base"]
+	_check("coins: queen face is red (r > 0.6, g < 0.3)", qb.r > 0.6 and qb.g < 0.3, str(qb))
+	_check("coins: queen star is gold", (queen["dot"] as Color).is_equal_approx(Color(1.0, 0.85, 0.25)))
+	_check("coins: white accent is dark, not blue", (white["rim"] as Color).b - (white["rim"] as Color).r < 0.1, str(white["rim"]))
+
+## Ad ladder, multi-ad tiers (2026-11-27): each FREE COINS tier pays
+## out only after its ads are watched (2, 3, 4, 5, 6) and the grant is
+## exactly the amount the button showed. Intermediate ads pay nothing.
+## Other rewarded ads still pay one tier per ad — that path is NOT
+## touched here (see _test_v11_coin_loop).
+func _test_ad_ladder_multi_ad() -> void:
+	var SaveScript: GDScript = load("res://scripts/save_data.gd")
+	var s = SaveScript.new()
+	# The progress helpers save() to the real save file — back it up
+	# and restore it at the end so this test never clobbers the VM's save.
+	var save_path := "user://bms_carrom_save.cfg"
+	var had_save := FileAccess.file_exists(save_path)
+	var backup := ""
+	if had_save:
+		backup = FileAccess.get_file_as_string(save_path)
+	# Fresh day, fresh ladder.
+	s.ad_date = s.today_str()
+	s.ad_count_today = 0
+	s.ad_coins_today = 0
+	s.ad_tier_progress = 0
+	s.ad_progress_tier = 0
+	var coins0: int = s.coins
+	# Tier table: 2, 3, 4, 5, 6 ads.
+	_check("ladder: tier 1 needs 2 ads", s.ad_ads_needed() == 2)
+	s.ad_count_today = 1
+	_check("ladder: tier 2 needs 3 ads", s.ad_ads_needed() == 3)
+	s.ad_count_today = 2
+	_check("ladder: tier 3 needs 4 ads", s.ad_ads_needed() == 4)
+	s.ad_count_today = 3
+	_check("ladder: tier 4 needs 5 ads", s.ad_ads_needed() == 5)
+	s.ad_count_today = 4
+	_check("ladder: tier 5 needs 6 ads", s.ad_ads_needed() == 6)
+	s.ad_count_today = 99
+	_check("ladder: past the last tier still needs 6 ads", s.ad_ads_needed() == 6)
+	# Tier 1 claim flow: 2 ads, exactly +150, nothing after the first.
+	s.ad_count_today = 0
+	s.ad_coins_today = 0
+	s.ad_tier_progress = 0
+	s.ad_progress_tier = 0
+	_check("ladder: tier 1 claim amount is 150", s.ad_claim_amount() == 150)
+	_check("ladder: fresh progress is 0", s.ad_progress() == 0)
+	_check("ladder: 2 ads remaining at the start", s.ad_ads_remaining() == 2)
+	var p1: int = s.record_ladder_ad_progress()
+	_check("ladder: first ad counts as progress 1", p1 == 1 and s.ad_progress() == 1)
+	_check("ladder: claim amount still 150 mid-tier", s.ad_claim_amount() == 150)
+	_check("ladder: 1 ad remaining after the first", s.ad_ads_remaining() == 1)
+	var p2: int = s.record_ladder_ad_progress()
+	_check("ladder: second ad completes the tier", p2 == 2 and s.ad_ads_remaining() == 0)
+	var amount: int = s.ad_claim_amount()
+	s.add_coins(amount)
+	s.record_ad_reward(amount)
+	s.reset_ladder_progress()
+	_check("ladder: tier 1 grants exactly 150", amount == 150 and s.coins == coins0 + 150, str(s.coins - coins0))
+	_check("ladder: tier advances after the claim", s.ad_count_today == 1 and s.ad_coins_today == 150)
+	_check("ladder: progress resets after the claim", s.ad_progress() == 0)
+	# Tier 2: 3 ads for exactly +200.
+	_check("ladder: tier 2 claim amount is 200", s.ad_claim_amount() == 200)
+	s.record_ladder_ad_progress()
+	s.record_ladder_ad_progress()
+	_check("ladder: tier 2 not done after 2 ads", s.ad_progress() == 2 and s.ad_ads_remaining() == 1)
+	s.record_ladder_ad_progress()
+	var amount2: int = s.ad_claim_amount()
+	s.add_coins(amount2)
+	s.record_ad_reward(amount2)
+	s.reset_ladder_progress()
+	_check("ladder: tier 2 grants exactly 200", amount2 == 200 and s.coins == coins0 + 350, str(s.coins - coins0))
+	# Stale progress: progress earned on tier 1 does not count on tier 2.
+	s.ad_count_today = 0
+	s.ad_tier_progress = 1
+	s.ad_progress_tier = 0
+	s.ad_count_today = 1
+	_check("ladder: progress from an older tier is discarded", s.ad_progress() == 0)
+	var p3: int = s.record_ladder_ad_progress()
+	_check("ladder: progress restarts at 1 on the new tier", p3 == 1 and s.ad_progress() == 1)
+	# Daily cap shrinks the claim: 100 coins of room left, tier pays 100.
+	s.ad_count_today = 0
+	s.ad_coins_today = 2400
+	s.ad_tier_progress = 0
+	s.ad_progress_tier = 0
+	_check("ladder: claim is capped at the room left (100)", s.ad_claim_amount() == 100)
+	s.ad_coins_today = 2500
+	_check("ladder: claim is 0 at the cap", s.ad_claim_amount() == 0)
+	# Restore the save file this test overwrote.
+	if had_save:
+		var f := FileAccess.open(save_path, FileAccess.WRITE)
+		f.store_string(backup)
+		f.close()
+	else:
+		DirAccess.remove_absolute(OS.get_user_data_dir() + "/bms_carrom_save.cfg")
 	s.queue_free()
 
 func _test_supabase_realtime_parse() -> void:

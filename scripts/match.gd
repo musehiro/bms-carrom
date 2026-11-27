@@ -493,11 +493,12 @@ func _physics_process(delta: float) -> void:
 
 func _on_piece_pocketed(p: Dictionary) -> void:
 	_shot_pocketed.append(p)
-	# Puff colours follow the new coin motifs (white = sky blue,
-	# black = gold, queen = red, striker = gold).
-	var col := Color(0.30, 0.62, 0.95)
+	# Puff colours follow the literal coin colours (white = white,
+	# black = black, queen = red, striker = gold). The puff's white
+	# inner dot keeps the black puff readable on dark boards.
+	var col := Color(0.97, 0.97, 0.95)
 	if p["kind"] == "black":
-		col = Color(0.96, 0.76, 0.20)
+		col = Color(0.10, 0.10, 0.12)
 	elif p["kind"] == "queen":
 		col = Color(0.85, 0.15, 0.2)
 	elif p["kind"] == "striker":
@@ -1088,7 +1089,7 @@ func _show_premium_win(my_share: int, pot: int, xp_earned: int, new_level: int, 
 			_solo_earn_label = earn["labels"][1]
 			_solo_earn_button.pressed.connect(_on_solo_earn_pressed)
 			box.add_child(_solo_earn_button)
-			var earn_note := UiKit.muted_label("One ad pays the ad-ladder amount — same as FREE COINS.", 17)
+			var earn_note := UiKit.muted_label("One ad pays the current ladder amount.", 17)
 			earn_note.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 			box.add_child(earn_note)
 		else:

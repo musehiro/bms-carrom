@@ -236,6 +236,33 @@ func _run() -> void:
 	await _frames(5)
 	_check("auth: home shown after register", _main._home != null and _main._auth == null)
 	_check("auth: account saved locally", Accounts.has_account() and Save.account_gmail == "test.player@gmail.com")
+	# --- LADDER (coin colours + ad ladder, 2026-11-27): the FREE COINS
+	# tile and the ladder panel state the deal exactly — how many ads
+	# each tier needs and the exact coins it pays.
+	Save.ad_count_today = 0
+	Save.ad_coins_today = 0
+	Save.ad_date = Save.today_str()
+	Save.ad_tier_progress = 0
+	Save.ad_progress_tier = 0
+	Save.save()
+	_main._home.refresh()
+	await _frames(2)
+	var free_coins := _find_button_containing(_main._home, "FREE COINS")
+	_check("ladder: FREE COINS tile shown", free_coins != null)
+	_check("ladder: tile shows +150 and Watch 2 ads", free_coins != null and free_coins.text.contains("+150") and free_coins.text.contains("Watch 2 ads"), free_coins.text if free_coins else "")
+	_check("ladder: strip shows the first tier's coins", _find_label_containing(_main._home, "1st +150") != null)
+	_check("ladder: strip shows the first tier needs 2 ads", _find_label_containing(_main._home, "2 ads") != null)
+	_main._show_ladder_panel()
+	await _frames(3)
+	var watch := _find_button_containing(_main, "WATCH 2 ADS")
+	_check("ladder: panel button says WATCH 2 ADS", watch != null)
+	_check("ladder: panel button shows +150 coins", watch != null and watch.text.contains("+150"), watch.text if watch else "")
+	_check("ladder: panel row shows the tier's ad count", _find_label_containing(_main, "1st tier — +150 coins · 2 ads") != null)
+	# Close the panel with its X so the invite-box steps start clean.
+	var lx := _find_button(_main, "✕")
+	if lx:
+		lx.pressed.emit()
+	await _frames(3)
 	# --- I1: invite box opens with an incoming invite ---
 	Friends.incoming = [
 		{"id": "inv-1", "group_id": "grp-1", "from_id": "p-nimal", "to_id": "me",

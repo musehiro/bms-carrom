@@ -1271,8 +1271,8 @@ func _show_ladder_panel() -> void:
 	var pop: Dictionary = UiKit.popup_window("FREE COINS — AD LADDER", Vector2(580, 600))
 	parent.add_child(pop["dim"])
 	var box: VBoxContainer = pop["box"]
-	box.add_child(UiKit.body_label("Every ad pays more than the last. Watch ads to climb the ladder — it resets each day.", 20))
-	var tier_names := ["1st ad", "2nd ad", "3rd ad", "4th ad", "5th ad and beyond"]
+	box.add_child(UiKit.body_label("Every tier pays more than the last — but each tier takes more ads. Watch all the ads a tier needs and its coins are yours, exactly as shown. The ladder resets each day.", 20))
+	var tier_names := ["1st tier", "2nd tier", "3rd tier", "4th tier", "5th tier and beyond"]
 	var current := Save.ad_current_tier()
 	var capped := Save.ad_cap_reached()
 	for i in range(5):
@@ -1280,13 +1280,28 @@ func _show_ladder_panel() -> void:
 		if capped or i + 1 < current:
 			state = "  ✓ done"
 		elif i + 1 == current:
-			state = "  ◀ YOUR NEXT AD"
-		var row := UiKit.body_label("%s — +%d coins%s" % [tier_names[i], Save.AD_LADDER[i], state], 22)
+			var prog := Save.ad_progress()
+			if prog > 0:
+				state = "  ◀ YOUR NEXT TIER — %d of %d ads watched" % [prog, Save.ad_ads_needed()]
+			else:
+				state = "  ◀ YOUR NEXT TIER"
+		var row := UiKit.body_label("%s — +%d coins · %d ads%s" % [tier_names[i], Save.AD_LADDER[i], Save.AD_LADDER_ADS[i], state], 22)
 		if i + 1 == current and not capped:
 			row.add_theme_color_override("font_color", UiKit.GOLD_LIGHT)
 		box.add_child(row)
 	box.add_child(UiKit.muted_label("Today: ◉ %d / %d coins from ads" % [Save.ad_coins_today, Save.DAILY_AD_COIN_CAP], 18))
-	var watch := UiKit.gold_button("WATCH AD  (+%d COINS)" % Save.ad_next_reward() if not capped else "COME BACK TOMORROW", 24)
+	# The button states the deal exactly: how many ads are left to watch
+	# and the exact coins the tier pays (ad_claim_amount — the cap can
+	# shrink it, so the number on the button is the number granted).
+	var amount := Save.ad_claim_amount()
+	var remaining := Save.ad_ads_remaining()
+	var watch_text := "COME BACK TOMORROW"
+	if not capped:
+		if Save.ad_progress() > 0:
+			watch_text = "WATCH %d MORE %s — +%d COINS" % [remaining, "AD" if remaining == 1 else "ADS", amount]
+		else:
+			watch_text = "WATCH %d %s — +%d COINS" % [remaining, "AD" if remaining == 1 else "ADS", amount]
+	var watch := UiKit.gold_button(watch_text, 24)
 	if capped:
 		watch.disabled = true
 	watch.pressed.connect(func() -> void:
@@ -1302,21 +1317,46 @@ func _on_watch_ad_daily() -> void:
 		return
 	Ads.show_rewarded("daily_bonus")
 
-## Every rewarded ad pays the current ladder amount and advances the
-## ladder; ads watched for Aim-Assist or the Daily Bonus pay the ladder
-## amount too, on top of unlocking that reward. The daily cap (2,500)
-## is the only limit.
+## Every rewarded ad pays from the ladder; the daily cap (2,500) is the
+## only limit. Two paths:
+##  * "coins" (FREE COINS ladder): a tier pays out only after ALL its
+##    ads are watched (2 for tier 1, 3 for tier 2, then 4, 5, 6).
+##    Intermediate ads pay nothing; the last ad grants exactly the
+##    amount the button showed (Save.ad_claim_amount()).
+##  * Every other reason (Daily Bonus, Aim-Assist, broke-panel, solo-win,
+##    win-double) pays one tier per ad, on top of unlocking its own
+##    reward — unchanged.
 func _on_rewarded_earned(reason: String, simulated: bool) -> void:
 	var sim := " (test ad simulated)" if simulated else ""
+	if reason == "coins":
+		# FREE COINS ladder: count this ad toward the current tier.
+		# Nothing is granted until the tier's last ad — then the exact
+		# amount the button showed is paid, once.
+		var needed := Save.ad_ads_needed()
+		var amount := Save.ad_claim_amount()
+		var progress := Save.record_ladder_ad_progress()
+		if progress < needed:
+			_toast("Ad %d of %d watched — %d more for +%d coins.%s" % [progress, needed, needed - progress, amount, sim])
+		else:
+			Save.reset_ladder_progress()
+			if amount > 0:
+				Save.add_coins(amount)
+				Save.record_ad_reward(amount)
+				_toast("+%d coins from the ad ladder!%s" % [amount, sim])
+			else:
+				Save.record_ad_reward(0)
+				_toast("Daily ad limit reached — no more ad coins today.%s" % sim)
+		if _home:
+			_home.refresh()
+			Accounts.sync_to_cloud()
+		return
 	var ladder := Save.ad_next_reward()
 	if ladder > 0:
 		Save.add_coins(ladder)
 		Save.record_ad_reward(ladder)
 	else:
 		Save.record_ad_reward(0)
-	if reason == "coins":
-		_toast("+%d coins from the ad ladder!%s" % [ladder, sim] if ladder > 0 else "Daily ad limit reached — no more ad coins today.%s" % sim)
-	elif reason == "broke_coins":
+	if reason == "broke_coins":
 		# v11 coin loop: the broke-panel ad pays the normal ladder, like
 		# "coins" — the return to matchmaking is handled below.
 		_toast("+%d coins from the ad ladder!%s" % [ladder, sim] if ladder > 0 else "Daily ad limit reached — no more ad coins today.%s" % sim)
