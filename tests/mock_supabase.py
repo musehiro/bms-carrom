@@ -42,6 +42,7 @@ import hashlib
 import json
 import struct
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -82,6 +83,8 @@ class State:
         # {"method", "path", "headers", "body"} — read back via
         # GET /__test__/last_post so tests can assert the exact
         # request the client sent (URL, body, Prefer header).
+        self.rpc_counts = {}  # round 4: RPC path -> call count
+        # (single-flight test reads it via GET /__test__/rpc_counts).
 
     def new_user(self, email=None):
         uid = str(uuid.uuid4())
@@ -223,6 +226,13 @@ def create_match_from_invites_impl(group_id):
                         "stake": inv["stake"], "seat": i + 1})
         ids.append(inv["to_id"])
     match_id = str(uuid.uuid4())
+    # Round 4: model the live function's multi-query validation window.
+    # The live RPC runs several SELECTs between its existing-match
+    # check and its INSERT, so two concurrent calls both pass the
+    # check and both insert. Without this sleep the mock's append is
+    # instant and the race almost never reproduces; with it, an
+    # unfixed client double-fire deterministically makes 2 matches.
+    time.sleep(0.05)
     with STATE.lock:
         STATE.matches.append({
             "id": match_id, "group_id": group_id, "mode": inv_rows[0]["mode"],
@@ -296,6 +306,14 @@ class Handler(BaseHTTPRequestHandler):
             with STATE.lock:
                 last = STATE.last_post
             self._json(200, last if last is not None else {})
+            return
+        if path == "/__test__/rpc_counts":
+            # Round 4: how many times each RPC path was called —
+            # the single-flight test asserts create_match_from_invites
+            # ran exactly once for a group despite a double tick.
+            with STATE.lock:
+                counts = dict(STATE.rpc_counts)
+            self._json(200, counts)
             return
         if path == "/realtime/v1/websocket":
             self._ws_upgrade()
@@ -486,10 +504,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/rest/v1/rpc/find_match":
             # The mock has no auth: the caller is the oldest queue row
             # (tests queue one player, then the other, then call).
+            with STATE.lock:
+                STATE.rpc_counts["find_match"] = STATE.rpc_counts.get("find_match", 0) + 1
             self._json(200, find_match_impl(str(body.get("p_mode", "2p")),
                                             bool(body.get("p_widen", False))))
             return
         if path == "/rest/v1/rpc/create_match_from_invites":
+            with STATE.lock:
+                STATE.rpc_counts["create_match_from_invites"] = STATE.rpc_counts.get("create_match_from_invites", 0) + 1
             self._json(200, create_match_from_invites_impl(str(body.get("p_group_id", ""))))
             return
         if path == "/rest/v1/invites":

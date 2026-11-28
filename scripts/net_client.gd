@@ -153,6 +153,13 @@ var _p2p_poll_busy := false # ONE flag for the whole tick (find_match +
 	# the discovery polls): held from tick start to tick end on EVERY
 	# path, so two find_match RPCs can never overlap and a slow call
 	# can never start a second one behind it (the 2026-11-28 burst).
+var _p2p_rpc_in_flight: Dictionary = {} # group_id -> true while a
+	# create_match_from_invites call for that group is in flight.
+	# Single-flight guard: two concurrent ticks must never issue the
+	# RPC twice for one group — the server check-then-insert races
+	# and both calls insert a match (incident 2026-11-28 05:18:47:
+	# two calls in the same second made two duplicate matches).
+	# Set before the await, erased right after it returns.
 var _p2p_last_validate_fail_id := "" # last match_id whose validation
 var _p2p_last_validate_fail_reason := "" # failure was toasted — the
 	# tick retries every 2 s, so the same failure must not toast-spam.
@@ -558,7 +565,15 @@ func start_p2p_search(player_name: String, level: int, table: int, stake: int = 
 	_p2p_search_elapsed = 0.0
 	_p2p_widened = widen
 	_p2p_poll_accum = P2P_POLL_INTERVAL
-	_p2p_poll_busy = false
+	# DO NOT reset _p2p_poll_busy here (round 4): a tick may be in
+	# flight awaiting HTTP when this runs. Clearing the flag lets the
+	# next _process frame start a SECOND concurrent _p2p_tick, and
+	# two concurrent ticks both reach the invite RPC and call
+	# create_match_from_invites for the same group in the same second
+	# (incident 2026-11-28 05:18:47 — two duplicate matches). The
+	# in-flight tick clears busy itself when it finishes; the accum
+	# (already >= interval) fires the next tick on the first frame
+	# after that, so nothing is lost.
 	_p2p_search_starting = true
 	print("[MATCH] search starting player=%s mode=%s table=%s stake=%s widen=%s strict=%s — waiting for the queue insert before the first tick" % [
 		_p2p_my_id, mode, str(table), str(stake), str(widen), str(strict)])
@@ -597,6 +612,11 @@ func _queue_insert_async(player_name: String, level: int, table: int, stake: int
 		return false
 	var res = await sb2.queue_insert(row)
 	if not _p2p_search_starting:
+		# Cancelled while the insert was in flight: the row may
+		# already have landed — delete it (best-effort, no-op if it
+		# never landed) so it can never be matched as a ghost while
+		# this phone is not searching.
+		sb2.queue_delete(_p2p_my_id)
 		return false # cancelled while the insert was in flight
 	if not bool(res.get("ok", false)):
 		# A failed insert is SHOWN, not searched past: without a queue
@@ -795,26 +815,38 @@ func _p2p_tick() -> void:
 			await join_match(String(pre_row.get("id", "")), pre_row)
 			_p2p_poll_busy = false
 			return
-		var res2 = await sb3.call_create_match_from_invites(gid)
-		if not _p2p_invite_searching:
-			_p2p_poll_busy = false
-			return
-		# INVITE_RPC_RESPONSE (2026-11-28): log EVERY RPC answer with
-		# its data — an {"ok": false} answer used to be silently
-		# ignored, which hid the invite stall completely.
-		print("[MATCH] INVITE_RPC_RESPONSE group=%s ok=%s status=%s data=%s" % [
-			gid, str(res2.get("ok", false)), str(res2.get("status", 0)), JSON.stringify(res2.get("data", {}))])
-		if bool(res2.get("ok", false)):
-			var data2: Dictionary = res2.get("data", {})
-			if bool(data2.get("ok", false)):
-				print("[MATCH] create_match_from_invites ok! match_id=%s" % String(data2.get("match_id", "")))
-				await join_match(String(data2.get("match_id", "")))
+		# Single-flight (round 4): if an RPC for this group is already
+		# in flight — from a second concurrent tick, or from a
+		# re-entered search — this tick must NOT call it again. The
+		# server check-then-insert races and two calls in the same
+		# second create TWO matches (incident 2026-11-28 05:18:47).
+		# This tick skips the RPC and goes straight to the polls
+		# below, which will find the in-flight call's match.
+		if _p2p_rpc_in_flight.has(gid):
+			print("[MATCH] invite RPC already in flight for group=%s — this tick polls only" % gid)
+		else:
+			_p2p_rpc_in_flight[gid] = true
+			var res2 = await sb3.call_create_match_from_invites(gid)
+			_p2p_rpc_in_flight.erase(gid)
+			if not _p2p_invite_searching:
 				_p2p_poll_busy = false
 				return
-			print("[MATCH] INVITE_RPC answered ok=false: %s" % JSON.stringify(data2))
-		else:
-			print("[MATCH] create_match_from_invites failed (transient, retrying next tick): ok=%s status=%s error=%s" % [
-				str(res2.get("ok", false)), str(res2.get("status", 0)), String(res2.get("error", ""))])
+			# INVITE_RPC_RESPONSE (2026-11-28): log EVERY RPC answer with
+			# its data — an {"ok": false} answer used to be silently
+			# ignored, which hid the invite stall completely.
+			print("[MATCH] INVITE_RPC_RESPONSE group=%s ok=%s status=%s data=%s" % [
+				gid, str(res2.get("ok", false)), str(res2.get("status", 0)), JSON.stringify(res2.get("data", {}))])
+			if bool(res2.get("ok", false)):
+				var data2: Dictionary = res2.get("data", {})
+				if bool(data2.get("ok", false)):
+					print("[MATCH] create_match_from_invites ok! match_id=%s" % String(data2.get("match_id", "")))
+					await join_match(String(data2.get("match_id", "")))
+					_p2p_poll_busy = false
+					return
+				print("[MATCH] INVITE_RPC answered ok=false: %s" % JSON.stringify(data2))
+			else:
+				print("[MATCH] create_match_from_invites failed (transient, retrying next tick): ok=%s status=%s error=%s" % [
+					str(res2.get("ok", false)), str(res2.get("status", 0)), String(res2.get("error", ""))])
 		var grows: Array = await sb3.poll_matches_by_group(gid)
 		if not _p2p_invite_searching:
 			_p2p_poll_busy = false
@@ -860,6 +892,9 @@ func cancel_p2p_search() -> void:
 	_p2p_searching = false
 	_p2p_search_starting = false
 	_p2p_invite_searching = false
+	_p2p_rpc_in_flight.clear() # a cancelled search never leaves a
+		# stale single-flight entry behind (defensive; the in-flight
+		# tick erases its own entry when its await returns).
 	stop_match_discovery()
 	if _p2p_my_id != "":
 		var sb4 := _sb()
@@ -883,11 +918,30 @@ func start_p2p_invite(group_id: String, player_name: String, level: int, stake: 
 		queue_failed.emit("Sign in to play online — invites need your account.")
 		return
 	_p2p_my_id = sb5.user_id
+	# Round 4: the invite supersedes any running random search.
+	# The incident (2026-11-28 05:18) was exactly this overlap: a
+	# random search was running when the old group's _on_group_ready
+	# fired, and the random loop kept polling find_match alongside
+	# the invite loop while its popup was orphaned underneath the
+	# invite popup. Stop the random search (flags + queue row) so
+	# only ONE resolution loop runs. The in-flight insert's
+	# continuation sees _p2p_search_starting == false and returns
+	# without setting _p2p_searching (and deletes the row if it
+	# landed — see _queue_insert_async).
+	_p2p_searching = false
+	_p2p_search_starting = false
+	if _p2p_my_id != "":
+		sb5.queue_delete(_p2p_my_id)
 	_p2p_invite = {"group_id": group_id, "name": player_name, "level": level,
 		"stake": stake, "mode": mode, "table": table, "is_inviter": is_inviter}
 	_p2p_invite_elapsed = 0.0
 	_p2p_poll_accum = P2P_POLL_INTERVAL # first RPC call on the next frame
-	_p2p_poll_busy = false
+	# DO NOT reset _p2p_poll_busy here (round 4) — same reason as in
+	# start_p2p_search: a tick may be in flight awaiting HTTP, and
+	# clearing the flag lets the next frame start a SECOND concurrent
+	# _p2p_tick. Two concurrent ticks both reach the invite RPC and
+	# create duplicate matches for the same group (incident
+	# 2026-11-28 05:18:47). The in-flight tick clears busy itself.
 	_p2p_invite_searching = true
 	print("[MATCH] INVITE_SEARCH_START player=%s group=%s mode=%s is_inviter=%s" % [
 		_p2p_my_id, group_id, mode, str(is_inviter)])
@@ -923,6 +977,13 @@ static func p2p_matched_payload(players: Array, my_seat: int, match_id: String) 
 ## their back).
 func _begin_p2p_match(match_id: String, players: Array) -> void:
 	print("[MATCH] P2P_BEGIN match=%s players=%d" % [match_id, players.size()])
+	# Double-mesh guard (round 4): two concurrent join_match calls
+	# can both reach here. Tear any existing mesh/match down FIRST —
+	# _clear_p2p is idempotent, so a second begin always starts from
+	# a clean slate instead of creating two meshes/channels.
+	if _mesh != null or _p2p_match_id != "":
+		print("[MATCH] P2P_BEGIN replacing an existing mesh/match=%s" % _p2p_match_id)
+		_clear_p2p()
 	if match_id == "" or players.is_empty():
 		print("[MATCH] P2P_BEGIN_ABORT match=%s reason=empty match or no players" % match_id)
 		_fail_p2p("The match could not start — no match was formed. Try searching again.")
@@ -1227,6 +1288,7 @@ func _clear_p2p() -> void:
 	_p2p_pending_ice.clear()
 	_p2p_remote_desc_set.clear()
 	_p2p_connected_peers.clear()
+	_p2p_rpc_in_flight.clear() # round 4: no stale single-flight entry
 	_p2p_all_connected = false
 	_p2p_connect_elapsed = 0.0
 	_p2p_match_id = ""

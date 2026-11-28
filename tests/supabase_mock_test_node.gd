@@ -223,6 +223,34 @@ func _run() -> void:
 	_check("mock: group has the one pending invite", bool(grp.get("ok", false)) and (grp.get("data", []) as Array).size() == 1 and String((grp.get("data", []) as Array)[0].get("status", "")) == "pending")
 	var acc := await Friends.accept_invite((grp.get("data", []) as Array)[0])
 	_check("mock: invite accepted", bool(acc.get("ok", false)) and String((acc.get("invite", {}) as Dictionary).get("status", "")) == "accepted")
+	# --- Round 4 single-flight (2026-11-28 05:18:47): two concurrent
+	# ticks called create_match_from_invites for the same group in
+	# the same second and made TWO duplicate matches. The cause was
+	# start_p2p_invite resetting _p2p_poll_busy while a tick was in
+	# flight awaiting HTTP — the next frame started a second tick.
+	# Reproduce it: start the invite search, drive a tick manually
+	# (it suspends on its first HTTP await with busy=true), then
+	# re-enter start_p2p_invite in the SAME frame, as _on_group_ready
+	# did while a random search's tick was in flight. On unfixed
+	# code the re-entry clears busy, a second tick starts, and the
+	# RPC runs twice (the mock's 0.05 s validation window makes the
+	# double-insert deterministic). On fixed code exactly one RPC
+	# runs and one match forms.
+	var counts_before := await Supabase._http(HTTPClient.METHOD_GET, "/__test__/rpc_counts", {}, true)
+	var rpc_before: int = int((counts_before.get("data", {}) as Dictionary).get("create_match_from_invites", 0))
+	Net.start_p2p_invite(gid, Save.player_name, 1, 100, "2p", 0, true)
+	Net._p2p_tick() # runs to its first await (pre-RPC poll), busy=true
+	Net.start_p2p_invite(gid, Save.player_name, 1, 100, "2p", 0, true)
+	var single_flight := await _wait_for_condition(func() -> bool: return MatchState.match_id != "", 6.0)
+	_check("mock: round4 double-tick joins the invite match", single_flight and Net._p2p_match_id == MatchState.match_id)
+	var counts_after := await Supabase._http(HTTPClient.METHOD_GET, "/__test__/rpc_counts", {}, true)
+	var rpc_after: int = int((counts_after.get("data", {}) as Dictionary).get("create_match_from_invites", 0))
+	_check("mock: round4 single-flight — exactly ONE create_match_from_invites call", rpc_after - rpc_before == 1, "before=%d after=%d" % [rpc_before, rpc_after])
+	var matches_sf := await Supabase._http(HTTPClient.METHOD_GET, "/rest/v1/matches?select=*", {}, true)
+	var mrows_sf: Array = matches_sf.get("data", []) if matches_sf.get("data") is Array else []
+	_check("mock: round4 single-flight — exactly ONE match for the group", mrows_sf.size() == 1, str(mrows_sf.size()))
+	Net.cancel_p2p_search()
+	MatchState.clear()
 	# --- join_match (2026-11-28): the accepted group forms a 'waiting'
 	# matches row via the RPC, and Net.join_match fetches it, validates
 	# it (player_ids + status), stores it in MatchState and begins the
@@ -283,6 +311,42 @@ func _run() -> void:
 	_check("mock: invitefix settle tick migrates to the newer same-players match", migrated and MatchState.match_id == midB)
 	Net.cancel_p2p_search()
 	MatchState.clear()
+	# --- Round 4 no-refire (incident 2026-11-28 05:18): the OLD
+	# accepted group 7710c914 re-fired _on_group_ready on a later
+	# launch because refresh() re-tracked it (never consumed ON THAT
+	# PHONE) and the group poll fired it again — starting a second
+	# resolution loop over a match that already existed. Both groups
+	# here (gid, gidB) are ready, NOT consumed, and already have a
+	# live match — refresh() must consume them and NOT re-track them,
+	# and the group poll must never fire group_ready for them.
+	var refire := [0]
+	var refire_cb := func(_gid: String, _inv: Array) -> void: refire[0] += 1
+	Friends.group_ready.connect(refire_cb)
+	_check("mock: round4 handled groups are tracked before refresh", Friends.groups.has(gid) and Friends.groups.has(gidB))
+	var ref := await Friends.refresh()
+	_check("mock: round4 refresh succeeds", bool(ref.get("ok", false)))
+	_check("mock: round4 refresh does not re-track groups with a live match", not Friends.groups.has(gid) and not Friends.groups.has(gidB))
+	_check("mock: round4 refresh consumed both handled groups", Save.consumed_invite_groups.has(gid) and Save.consumed_invite_groups.has(gidB))
+	Friends._poll_outgoing_groups()
+	await get_tree().create_timer(1.0).timeout
+	_check("mock: round4 group poll does not re-fire handled groups", refire[0] == 0, str(refire[0]))
+	# The _poll_group layer: a ready group that is STILL tracked
+	# (never refreshed) but whose match already exists must also
+	# not fire — it is consumed by the poll itself. Fresh group so
+	# neither earlier test has consumed it.
+	var sentR := await Friends.send_invite("user-nimal", "Nimal Perera", 100)
+	_check("mock: round4 refire group sent", bool(sentR.get("ok", false)))
+	var gidR: String = sentR.get("group_id", "")
+	var grpR := await Supabase.list_group_invites(gidR)
+	var accR := await Friends.accept_invite((grpR.get("data", []) as Array)[0])
+	_check("mock: round4 refire group accepted", bool(accR.get("ok", false)))
+	var rpcR := await Supabase.call_create_match_from_invites(gidR)
+	_check("mock: round4 refire group match formed", bool(rpcR.get("ok", false)) and bool((rpcR.get("data", {}) as Dictionary).get("ok", false)))
+	_check("mock: round4 refire group is tracked before the poll", Friends.groups.has(gidR))
+	Friends._poll_outgoing_groups()
+	await get_tree().create_timer(1.0).timeout
+	_check("mock: round4 poll consumes a ready group with a live match without firing", refire[0] == 0 and not Friends.groups.has(gidR) and Save.consumed_invite_groups.has(gidR), "refire=%d tracked=%s" % [refire[0], str(Friends.groups.has(gidR))])
+	Friends.group_ready.disconnect(refire_cb)
 	# --- Queue insert (2026-11-28): the b2706f4 build never joined the
 	# queue — its [MATCH] log called String() on the INT table/stake
 	# fields, and GDScript 4.3 has no String(int) constructor, so

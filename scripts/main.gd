@@ -19,6 +19,12 @@ var _searching_active := false
 var _search_widened := false
 var _search_strict := false # SAME-2-PLAYER search: same level only (p_strict)
 var _search_mode := "" # "internet" | "host" | "join" | "invite" — which search is running
+## Round 4 search-popup watchdog: a visible search popup with no
+## active search (or a timer that stopped advancing) is ALWAYS an
+## orphan from a stacked popup — it must never sit frozen on screen.
+var _search_watchdog_accum := 0.0
+var _search_watchdog_last_elapsed := -1.0
+var _search_watchdog_still := 0.0
 var _lobby: OnlineLobby = null # v11: the post-match lobby (waiting/ready) — null when no lobby is open
 var _lobby_active := false
 var _lobby_data := {} # the server `matched` payload the lobby was opened from
@@ -114,6 +120,13 @@ func _ready() -> void:
 		_show_auth()
 
 func _process(delta: float) -> void:
+	# Round 4 watchdog (runs FIRST, even while a lobby is open):
+	# a search popup visible with no active search is an orphan —
+	# close it before the player ever has to tap a dead CANCEL.
+	_search_watchdog_accum += delta
+	if _search_watchdog_accum >= 0.5:
+		_search_watchdog_accum = 0.0
+		_watchdog_search_popups()
 	if _lobby_active:
 		# v11 lobby countdown: the match auto-starts after
 		# LOBBY_AUTO_START_SECONDS even if someone never taps READY,
@@ -474,8 +487,18 @@ func _join_invite_room(group_id: String, mode: String, stake: int, is_inviter: b
 	_search_widened = false
 	_search_mode = "invite"
 	_searching_active = true
+	# Round 4 single-popup invariant: close any popup from an
+	# earlier search FIRST. Creating a second popup without closing
+	# the first orphaned it — the visible one froze at "0s" and its
+	# CANCEL/X freed the hidden one (incident 2026-11-28 05:18).
+	# _close_search_popup clears _searching_active/_search_mode, so
+	# set them again right after.
+	_close_search_popup()
+	_searching_active = true
+	_search_mode = "invite"
 	_searching = Control.new()
 	UiKit.full_rect(_searching)
+	_tag_search_popup(_searching)
 	var dim := ColorRect.new()
 	dim.color = Color(0, 0, 0, 0.75)
 	UiKit.full_rect(dim)
@@ -961,6 +984,7 @@ func _start_lan_host(stake: int) -> void:
 	_searching_active = true
 	_searching = Control.new()
 	UiKit.full_rect(_searching)
+	_tag_search_popup(_searching)
 	var dim := ColorRect.new()
 	dim.color = Color(0, 0, 0, 0.75)
 	UiKit.full_rect(dim)
@@ -996,6 +1020,7 @@ func _start_lan_join(stake: int) -> void:
 	_lan_found_buttons.clear()
 	_searching = Control.new()
 	UiKit.full_rect(_searching)
+	_tag_search_popup(_searching)
 	var dim := ColorRect.new()
 	dim.color = Color(0, 0, 0, 0.75)
 	UiKit.full_rect(dim)
@@ -1112,8 +1137,17 @@ func _start_matchmaking(stake: int, host_ip: String = "", players: int = 2, wide
 	_search_strict = strict
 	_search_mode = "internet"
 	_searching_active = true
+	# Round 4 single-popup invariant: close any popup from an
+	# earlier search FIRST (same orphan bug as _join_invite_room —
+	# a stacked popup froze at "0s" with a dead CANCEL).
+	# _close_search_popup clears _searching_active/_search_mode, so
+	# set them again right after.
+	_close_search_popup()
+	_searching_active = true
+	_search_mode = "internet"
 	_searching = Control.new()
 	UiKit.full_rect(_searching)
+	_tag_search_popup(_searching)
 	var dim := ColorRect.new()
 	dim.color = Color(0, 0, 0, 0.75)
 	UiKit.full_rect(dim)
@@ -1423,9 +1457,11 @@ func _cancel_search() -> void:
 	if Net.is_p2p_searching():
 		Net.cancel_p2p_search()
 	Net.disconnect_client()
-	if _searching:
-		_searching.queue_free()
-		_searching = null
+	# Round 4: sweep ALL search popups, not just _searching — an
+	# orphaned popup from an earlier search would otherwise stay
+	# visible and look like CANCEL did nothing.
+	_free_all_search_popups()
+	_searching = null
 
 func _on_queue_failed(message: String) -> void:
 	if _lobby_active:
@@ -1453,12 +1489,87 @@ func _on_connection_lost() -> void:
 
 ## Shared search-popup teardown (queue_failed / connection_lost /
 ## invite timeout): clear the flags and free the popup.
+##
+## ROUND 4 — SINGLE-POPUP INVARIANT (incident 2026-11-28 05:18):
+## _join_invite_room and _start_matchmaking used to create a NEW
+## search popup WITHOUT closing the old one, so TWO popups could be
+## stacked (random search + invite search). _searching pointed at the
+## NEW one, the VISIBLE (old) one was orphaned: its timer never
+## advanced ("0s" frozen) and its CANCEL/X freed the hidden one, so
+## the user perceived "CANCEL does nothing". Teardown therefore
+## sweeps EVERY node tagged as a search popup, not just _searching.
+## Every search popup is tagged with the "search_popup" meta at
+## creation (see _tag_search_popup); the sweep frees them all.
 func _close_search_popup() -> void:
 	_searching_active = false
 	_search_mode = ""
-	if _searching:
-		_searching.queue_free()
-		_searching = null
+	_free_all_search_popups()
+	_searching = null
+
+## Tag a popup dim as a search popup so the sweep/watchdog can find
+## it even after _searching has been reassigned or nulled.
+func _tag_search_popup(dim: Control) -> void:
+	dim.set_meta("search_popup", true)
+
+func _collect_search_popups(node: Node, out: Array) -> void:
+	if node is Control and bool(node.get_meta("search_popup", false)):
+		out.append(node)
+	for c in node.get_children():
+		_collect_search_popups(c, out)
+
+func _count_search_popups() -> int:
+	var found: Array = []
+	_collect_search_popups(self, found)
+	return found.size()
+
+func _free_all_search_popups() -> void:
+	var found: Array = []
+	_collect_search_popups(self, found)
+	for p in found:
+		if is_instance_valid(p):
+			p.queue_free()
+
+## Watchdog force-close (round 4): a search popup is visible but the
+## search is dead or its timer has not advanced — close EVERYTHING
+## (Net polling too) and tell the player plainly, instead of leaving
+## a frozen popup they cannot dismiss. Called from _process.
+func _force_close_stuck_search(reason: String) -> void:
+	print("[MATCH] WATCHDOG force-closing stuck search popup: %s" % reason)
+	if Net.is_p2p_searching():
+		Net.cancel_p2p_search()
+	Net.disconnect_client()
+	_close_search_popup()
+	_toast("That search window got stuck — closed it. Try searching again.")
+
+## Watchdog (round 4, every 0.5 s): a visible search popup is only
+## legal while a search is running AND its timer is advancing.
+##  - popup visible + no active search = orphan (stacked popup from
+##    an earlier search) → force-close immediately.
+##  - popup visible + active search + timer frozen 5 s = the search
+##    branch stopped ticking (e.g. a lobby opened without closing
+##    the popup) → force-close with a toast.
+## A healthy search advances _search_elapsed every frame, so the
+## still-timer resets on every check and never false-fires.
+func _watchdog_search_popups() -> void:
+	var visible := _count_search_popups()
+	if visible == 0:
+		_search_watchdog_still = 0.0
+		_search_watchdog_last_elapsed = -1.0
+		return
+	if not _searching_active:
+		_force_close_stuck_search("orphan popup (%d visible, no active search)" % visible)
+		_search_watchdog_still = 0.0
+		_search_watchdog_last_elapsed = -1.0
+		return
+	if _search_elapsed == _search_watchdog_last_elapsed:
+		_search_watchdog_still += 0.5
+		if _search_watchdog_still >= 5.0:
+			_force_close_stuck_search("timer frozen %.1fs with %d popup(s) visible" % [_search_watchdog_still, visible])
+			_search_watchdog_still = 0.0
+			_search_watchdog_last_elapsed = -1.0
+	else:
+		_search_watchdog_last_elapsed = _search_elapsed
+		_search_watchdog_still = 0.0
 
 # ---------------------------------------------------------------------- ads
 

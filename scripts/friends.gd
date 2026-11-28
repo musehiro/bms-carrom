@@ -361,15 +361,41 @@ func refresh() -> Dictionary:
 	if bool(out.get("ok", false)):
 		outgoing.clear()
 		groups.clear()
+		# Group the rows first: the match-exists check (round 4)
+		# is per GROUP, not per invite row.
+		var by_group := {}
 		for row in out.get("data", []):
 			if is_expired(row):
 				await _expire_invite(row)
-			elif Save.consumed_invite_groups.has(String(row.get("group_id", ""))):
+				continue
+			var gid2 := String(row.get("group_id", ""))
+			if not by_group.has(gid2):
+				by_group[gid2] = []
+			(by_group[gid2] as Array).append(row)
+		for gid2 in by_group.keys():
+			if Save.consumed_invite_groups.has(gid2):
 				# v11: this group already fired group_ready (the
 				# inviter joined) — do not re-track it, or the next
 				# poll would re-fire group_ready for a dead room.
 				continue
-			else:
+			var grows: Array = by_group[gid2]
+			if group_state(grows) == "ready":
+				# Round 4 (incident 2026-11-28 05:18): a group that
+				# became ready while the app was closed — or was
+				# never consumed ON THIS PHONE (the other phone
+				# drove the accept) — is re-tracked here and the
+				# 10 s group poll re-fires _on_group_ready for it,
+				# even though its match ALREADY exists. The re-fire
+				# starts a second resolution loop over a live
+				# match. A ready group with a live match row is
+				# already handled — consume it and do not track it;
+				# the match is found by the discovery poll instead.
+				var mrows: Array = await Supabase.poll_matches_by_group(gid2)
+				if not mrows.is_empty():
+					print("[MATCH] refresh: group %s already has a match — consuming, not re-tracking" % gid2)
+					_mark_group_consumed(gid2)
+					continue
+			for row in grows:
 				_track_outgoing(row, String(row.get("mode", "2p")))
 	invites_changed.emit()
 	return {"ok": true, "error": ""}
@@ -534,6 +560,20 @@ func _poll_group(group_id: String) -> void:
 			await _expire_invite(row)
 			row["status"] = "expired"
 		_update_outgoing(row)
+	# Round 4: a ready group whose match ALREADY exists must not
+	# fire group_ready — its match is already handled (the other
+	# phone formed it, or an earlier session did). Consume it here
+	# so the poll never re-fires it; the sender's discovery poll
+	# finds the match and joins it. At first-ready time no match
+	# exists yet (the RPC has not run), so the normal flow is
+	# unaffected — this only bites on the re-fire case.
+	if groups.has(group_id) and group_state((groups[group_id] as Dictionary).get("invites", [])) == "ready":
+		var mrows: Array = await Supabase.poll_matches_by_group(group_id)
+		if not mrows.is_empty():
+			print("[MATCH] group %s already has a match — consuming, not firing group_ready" % group_id)
+			_mark_group_consumed(group_id)
+			groups.erase(group_id)
+			return
 	_check_group(group_id)
 
 func _check_group(group_id: String) -> void:
@@ -542,6 +582,12 @@ func _check_group(group_id: String) -> void:
 	var g: Dictionary = groups[group_id]
 	var state := group_state(g.get("invites", []))
 	if state == "ready":
+		# Round 4: re-check the consumed set immediately before
+		# emitting — a group consumed between the poll and this
+		# check must not fire twice.
+		if Save.consumed_invite_groups.has(group_id):
+			groups.erase(group_id)
+			return
 		# v11: consume the group BEFORE emitting — the rows stay
 		# "accepted" on the server forever, so a later refresh()
 		# must not re-track (and re-fire) this group. A group that
