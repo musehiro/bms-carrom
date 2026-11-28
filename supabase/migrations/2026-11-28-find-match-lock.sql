@@ -108,7 +108,7 @@ begin
   -- Same predicate and FIFO order as before; the full-partition
   -- array_agg is replaced by a LIMITed locked subquery, so a
   -- concurrent call skips these rows instead of pairing them twice.
-  select array_agg(s.q order by s.q.created_at)
+  select array_agg(s.q order by (s.q).created_at)
     into others
     from (select q
             from public.matchmaking_queue q
