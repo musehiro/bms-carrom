@@ -163,6 +163,13 @@ var _p2p_rpc_in_flight: Dictionary = {} # group_id -> true while a
 var _p2p_last_validate_fail_id := "" # last match_id whose validation
 var _p2p_last_validate_fail_reason := "" # failure was toasted — the
 	# tick retries every 2 s, so the same failure must not toast-spam.
+## Scale hardening (2026-11-28): opportunistic stale-matchmaking
+## cleanup — at most one cleanup_stale_matchmaking() RPC call per 5
+## min per phone (unix time of the last call; 0 = never). The call is
+## best-effort and never blocks a search (see
+## _maybe_cleanup_stale_matchmaking).
+const CLEANUP_MIN_INTERVAL_SECONDS := 300
+var _cleanup_last_call_unix := 0
 var _p2p_settle_accum := 0.0 # settle poll cadence while waiting for
 	# the peer (split-brain convergence, 2026-11-28)
 var _p2p_settle_busy := false # one settle poll at a time
@@ -592,6 +599,40 @@ func start_p2p_search(player_name: String, level: int, table: int, stake: int = 
 	_p2p_poll_accum = P2P_POLL_INTERVAL # first find_match on the next frame
 	print("[MATCH] search started player=%s mode=%s table=%s stake=%s widen=%s strict=%s (queue confirmed)" % [
 		_p2p_my_id, mode, str(table), str(stake), str(widen), str(strict)])
+	# Scale hardening (2026-11-28): opportunistic cleanup — a search
+	# starting is a good moment to sweep stale queue/match/invite rows.
+	# Fire-and-forget (never awaited): the search must never wait on it.
+	_maybe_cleanup_stale_matchmaking()
+
+## True when a cleanup call is due: never called before, or the last
+## call was at least min_interval seconds ago. Pure — unit-tested.
+static func cleanup_due(last_call_unix: int, now_unix: int, min_interval: int = CLEANUP_MIN_INTERVAL_SECONDS) -> bool:
+	if last_call_unix <= 0:
+		return true
+	return now_unix - last_call_unix >= min_interval
+
+## Opportunistic stale-matchmaking cleanup (scale hardening,
+## 2026-11-28): call cleanup_stale_matchmaking() when a search starts,
+## throttled to at most once per 5 min per phone. BEST-EFFORT — it must
+## NEVER block or fail a search: it runs fire-and-forget (the caller
+## never awaits it), a not-yet-deployed RPC (404 / "function does not
+## exist") is a silent no-op, and any other error is logged once and
+## dropped. The throttle timestamp is set BEFORE the call so a slow or
+## hanging RPC cannot cause a second call in the same window.
+func _maybe_cleanup_stale_matchmaking() -> void:
+	var sb := _sb()
+	if sb == null or not sb.configured:
+		return
+	var now := int(Time.get_unix_time_from_system())
+	if not cleanup_due(_cleanup_last_call_unix, now):
+		return
+	_cleanup_last_call_unix = now
+	var res: Dictionary = await sb.call_cleanup_stale_matchmaking()
+	if SupabaseClient.is_cleanup_rpc_missing(res):
+		# The SQL worker has not deployed the function yet — silent.
+		return
+	if not bool(res.get("ok", false)):
+		print("[MATCH] cleanup_stale_matchmaking failed (%s) — continuing the search anyway" % String(res.get("error", "unknown error")))
 
 ## The matchmaking_queue row for PostgREST. user_id rides alongside id
 ## (both = the Auth uid): the live queue UPDATE policy was keyed on
@@ -945,6 +986,11 @@ func start_p2p_invite(group_id: String, player_name: String, level: int, stake: 
 	_p2p_invite_searching = true
 	print("[MATCH] INVITE_SEARCH_START player=%s group=%s mode=%s is_inviter=%s" % [
 		_p2p_my_id, group_id, mode, str(is_inviter)])
+	# Scale hardening (2026-11-28): same opportunistic cleanup as a
+	# random search starting (throttled to one call per 5 min, shared
+	# with the random-search hook — whichever search starts first in
+	# the window does the sweep).
+	_maybe_cleanup_stale_matchmaking()
 
 ## Build the `matched` payload Main (and the lobby) consume, from the
 ## matches row's players array. 2p: opponent fields + you_break from

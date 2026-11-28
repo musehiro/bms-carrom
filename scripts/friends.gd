@@ -3,7 +3,9 @@ extends Node
 ## Friends + invites (v7). Friend search runs on Supabase
 ## (search_players RPC — display name only, never Gmail). Invites live
 ## in the `invites` table and arrive live over Realtime, with a poll
-## every 10 s as a backstop (a missed Realtime event still shows up).
+## as a backstop (a missed Realtime event still shows up): 30 s while
+## Realtime is healthy, 2 s while it is down (see
+## incoming_poll_interval_seconds — scale hardening, 2026-11-28).
 ##
 ## Invite flow (2-player):
 ##   A searches B by name -> SEND INVITE (mode 2p, A's stake) -> B sees
@@ -41,6 +43,19 @@ const GROUP_POLL_SECONDS := 10.0
 ## phone never SHOWED an invite because incoming invites were only
 ## loaded at login (refresh) and otherwise relied on Realtime alone.
 const INCOMING_POLL_SECONDS := 2.0
+## Scale hardening (2026-11-28): while the Realtime invites channel is
+## connected and healthy, the 2 s poll runs FOREVER in every state —
+## the single biggest load driver at scale. Realtime already delivers
+## invites instantly, so the poll slows to a 30 s backstop while the
+## channel is healthy, and falls back to the 2 s poll only while
+## Realtime is down, until it reconnects (see _rt_healthy and the
+## reconnect in _process). Two-phone delivery stays instant: the
+## Realtime event, not the poll, carries the invite.
+const INCOMING_POLL_BACKSTOP_SECONDS := 30.0
+## Reconnect attempt cadence while Realtime is down (only when the
+## socket is actually closed — an open socket whose join reply is
+## still in flight is left alone).
+const RT_RECONNECT_SECONDS := 60.0
 const MAX_GROUP_TARGETS := 3
 ## §11 online lobby presence: heartbeat every ~30 s on the ONE existing
 ## socket (presence rows are PostgREST, not a second socket); rows older
@@ -66,9 +81,19 @@ var _poll_timer := 0.0
 var _incoming_timer := 0.0
 var _incoming_busy := false
 var _listening := false
+## Scale hardening (2026-11-28): whether the Realtime invites channel
+## is connected and healthy (join accepted, or an invite event just
+## arrived on it). Drives the incoming-poll interval: 30 s backstop
+## while healthy, 2 s fallback while down. _rt_mode logs the mode on
+## transition only ("live" | "fallback").
+var _rt_healthy := false
+var _rt_mode := ""
+var _rt_reconnect_timer := 0.0
 
 func _ready() -> void:
 	Supabase.realtime_invite_changed.connect(_on_realtime_invite)
+	Supabase.realtime_connected.connect(_on_realtime_connected)
+	Supabase.realtime_failed.connect(_on_realtime_failed)
 
 func _process(delta: float) -> void:
 	if not _listening or not Supabase.configured:
@@ -80,13 +105,27 @@ func _process(delta: float) -> void:
 	if _presence_timer >= PRESENCE_HEARTBEAT_SECONDS and not _presence_busy:
 		_presence_timer = 0.0
 		_heartbeat_presence_async()
-	# B4 incoming-invite poll (2 s): new invites surface even when a
-	# Realtime event was missed or the channel join was rejected.
-	# Runs on every frame, NOT behind the group-poll early-return.
+	# B4 incoming-invite poll (see incoming_poll_interval_seconds):
+	# 30 s backstop while Realtime is healthy, 2 s fallback while it
+	# is down. Runs on every frame, NOT behind the group-poll
+	# early-return.
 	_incoming_timer += delta
-	if _incoming_timer >= INCOMING_POLL_SECONDS and not _incoming_busy:
+	if _incoming_timer >= incoming_poll_interval() and not _incoming_busy:
 		_incoming_timer = 0.0
 		_poll_incoming()
+	# Scale hardening (2026-11-28): Realtime dropped — try to bring it
+	# back every 60 s so the 2 s fallback poll does not run forever.
+	# Only when the socket is actually closed (an open socket whose
+	# join reply is still in flight is left alone). The reconnect
+	# re-runs connect_realtime, whose join-ok flips _rt_healthy and
+	# slows the poll back to the 30 s backstop.
+	if not _rt_healthy:
+		_rt_reconnect_timer += delta
+		if _rt_reconnect_timer >= RT_RECONNECT_SECONDS:
+			_rt_reconnect_timer = 0.0
+			if Save.account_id != "" and not Supabase.realtime_is_open():
+				print("[Friends] Realtime down — reconnecting the invites channel…")
+				Supabase.connect_realtime(Save.account_id)
 	_poll_timer += delta
 	if _poll_timer < GROUP_POLL_SECONDS:
 		return
@@ -97,13 +136,16 @@ func _process(delta: float) -> void:
 ## loads the current pending invites once.
 func start_listening() -> void:
 	_listening = true
-	_incoming_timer = INCOMING_POLL_SECONDS # first incoming poll on the next frame
+	_incoming_timer = incoming_poll_interval() # first incoming poll on the next frame
 	if Supabase.configured and Save.account_id != "":
 		Supabase.connect_realtime(Save.account_id)
 		refresh()
 
 func stop_listening() -> void:
 	_listening = false
+	_rt_healthy = false
+	_rt_mode = ""
+	_rt_reconnect_timer = 0.0
 	Supabase.disconnect_realtime()
 	# §11: going offline — drop my presence row (best-effort).
 	if Save.account_id != "":
@@ -112,6 +154,48 @@ func stop_listening() -> void:
 	outgoing.clear()
 	groups.clear()
 	online_players.clear()
+
+## Scale hardening (2026-11-28): the active incoming-invite poll
+## interval — 30 s backstop while the Realtime invites channel is
+## healthy, 2 s fallback while it is down. Pure — unit-tested. The
+## 2 s poll is what made invites appear at all when Realtime missed
+## an event (B4), so the fallback keeps it; the 30 s backstop only
+## applies while Realtime is PROVEN live, so two-phone delivery stays
+## instant (the Realtime event carries the invite, not the poll).
+static func incoming_poll_interval_seconds(rt_healthy: bool) -> float:
+	return INCOMING_POLL_BACKSTOP_SECONDS if rt_healthy else INCOMING_POLL_SECONDS
+
+## The interval this phone is polling on right now (test seam).
+func incoming_poll_interval() -> float:
+	return incoming_poll_interval_seconds(_rt_healthy)
+
+## Whether the Realtime invites channel is currently healthy (test seam).
+func is_realtime_healthy() -> bool:
+	return _rt_healthy
+
+## The invites channel join was accepted — Realtime is live, so the
+## incoming poll slows to the 30 s backstop.
+func _on_realtime_connected() -> void:
+	_rt_healthy = true
+	_rt_reconnect_timer = 0.0
+	_log_rt_mode()
+
+## The invites channel failed or the socket closed — fall back to the
+## 2 s poll until the reconnect in _process brings Realtime back.
+func _on_realtime_failed(_message: String) -> void:
+	_rt_healthy = false
+	_log_rt_mode()
+
+## Log which incoming-invite mode is active, on transition only.
+func _log_rt_mode() -> void:
+	var mode := "live" if _rt_healthy else "fallback"
+	if mode == _rt_mode:
+		return
+	_rt_mode = mode
+	if _rt_healthy:
+		print("[Friends] incoming invites: Realtime live — poll backstop 30 s")
+	else:
+		print("[Friends] incoming invites: Realtime down — fallback poll every 2 s")
 
 func pending_count() -> int:
 	var n := 0
@@ -161,7 +245,7 @@ func _heartbeat_presence_async() -> void:
 func list_online_players() -> Dictionary:
 	if not Supabase.configured:
 		return {"ok": false, "players": [], "error": "Online lobby is not connected yet."}
-	var res := await Supabase.list_presence()
+	var res := await Supabase.list_presence(Save.level())
 	if not bool(res.get("ok", false)):
 		return {"ok": false, "players": [], "error": String(res.get("error", "Could not load online players."))}
 	online_players = filter_online_players(res.get("data", []), Save.account_id)
@@ -459,6 +543,11 @@ static func is_expired(invite: Dictionary) -> bool:
 # ------------------------------------------------------------- realtime in
 
 func _on_realtime_invite(record: Dictionary) -> void:
+	# An invite event arrived on the channel — that PROVES it is live,
+	# even if the join-ok was missed. (Scale hardening, 2026-11-28.)
+	if not _rt_healthy:
+		_rt_healthy = true
+		_log_rt_mode()
 	var to_id := String(record.get("to_id", ""))
 	var from_id := String(record.get("from_id", ""))
 	var status := String(record.get("status", ""))
@@ -491,11 +580,12 @@ func _on_realtime_invite(record: Dictionary) -> void:
 
 # -------------------------------------------------------------- group poll
 
-## B4: poll pending invites addressed to me every 2 s while listening.
-## Incoming invites used to be loaded only at login (refresh) and
-## otherwise relied on Realtime alone — a missed or rejected Realtime
-## event meant the receiving phone NEVER showed the invite (no banner,
-## no badge, nothing). This poll is the backstop: genuinely new rows
+## B4: poll pending invites addressed to me while listening — every
+## 2 s while Realtime is down, every 30 s as a backstop while it is
+## healthy (incoming_poll_interval_seconds). Incoming invites used to
+## be loaded only at login (refresh) and otherwise relied on Realtime
+## alone — a missed or rejected Realtime event meant the receiving
+## phone NEVER showed the invite (no banner, no badge, nothing). This poll is the backstop: genuinely new rows
 ## surface through invite_received (Main shows the banner + toast, the
 ## home badge updates via invites_changed); rows that vanished
 ## server-side (cancelled / expired) drop silently; already-expired

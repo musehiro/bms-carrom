@@ -1,0 +1,195 @@
+-- ==========================================================================
+-- BMS Carrom — scale indexes (round: DATABASE INDEXES + find_match)
+-- Date: 2026-11-28. Live project ONLY: qigrifiqtarjgklfxmfg.
+-- Run in the Supabase dashboard SQL Editor, top to bottom, in order.
+-- DO NOT run against hyhlhngybzwnungnshff (dead project).
+--
+-- WHAT THIS IS: four CREATE INDEX statements, nothing else. No function
+-- changes, no data changes, no policy changes. Every index is IF NOT
+-- EXISTS, so the file is safe to re-run.
+--
+-- CONCURRENTLY — WHY, AND THE LOCK IMPACT:
+--   Every index below is built with CREATE INDEX CONCURRENTLY.
+--   * A plain CREATE INDEX takes a SHARE lock on the table for the whole
+--     build: reads keep working, but ALL writes block — no queue
+--     upserts/deletes, no match inserts (find_match and
+--     create_match_from_invites INSERT into matches), no invite writes,
+--     no profile writes — for as long as the build takes. On the small
+--     tables of today that is milliseconds; on a matches table with
+--     millions of rows it would be minutes of blocked matchmaking.
+--   * CREATE INDEX CONCURRENTLY takes only brief SHARE UPDATE EXCLUSIVE
+--     locks (at the start and end of the build) and lets reads AND
+--     writes proceed during the build, at the cost of ~2x build time
+--     (two table scans) and more I/O. That is the right trade on a live
+--     game backend.
+--   * CONCURRENTLY is safe here because the Supabase SQL editor runs
+--     each statement in its own transaction (autocommit) — CONCURRENTLY
+--     is only forbidden INSIDE an explicit transaction block, and this
+--     file must NOT be wrapped in BEGIN ... COMMIT.
+--   * One caveat: if a CONCURRENTLY build is interrupted (statement
+--     cancelled, connection dropped) it can leave behind an INVALID
+--     index (pg_index.indisvalid = false), which the planner ignores
+--     but which still costs write overhead. After running, check the
+--     verification queries at the bottom; if any of these four shows
+--     indisvalid = false, DROP INDEX it and re-run that one line.
+--   * CONCURRENTLY + IF NOT EXISTS is supported (PG 14+; Supabase runs
+--     PG 15): if the index already exists the statement is a no-op.
+--
+-- PREREQUISITE (one line, run once, BEFORE this file):
+--   The trigram index (§4, search_players) needs the pg_trgm extension:
+--     CREATE EXTENSION IF NOT EXISTS pg_trgm;
+--   It is a separate statement on purpose — this file contains only
+--   CREATE INDEX statements, per the round's scope. If pg_trgm is not
+--   enabled, §4 errors and the other three indexes are unaffected
+--   (the SQL editor runs statements one by one).
+--
+-- AUDIT SUMMARY (full audit in the round report; existing indexes are
+-- NOT recreated here):
+--   profiles:          PK id; UNIQUE gmail (repo: implicit unique index
+--                      from `gmail text unique`; live: profiles_gmail_unique_idx
+--                      from the 2026-11-27 migration §1d — same effect,
+--                      live gmail is nullable where repo gmail is NOT NULL).
+--   matchmaking_queue: PK id; matchmaking_queue_lookup_idx
+--                      (mode, "table", created_at) — repo schema-p2p.sql
+--                      AND live migration §3e, identical definition.
+--                      Live-only extra: one_active_queue_entry_idx
+--                      (user_id) WHERE status='waiting' — leftover from
+--                      the old 1v1 design, NOT in the repo schema.
+--   matches:           PK id; matches_players_idx GIN (player_ids);
+--                      matches_group_idx (group_id);
+--                      matches_waiting_idx (status, created_at) — repo
+--                      schema-p2p.sql AND live migration §4f, identical.
+--                      Plus matches_one_live_per_group, partial UNIQUE
+--                      (group_id) WHERE status IN ('waiting','ready',
+--                      'playing') — atomic-guard migration 2026-11-28.
+--   invites:           PK id; invites_to_idx (to_id, status,
+--                      created_at DESC); invites_group_idx (group_id,
+--                      status) — repo schema.sql AND live migration §2f,
+--                      identical.
+--   presence:          PK id; presence_updated_idx (updated_at DESC) —
+--                      repo schema-p2p.sql AND live migration §5e,
+--                      identical (live already had one under its old name).
+--   Live == repo for every index above: the 2026-11-27 migration
+--   reproduced the repo definitions exactly; the only differences are
+--   the live-only leftovers noted (queue user_id index, nullable gmail).
+--
+-- DELIBERATELY NOT ADDED (see the round report for the reasoning):
+--   * No new index on presence. list_presence() is `SELECT * ORDER BY
+--     updated_at DESC` with NO where clause — the staleness filter
+--     (~90 s) runs client-side. No index can filter a query that has no
+--     filter; presence_updated_idx already serves the ordering. The fix
+--     is a server-side `updated_at > now() - interval '90 seconds'`
+--     predicate (a query change, not an index), flagged as the first
+--     presence ceiling at ~thousands of concurrent players.
+--   * No (group_id, status, created_at DESC) on matches. A group has
+--     at most a handful of rows, so sorting them is free; group_id
+--     equality is already served by matches_group_idx AND by the
+--     partial unique guard index (whose predicate matches the poll's
+--     status list exactly).
+-- ==========================================================================
+
+-- ------------------------------------------------------- §1. Queue pairing
+-- Serves: find_match() opponents query — 2p AND 4p (the pairing query is
+-- identical for both modes; only `need` differs: 1 opponent for 2p, 3
+-- for 4p). Predicate: mode = ? AND "table" = ? AND
+-- abs(level - me.level) <= window, aggregated oldest-first.
+-- Why (mode, "table", level, created_at): the existing lookup index
+-- (mode, "table", created_at) can seek the (mode, table) partition but
+-- must heap-fetch EVERY row in the partition to evaluate the level
+-- filter, because level is not in the index. With level as a key
+-- column the planner evaluates the filter from the index and heap-
+-- fetches only rows that pass it. The query as written still scans
+-- the whole (mode, table) partition (see the note below) — this index
+-- makes that scan cheap, it does not eliminate it.
+-- NOTE — the remaining scan, and the one-line fix that removes it:
+-- abs(q.level - me.level) <= window is NOT sargable: the planner
+-- cannot turn it into a range seek on level. Rewriting the predicate
+-- to `q.level BETWEEN me.level - window_size AND me.level + window_size`
+-- (a function change, deliberately NOT in this index-only file) turns
+-- this index into a true range seek: cost becomes O(rows in the level
+-- window) instead of O(rows in the band). At 10k queued players in one
+-- band that is the difference between a fast call and a slow one.
+-- After this index is live and verified in use, the old
+-- matchmaking_queue_lookup_idx (mode, "table", created_at) is redundant
+-- and can be dropped in a later migration (not here — drops are out of
+-- scope for this file).
+CREATE INDEX CONCURRENTLY IF NOT EXISTS matchmaking_queue_pairing_idx
+  ON public.matchmaking_queue (mode, "table", level, created_at);
+
+-- ------------------------------------------------- §2. For-me match poll
+-- Serves: poll_matches_for_me() — `player_ids @> ARRAY[me] AND status
+-- IN ('waiting','ready','playing') ORDER BY created_at DESC`, polled
+-- every tick while a player waits for a match. The existing GIN index
+-- matches_players_idx covers the array-contains, but it spans EVERY
+-- match the player ever played: at millions of matches the GIN scan
+-- visits all of a heavy player's finished matches and filters them by
+-- status afterwards. This partial GIN holds live matches only, so the
+-- hot poll stays small forever. The plain GIN is NOT redundant — the
+-- RLS policy `auth.uid() = ANY(player_ids)` runs the same array
+-- operation WITHOUT a status filter on every matches read (group poll,
+-- fetch-by-id), so it still needs the full index.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS matches_players_live_idx
+  ON public.matches USING gin (player_ids)
+  WHERE status IN ('waiting', 'ready', 'playing');
+
+-- ------------------------------------------------- §3. Outgoing invites
+-- Serves: list_outgoing_invites() — `from_id = ? AND status IN
+-- ('pending','accepted') ORDER BY created_at DESC` (invite restore
+-- after reconnect, and the invite list). The existing invites_to_idx
+-- covers only the INCOMING direction (to_id, ...); every outgoing
+-- query currently does a sequential scan. This is the exact mirror of
+-- invites_to_idx for the sender side.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS invites_from_idx
+  ON public.invites (from_id, status, created_at DESC);
+
+-- ------------------------------------------------- §4. Player name search
+-- Serves: search_players(q, exclude_id) — `display_name ILIKE
+-- '%q%' ORDER BY display_name LIMIT 20`. A leading-wildcard ILIKE
+-- cannot use a b-tree at all: today it is a sequential scan of
+-- profiles on every keystroke of friend search. A trigram GIN index
+-- makes substring search indexable. Requires pg_trgm — see the
+-- prerequisite at the top of this file (run CREATE EXTENSION first).
+-- At 1M profiles this index is large (trigrams are ~3-5x the text
+-- size) but it is the standard answer for substring search; if friend
+-- search ever becomes prefix-only, a plain b-tree on display_name
+-- would be smaller.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS profiles_display_name_trgm_idx
+  ON public.profiles USING gin (display_name gin_trgm_ops);
+
+-- ==========================================================================
+-- VERIFICATION (run after applying, in the same SQL editor session):
+--   1. All four exist and are VALID (indisvalid must be true for all):
+--      SELECT indexname, indexdef FROM pg_indexes
+--        WHERE schemaname = 'public'
+--        AND indexname IN ('matchmaking_queue_pairing_idx',
+--          'matches_players_live_idx', 'invites_from_idx',
+--          'profiles_display_name_trgm_idx');
+--      SELECT indexrelid::regclass AS index, indisvalid FROM pg_index
+--        WHERE indexrelid::regclass::text IN
+--        ('matchmaking_queue_pairing_idx', 'matches_players_live_idx',
+--         'invites_from_idx', 'profiles_display_name_trgm_idx');
+--      -- If any row shows indisvalid = false: DROP INDEX that one and
+--      -- re-run its CREATE INDEX CONCURRENTLY line.
+--   2. The planner uses them (run as a signed-in user if possible;
+--      the editor runs as postgres and bypasses RLS, so this checks
+--      the plan shape, not the RLS path):
+--      EXPLAIN SELECT * FROM public.matchmaking_queue
+--        WHERE mode = '2p' AND "table" = 0 AND abs(level - 5) <= 2
+--        ORDER BY created_at;
+--      -- Expect: Index Scan using matchmaking_queue_pairing_idx (a scan
+--      -- of the (mode, table) partition with the level filter applied
+--      -- from the index — NOT a Seq Scan). A true range seek needs the
+--      -- BETWEEN rewrite noted in §1; until then the plan still visits
+--      -- the whole partition, just without heap fetches for losers.
+--      EXPLAIN SELECT * FROM public.matches
+--        WHERE player_ids @> ARRAY['00000000-0000-0000-0000-000000000000'::uuid]
+--        AND status IN ('waiting','ready','playing');
+--      -- Expect: Bitmap Index Scan using matches_players_live_idx.
+--      EXPLAIN SELECT * FROM public.invites
+--        WHERE from_id = '00000000-0000-0000-0000-000000000000'::uuid
+--        AND status IN ('pending','accepted') ORDER BY created_at DESC;
+--      -- Expect: Index Scan using invites_from_idx.
+--      EXPLAIN SELECT id, display_name FROM public.profiles
+--        WHERE display_name ILIKE '%ana%' ORDER BY display_name LIMIT 20;
+--      -- Expect: Bitmap Index Scan using profiles_display_name_trgm_idx.
+-- ==========================================================================

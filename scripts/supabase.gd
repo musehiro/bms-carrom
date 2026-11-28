@@ -41,6 +41,12 @@ extends Node
 signal realtime_invite_changed(invite: Dictionary)
 signal realtime_connected
 signal realtime_failed(message: String)
+## Scale hardening (2026-11-28): a session refresh completed (new access
+## + refresh tokens) — Accounts persists the rotated tokens on this.
+signal session_refreshed
+## Scale hardening (2026-11-28): a refresh failed because the refresh
+## token itself is dead (invalid_grant) — the player must sign in again.
+signal session_refresh_invalid(message: String)
 ## v11 P2P (§1.4): a signalling message arrived on the match Broadcast
 ## channel — {type: offer|answer|ice|bye, from, sdp, ...}. Emitted
 ## after P2PSignalling.parse_message validation in _handle_realtime_text.
@@ -117,6 +123,19 @@ var refresh_token := "" # GoTrue refresh token ("" = none) — persisted by
 ## Accounts (Save) so a restart can restore the session; GoTrue rotates
 ## it on every refresh, so the stored value is rewritten each time.
 var user_id := "" # Supabase Auth user id ("" = none)
+## Scale hardening (2026-11-28): unix time the access token expires
+## (the JWT "exp" claim, read in _set_session). 0 = unknown (the token
+## is not a decodable JWT — e.g. the test mock's "tok-<uid>"). The
+## proactive refresh (ensure_fresh_session) fires ~5 min before this.
+var session_expires_at := 0
+## Scale hardening (2026-11-28): refresh 5 min before the access token
+## expires, so a session open >1 h never starts 401-ing on every poll.
+const TOKEN_REFRESH_LEAD_SECONDS := 300
+## Scale hardening (2026-11-28): the 401-retry single-flight flag +
+## the earliest unix time another refresh may be attempted (a failed
+## refresh backs off 60 s instead of retrying on every 401'd request).
+var _refresh_in_flight := false
+var _refresh_next_try_at := 0
 
 var _ws: WebSocketPeer = null
 var _ws_want := false
@@ -284,7 +303,7 @@ static func _http_method_name(method: int) -> String:
 ## queue insert surfaced the "(connection failed)" DEFAULT because a
 ## caller got a dict with no error key at all — that must never happen
 ## again; a transport failure names its HTTPRequest result code).
-func _http(method: int, path: String, body: Dictionary = {}, auth: bool = true, extra_headers: PackedStringArray = PackedStringArray(), timeout_sec: float = 15.0) -> Dictionary:
+func _http(method: int, path: String, body: Dictionary = {}, auth: bool = true, extra_headers: PackedStringArray = PackedStringArray(), timeout_sec: float = 15.0, _allow_401_retry: bool = true) -> Dictionary:
 	if not configured:
 		return {"ok": false, "status": 0, "data": null, "error": "Supabase is not configured yet (backend_config.json is empty)."}
 	var req := HTTPRequest.new()
@@ -313,6 +332,18 @@ func _http(method: int, path: String, body: Dictionary = {}, auth: bool = true, 
 		print("[HTTP] request failed: %s %s result=%d (%s)" % [_http_method_name(method), url, result, rname])
 		return {"ok": false, "status": 0, "data": null, "error": "Connection failed (%s)." % rname}
 	var status := int(res[1])
+	# Scale hardening (2026-11-28): a 401 on an authenticated call
+	# means the access token expired mid-session (GoTrue JWTs live
+	# 1 h). Refresh once and retry the SAME request once with the new
+	# token instead of failing every poll until the next restart. The
+	# retry is single-flight + backoff-guarded inside
+	# _refresh_session_once, and never recurses (the retry passes
+	# _allow_401_retry=false; the token endpoint itself is excluded
+	# by should_retry_after_401). A failed refresh returns the
+	# original 401 — the caller sees the same error as before.
+	if should_retry_after_401(status, auth, path, _allow_401_retry):
+		if await _refresh_session_once():
+			return await _http(method, path, body, auth, extra_headers, timeout_sec, false)
 	var raw: PackedByteArray = res[3]
 	var text := raw.get_string_from_utf8()
 	var data: Variant = JSON.parse_string(text) if text != "" else null
@@ -333,6 +364,11 @@ func _http(method: int, path: String, body: Dictionary = {}, auth: bool = true, 
 
 func _set_session(session: Dictionary) -> void:
 	access_token = String(session.get("access_token", ""))
+	# Scale hardening (2026-11-28): track the token expiry for the
+	# proactive mid-session refresh (ensure_fresh_session). A token
+	# with no decodable "exp" leaves the expiry unknown (0) — the
+	# 401-retry path in _http is the backstop for those.
+	session_expires_at = jwt_exp(access_token)
 	# GoTrue rotates the refresh token on refresh — keep the new one.
 	# A response without one (never in practice) keeps the old token
 	# instead of blanking it.
@@ -478,6 +514,22 @@ static func jwt_sub(token: String) -> String:
 		return String(payload.get("sub", ""))
 	return ""
 
+## The "exp" (expiry, unix seconds) inside a JWT access token. Pure —
+## no network. 0 when the token is not a decodable JWT or carries no
+## "exp" (the test mock's "tok-<uid>" tokens) — the caller treats 0 as
+## "expiry unknown", never as "already expired".
+static func jwt_exp(token: String) -> int:
+	var parts := token.split(".")
+	if parts.size() != 3:
+		return 0
+	var payload_b64: String = parts[1].replace("-", "+").replace("_", "/")
+	while payload_b64.length() % 4 != 0:
+		payload_b64 += "="
+	var payload: Variant = JSON.parse_string(Marshalls.base64_to_raw(payload_b64).get_string_from_utf8())
+	if payload is Dictionary:
+		return int(payload.get("exp", 0))
+	return 0
+
 ## The refresh-token grant path (GoTrue). Pure — unit-tested.
 static func refresh_token_path() -> String:
 	return "/auth/v1/token?grant_type=refresh_token"
@@ -496,11 +548,91 @@ func refresh_session(refresh_token_value: String) -> Dictionary:
 	var res := await _http(HTTPClient.METHOD_POST, refresh_token_path(),
 		{"refresh_token": refresh_token_value}, false, PackedStringArray(), 8.0)
 	if not bool(res["ok"]):
+		# Scale hardening (2026-11-28): a dead refresh token is not a
+		# transient failure — no retry will fix it, and the player
+		# must sign in again. Surface it on its own signal so
+		# Accounts can say so (lobby "sign in again") instead of
+		# silently 401-ing every call until the next restart.
+		if looks_like_invalid_refresh_token(res):
+			session_refresh_invalid.emit(String(res.get("error", "Invalid refresh token.")))
 		return res
 	_set_session(res["data"] if res["data"] is Dictionary else {})
 	if access_token == "" or user_id == "":
 		return {"ok": false, "status": int(res["status"]), "data": res["data"], "error": "Session refresh did not return a session."}
+	# The refresh rotated both tokens — Accounts persists them on
+	# this signal (a restart must restore with the NEW refresh token;
+	# GoTrue revokes the old one).
+	session_refreshed.emit()
 	return {"ok": true, "status": int(res["status"]), "data": res["data"], "error": ""}
+
+## True when a GoTrue refresh failure says the refresh token itself is
+## dead ("Invalid refresh token." / invalid_grant) — as opposed to a
+## transient failure (network, 5xx) that a later retry may fix. Pure —
+## unit-tested. Only a dead token sets the must-sign-in-again state.
+static func looks_like_invalid_refresh_token(res: Dictionary) -> bool:
+	if int(res.get("status", 0)) != 400:
+		return false
+	var msg := String(res.get("error", "")).to_lower()
+	return msg.contains("invalid refresh token") or msg.contains("invalid_grant") or msg.contains("refresh token not found")
+
+## True when a 401 on an authenticated call is worth one refresh +
+## retry (the _http backstop). Pure — unit-tested. The token endpoint
+## itself is excluded (a 401 there IS the refresh failing — retrying
+## it would loop), as are unauthenticated calls (no session to refresh)
+## and retries (exactly one retry per request).
+static func should_retry_after_401(status: int, auth: bool, path: String, allow_retry: bool) -> bool:
+	return allow_retry and auth and status == 401 and not path.begins_with("/auth/v1/token")
+
+## True when the session should be refreshed NOW: a live access token
+## whose expiry is known and less than TOKEN_REFRESH_LEAD_SECONDS
+## away. Unknown expiry (0) is false — with no "exp" to read there is
+## nothing to schedule, and the 401-retry path is the backstop.
+func session_needs_refresh() -> bool:
+	if access_token == "" or session_expires_at <= 0:
+		return false
+	return int(Time.get_unix_time_from_system()) >= session_expires_at - TOKEN_REFRESH_LEAD_SECONDS
+
+## Proactively refresh the session when it is about to expire (the
+## mid-session refresh — called by Accounts' 60 s check, and by _http
+## after a 401). Returns true when no refresh was needed or the
+## refresh succeeded, false when a refresh was due but could not be
+## done. Never loops: a failed attempt backs off 60 s (see
+## _refresh_next_try_at) and a concurrent attempt waits for the one
+## already in flight instead of starting a second refresh.
+func ensure_fresh_session() -> bool:
+	if not session_needs_refresh():
+		return true
+	return await _refresh_session_once()
+
+## One refresh attempt, single-flight + backoff-guarded. When another
+## refresh is already in flight, waits for it (up to 10 s) and reports
+## whether the session came back live. When the last attempt failed
+## recently, returns false at once instead of hammering GoTrue on
+## every 401'd request. Never throws.
+func _refresh_session_once() -> bool:
+	if _refresh_in_flight:
+		var waited := 0.0
+		while _refresh_in_flight and waited < 10.0:
+			await get_tree().create_timer(0.1).timeout
+			waited += 0.1
+		return access_token != "" and not session_needs_refresh()
+	if int(Time.get_unix_time_from_system()) < _refresh_next_try_at:
+		return false
+	if refresh_token == "":
+		return false
+	_refresh_in_flight = true
+	var res := await refresh_session(refresh_token)
+	_refresh_in_flight = false
+	if bool(res.get("ok", false)):
+		print("[AUTH] session refreshed (mid-session, before expiry)")
+		return true
+	# Back off 60 s: a failing refresh must not be retried on every
+	# poll tick (a dead network would turn every 2 s poll into a
+	# refresh attempt). A dead refresh token is signalled separately
+	# by refresh_session (session_refresh_invalid).
+	_refresh_next_try_at = int(Time.get_unix_time_from_system()) + 60
+	print("[AUTH] session refresh failed (%s) — backing off 60 s" % String(res.get("error", "unknown error")))
+	return false
 
 ## Adopt tokens received out-of-band (a pasted implicit-flow link).
 ## Sets the session from the access token; the caller still needs the
@@ -513,6 +645,7 @@ func set_session_from_tokens(access_token_value: String, refresh_token_value: St
 		return false
 	access_token = access_token_value
 	refresh_token = refresh_token_value
+	session_expires_at = jwt_exp(access_token_value)
 	user_id = sub
 	return true
 
@@ -798,16 +931,66 @@ func delete_presence(my_id: String) -> Dictionary:
 	return await _http(HTTPClient.METHOD_DELETE,
 		"/rest/v1/presence?id=eq.%s" % my_id.uri_encode(), {}, true)
 
-## All presence rows, newest first. The caller filters out rows older
-## than ~90 s (presence_age_seconds) and never shows Gmail/coins —
-## the table holds name + level + status only, by design.
-func list_presence() -> Dictionary:
-	var res := await _http(HTTPClient.METHOD_GET,
-		"/rest/v1/presence?select=*&order=updated_at.desc", {}, true)
+## All presence rows, newest first — BOUNDED (scale hardening,
+## 2026-11-28): the old call fetched the WHOLE presence table
+## unpaginated every 10 s in the lobby (an egress bomb at 10k
+## players). The query now filters server-side to rows updated in the
+## last PRESENCE_FRESH_SECONDS, caps at PRESENCE_MAX_ROWS, and — when
+## the viewer's level is known — to the viewer's level band (±4, the
+## same band find_match plays in). The client still clamps to
+## PRESENCE_MAX_ROWS (a server that ignores `limit` cannot blow the
+## list up) and the caller still drops stale rows (Friends
+## filter_online_players) as a second net.
+const PRESENCE_MAX_ROWS := 50
+const PRESENCE_FRESH_SECONDS := 90
+const PRESENCE_LEVEL_BAND := 4
+
+## The PostgREST path for list_presence. Pure — unit-tested.
+## `now_unix` is a test seam (defaults to now): the freshness cutoff
+## is now - PRESENCE_FRESH_SECONDS.
+static func presence_list_path(my_level: int = 0, now_unix: int = -1) -> String:
+	var now := now_unix if now_unix >= 0 else int(Time.get_unix_time_from_system())
+	var since_iso := Time.get_datetime_string_from_unix_time(now - PRESENCE_FRESH_SECONDS, true).replace(" ", "T") + "+00:00"
+	var path := "/rest/v1/presence?select=id,display_name,level,status,updated_at&updated_at=gt.%s&order=updated_at.desc&limit=%d" % [since_iso.uri_encode(), PRESENCE_MAX_ROWS]
+	if my_level > 0:
+		path += "&level=gte.%d&level=lte.%d" % [maxi(1, my_level - PRESENCE_LEVEL_BAND), my_level + PRESENCE_LEVEL_BAND]
+	return path
+
+func list_presence(my_level: int = 0) -> Dictionary:
+	var res := await _http(HTTPClient.METHOD_GET, presence_list_path(my_level), {}, true)
 	if not bool(res["ok"]):
 		return res
-	return {"ok": true, "status": int(res["status"]),
-		"data": res["data"] if res["data"] is Array else [], "error": ""}
+	var rows: Array = res["data"] if res["data"] is Array else []
+	if rows.size() > PRESENCE_MAX_ROWS:
+		rows = rows.slice(0, PRESENCE_MAX_ROWS)
+	return {"ok": true, "status": int(res["status"]), "data": rows, "error": ""}
+
+## Opportunistic stale-matchmaking cleanup (scale hardening,
+## 2026-11-28): POST /rest/v1/rpc/cleanup_stale_matchmaking — no args,
+## returns jsonb {ok, expired_matches, deleted_queue_rows,
+## expired_invites}. The SQL worker owns the function; until it is
+## deployed PostgREST answers 404 ("function does not exist") — the
+## caller (Net._maybe_cleanup_stale_matchmaking) treats that as a
+## silent no-op via is_cleanup_rpc_missing, never an error. Best-effort
+## only: the result is logged, never surfaced to the player.
+func call_cleanup_stale_matchmaking() -> Dictionary:
+	var res := await _http(HTTPClient.METHOD_POST, "/rest/v1/rpc/cleanup_stale_matchmaking", {}, true)
+	if bool(res.get("ok", false)):
+		var data: Dictionary = res.get("data", {}) if res.get("data") is Dictionary else {}
+		print("[MATCH] cleanup_stale_matchmaking ok=%s expired_matches=%s deleted_queue_rows=%s expired_invites=%s" % [
+			str(data.get("ok", false)), str(data.get("expired_matches", "?")),
+			str(data.get("deleted_queue_rows", "?")), str(data.get("expired_invites", "?"))])
+	return res
+
+## True when a cleanup-RPC result means "the function is not deployed
+## yet" (404, or GoTrue/PostgREST's "function does not exist" /
+## PGRST202). Pure — unit-tested. Any other failure is a real error
+## (logged, not fatal — the cleanup is best-effort).
+static func is_cleanup_rpc_missing(res: Dictionary) -> bool:
+	if int(res.get("status", 0)) == 404:
+		return true
+	var msg := String(res.get("error", "")).to_lower()
+	return msg.contains("does not exist") or msg.contains("pgrst202") or msg.contains("could not find the function")
 
 ## Seconds since an ISO timestamp (Supabase "2026-11-22T13:00:00+00:00").
 ## -1 when it cannot be parsed. Pure — used for presence staleness
@@ -858,6 +1041,13 @@ func disconnect_realtime() -> void:
 	if _ws != null:
 		_ws.close()
 		_ws = null
+
+## Scale hardening (2026-11-28): true when the Realtime socket is
+## currently open. Friends uses this to decide whether a reconnect
+## attempt is needed — an open socket whose join reply is still in
+## flight must NOT be torn down and re-opened every 60 s.
+func realtime_is_open() -> bool:
+	return _ws != null and _ws.get_ready_state() == WebSocketPeer.STATE_OPEN
 
 func _join_realtime_channel() -> void:
 	if _ws == null:

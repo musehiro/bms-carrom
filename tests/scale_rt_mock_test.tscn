@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://bmscarromscalrtmock"]
+
+[ext_resource type="Script" path="res://tests/scale_rt_mock_test_node.gd" id="1"]
+
+[node name="ScaleRtMockTest" type="Node"]
+script = ExtResource("1")

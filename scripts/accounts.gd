@@ -58,6 +58,15 @@ signal return_listener_failed(message: String)
 
 const OTP_CODE_LEN := 6
 
+## Scale hardening (2026-11-28): how often the mid-session refresh
+## check runs (the check itself is cheap — it only calls GoTrue when
+## the token is <5 min from expiry). A session open >1 h used to start
+## 401-ing on every poll; the check refreshes proactively instead.
+const SESSION_REFRESH_CHECK_SECONDS := 60.0
+
+var _refresh_check_timer := 0.0 # accumulates to SESSION_REFRESH_CHECK_SECONDS
+var _refresh_check_busy := false # a refresh attempt is in flight
+
 var _loopback: TCPServer = null
 var _loopback_conn: StreamPeerTCP = null
 var _loopback_verifier := ""
@@ -78,6 +87,14 @@ var _file_poll_accum := 0.0 # throttle for the deep-link file poll
 var session_refresh_failed := false
 
 func _ready() -> void:
+	# Scale hardening (2026-11-28): every successful refresh — the
+	# startup restore, the proactive mid-session check below, or the
+	# 401-retry inside Supabase._http — rotates BOTH tokens, so the
+	# rotated values must be persisted at once (a restart restores
+	# with the NEW refresh token; GoTrue revokes the old one). A dead
+	# refresh token surfaces separately: the player must sign in again.
+	Supabase.session_refreshed.connect(_persist_session)
+	Supabase.session_refresh_invalid.connect(_on_session_refresh_invalid)
 	# Resume a browser return that was interrupted by the app being
 	# killed while the browser was open: the PKCE verifier was
 	# persisted in Save, and the deep link (if it arrived) is waiting
@@ -116,6 +133,20 @@ func _ready() -> void:
 		_restart_loopback_listener()
 
 func _process(delta: float) -> void:
+	# Scale hardening (2026-11-28): mid-session token refresh. The
+	# check runs every 60 s and only calls GoTrue when the access
+	# token is <5 min from expiry (Supabase.session_needs_refresh) —
+	# a session open >1 h used to 401 on every poll until the next
+	# restart. ensure_fresh_session never loops (single-flight +
+	# 60 s backoff inside Supabase); a failed refresh just retries
+	# at the next check, and a dead refresh token sets
+	# session_refresh_failed via _on_session_refresh_invalid.
+	if Supabase.configured and Supabase.access_token != "" and Supabase.refresh_token != "":
+		_refresh_check_timer += delta
+		if _refresh_check_timer >= SESSION_REFRESH_CHECK_SECONDS and not _refresh_check_busy:
+			_refresh_check_timer = 0.0
+			if Supabase.session_needs_refresh():
+				_maybe_refresh_session()
 	if _loopback != null:
 		if _loopback_conn == null and _loopback.is_connection_available():
 			_loopback_conn = _loopback.take_connection()
@@ -205,6 +236,28 @@ func is_google_pending() -> bool:
 
 func is_return_pending() -> bool:
 	return _google_pending
+
+## Fire-and-forget wrapper for the proactive mid-session refresh
+## (called from _process WITHOUT await — _process itself must never
+## suspend on a network call). The busy flag stops a second attempt
+## starting while one is in flight; ensure_fresh_session handles the
+## backoff, and _persist_session runs via the session_refreshed signal.
+func _maybe_refresh_session() -> void:
+	if _refresh_check_busy:
+		return
+	_refresh_check_busy = true
+	var _ok := await Supabase.ensure_fresh_session()
+	_refresh_check_busy = false
+
+## The refresh token itself is dead (GoTrue invalid_grant) — no retry
+## will fix it. The player must sign in again: flag it (the lobby says
+## so instead of showing a silent empty list) and log it. The
+## in-memory tokens are left alone — the next launch's restore fails
+## the same way and clears them then; signing the player out
+## mid-session here would be worse than the flag.
+func _on_session_refresh_invalid(message: String) -> void:
+	session_refresh_failed = true
+	push_warning("Session refresh failed (%s) — the player must sign in again." % message)
 
 ## Test helper: the PKCE verifier of the pending browser return ("" when
 ## none). Lets tests prove a resend reuses the verifier (L5) instead of

@@ -18,9 +18,23 @@ the Godot client (scripts/supabase.gd) to run its full flow against it:
   v11 P2P: GET/POST/DELETE /rest/v1/matchmaking_queue (upsert by id)
            GET/PATCH /rest/v1/matches (filters: player_ids cs.{id}, group_id, status)
            POST /rest/v1/rpc/find_match {p_mode, p_widen} (atomic pairing,
-             ±2 / ±4 window, stake validated against profiles.coins)
+             ±2 / ±4 window, stake validated against profiles.coins;
+             the whole read+insert holds the state lock, mirroring the
+             SQL FOR UPDATE + FOR UPDATE SKIP LOCKED in
+             supabase/migrations/2026-11-28-find-match-lock.sql)
            POST /rest/v1/rpc/create_match_from_invites {p_group_id}
-             (idempotent; all invites must be accepted)
+             (idempotent under concurrency — the whole check+insert
+             holds the state lock, mirroring the live advisory lock +
+             unique index applied 2026-11-28 06:03; an existing match
+             counts only when its status is live
+             (waiting/ready/playing), mirroring
+             supabase/migrations/2026-11-28-invite-match-status-filter.sql)
+           POST /rest/v1/rpc/cleanup_stale_matchmaking {} (no args;
+             deletes queue rows older than 10 min, expires 'waiting'
+             matches older than 10 min and 'pending' invites older
+             than 24 h; returns {ok, expired_matches,
+             deleted_queue_rows, expired_invites} — mirror of
+             supabase/migrations/2026-11-28-matchmaking-cleanup.sql)
            GET/POST/DELETE /rest/v1/presence (upsert by id)
            Fake Broadcast: a "broadcast" event on a realtime:carrom-match-*
              topic is stored + re-emitted to every WS client as a
@@ -34,6 +48,10 @@ Run: python3 tests/mock_supabase.py --port 18080
 Health: GET /health -> {"ok": true}
 Test seams: POST /__test__/otp_redirect_fail {"enabled": bool} — reject
 OTP requests that carry redirect_to (fresh-project behaviour).
+POST /__test__/set_created_at {"table": "matches" | "matchmaking_queue"
+| "invites", "id": <row id>, "created_at": <ISO timestamp>} — backdate
+one row so the cleanup RPC can be exercised without waiting 10 min /
+24 h (scale round, 2026-11-28).
 """
 
 import argparse
@@ -42,9 +60,8 @@ import hashlib
 import json
 import struct
 import threading
-import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -155,35 +172,53 @@ def broadcast_signal(channel, msg):
         ws_send_text(sock, wire)
 
 
+# Live match statuses, shared by the invite RPC and the cleanup RPC:
+# the same triple the partial unique index matches_one_live_per_group
+# and the client polls use (waiting/ready/playing).
+LIVE_MATCH_STATUSES = ("waiting", "ready", "playing")
+
+
+def _parse_ts(value):
+    """Parse a mock created_at ISO string; None when missing/unparseable
+    (such rows are never treated as stale)."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
 def find_match_impl(mode, widen):
-    """Mirror of schema-p2p.sql find_match (mock): pair the caller
-    (the single queue row that called first is 'me' — the mock has no
+    """Mirror of the FIXED find_match
+    (supabase/migrations/2026-11-28-find-match-lock.sql): the whole
+    read+insert runs under one lock, mirroring the SQL FOR UPDATE on
+    the caller's row + FOR UPDATE SKIP LOCKED on the opponents — two
+    concurrent calls can never pair the same players. The mock has no
     auth, so the caller is identified by the most recent queue row
     when only one caller exists; the tests call it per-player via the
     queue rows directly). Returns the RPC dict."""
     with STATE.lock:
         rows = sorted(STATE.queue.values(), key=lambda r: r["created_at"])
-    if not rows:
-        return {"matched": False, "error": "You are not in the queue."}
-    me = rows[0]
-    window = 4 if widen else 2
-    need = 3 if mode == "4p" else 1
-    others = [r for r in rows[1:]
-              if r["mode"] == mode and r["table"] == me["table"]
-              and abs(r["level"] - me["level"]) <= window]
-    if len(others) < need:
-        return {"matched": False}
-    group = [me] + others[:need]
-    for r in group:
-        prof = STATE.profiles.get(r["id"], {})
-        if r["stake"] < 0 or r["stake"] > prof.get("coins", 0):
-            with STATE.lock:
+        if not rows:
+            return {"matched": False, "error": "You are not in the queue."}
+        me = rows[0]
+        window = 4 if widen else 2
+        need = 3 if mode == "4p" else 1
+        others = [r for r in rows[1:]
+                  if r["mode"] == mode and r["table"] == me["table"]
+                  and abs(r["level"] - me["level"]) <= window]
+        if len(others) < need:
+            return {"matched": False}
+        group = [me] + others[:need]
+        for r in group:
+            prof = STATE.profiles.get(r["id"], {})
+            if r["stake"] < 0 or r["stake"] > prof.get("coins", 0):
                 STATE.queue.pop(r["id"], None)
-            return {"matched": False, "error": "A player staked more coins than they own."}
-    players = [{"id": r["id"], "name": r["display_name"], "level": r["level"],
-                "stake": r["stake"], "seat": i} for i, r in enumerate(group)]
-    match_id = str(uuid.uuid4())
-    with STATE.lock:
+                return {"matched": False, "error": "A player staked more coins than they own."}
+        players = [{"id": r["id"], "name": r["display_name"], "level": r["level"],
+                    "stake": r["stake"], "seat": i} for i, r in enumerate(group)]
+        match_id = str(uuid.uuid4())
         STATE.matches.append({
             "id": match_id, "group_id": None, "mode": mode,
             "table": me["table"],
@@ -192,53 +227,87 @@ def find_match_impl(mode, widen):
             "created_at": now_iso()})
         for r in group:
             STATE.queue.pop(r["id"], None)
-    return {"matched": True, "match_id": match_id, "players": players}
+        return {"matched": True, "match_id": match_id, "players": players}
+
+
+def cleanup_stale_matchmaking_impl():
+    """Mirror of supabase/migrations/2026-11-28-matchmaking-cleanup.sql:
+    delete queue rows older than 10 min; expire 'waiting' matches
+    older than 10 min (never delete match rows — history); expire
+    'pending' invites older than 24 h. Returns the RPC dict."""
+    now = datetime.now(timezone.utc)
+    with STATE.lock:
+        stale_queue = [pid for pid, r in STATE.queue.items()
+                       if (ts := _parse_ts(r.get("created_at"))) is not None
+                       and now - ts > timedelta(minutes=10)]
+        for pid in stale_queue:
+            STATE.queue.pop(pid, None)
+        expired_matches = 0
+        for m in STATE.matches:
+            ts = _parse_ts(m.get("created_at"))
+            if (m.get("status") == "waiting" and ts is not None
+                    and now - ts > timedelta(minutes=10)):
+                m["status"] = "expired"
+                expired_matches += 1
+        expired_invites = 0
+        for inv in STATE.invites:
+            ts = _parse_ts(inv.get("created_at"))
+            if (inv.get("status") == "pending" and ts is not None
+                    and now - ts > timedelta(hours=24)):
+                inv["status"] = "expired"
+                expired_invites += 1
+    return {"ok": True, "expired_matches": expired_matches,
+            "deleted_queue_rows": len(stale_queue),
+            "expired_invites": expired_invites}
 
 
 def create_match_from_invites_impl(group_id):
+    """Mirror of the GUARDED create_match_from_invites (live guard
+    applied 2026-11-28 06:03 + status filter in
+    2026-11-28-invite-match-status-filter.sql): the whole
+    existing-match check + validation + insert runs under one lock,
+    mirroring the SQL advisory lock + partial unique index, so
+    concurrent calls for a group return the same match instead of
+    inserting duplicates. An existing match counts only when its
+    status is live (waiting/ready/playing); an expired/finished one
+    is invisible, so a fresh match is created after expiry."""
     with STATE.lock:
-        existing = [m for m in STATE.matches if m.get("group_id") == group_id]
+        existing = [m for m in STATE.matches
+                    if m.get("group_id") == group_id
+                    and m.get("status") in LIVE_MATCH_STATUSES]
         if existing:
             m = existing[0]
             return {"ok": True, "match_id": m["id"], "players": m["players"]}
         inv_rows = sorted([r for r in STATE.invites if r["group_id"] == group_id],
                           key=lambda r: r["created_at"])
-    if not inv_rows:
-        return {"ok": False, "error": "No invites in this group."}
-    if any(r["status"] != "accepted" for r in inv_rows):
-        return {"ok": False, "error": "Not everyone has accepted yet."}
-    inviter_id = inv_rows[0]["from_id"]
-    inviter_name = inv_rows[0]["from_name"]
-    inviter_stake = inv_rows[0]["stake"]
-    prof = STATE.profiles.get(inviter_id, {})
-    inviter_level = int(prof.get("xp", 0)) // 500 + 1
-    if inviter_stake < 0 or inviter_stake > prof.get("coins", 0):
-        return {"ok": False, "error": "The inviter staked more coins than they own."}
-    players = [{"id": inviter_id, "name": inviter_name, "level": inviter_level,
-                "stake": inviter_stake, "seat": 0}]
-    ids = [inviter_id]
-    for i, inv in enumerate(inv_rows):
-        p = STATE.profiles.get(inv["to_id"], {})
-        if inv["stake"] < 0 or inv["stake"] > p.get("coins", 0):
-            return {"ok": False, "error": "A player staked more coins than they own."}
-        players.append({"id": inv["to_id"], "name": inv["to_name"],
-                        "level": int(p.get("xp", 0)) // 500 + 1,
-                        "stake": inv["stake"], "seat": i + 1})
-        ids.append(inv["to_id"])
-    match_id = str(uuid.uuid4())
-    # Round 4: model the live function's multi-query validation window.
-    # The live RPC runs several SELECTs between its existing-match
-    # check and its INSERT, so two concurrent calls both pass the
-    # check and both insert. Without this sleep the mock's append is
-    # instant and the race almost never reproduces; with it, an
-    # unfixed client double-fire deterministically makes 2 matches.
-    time.sleep(0.05)
-    with STATE.lock:
+        if not inv_rows:
+            return {"ok": False, "error": "No invites in this group."}
+        if any(r["status"] != "accepted" for r in inv_rows):
+            return {"ok": False, "error": "Not everyone has accepted yet."}
+        inviter_id = inv_rows[0]["from_id"]
+        inviter_name = inv_rows[0]["from_name"]
+        inviter_stake = inv_rows[0]["stake"]
+        prof = STATE.profiles.get(inviter_id, {})
+        inviter_level = int(prof.get("xp", 0)) // 500 + 1
+        if inviter_stake < 0 or inviter_stake > prof.get("coins", 0):
+            return {"ok": False, "error": "The inviter staked more coins than they own."}
+        players = [{"id": inviter_id, "name": inviter_name, "level": inviter_level,
+                    "stake": inviter_stake, "seat": 0}]
+        ids = [inviter_id]
+        for i, inv in enumerate(inv_rows):
+            p = STATE.profiles.get(inv["to_id"], {})
+            if inv["stake"] < 0 or inv["stake"] > p.get("coins", 0):
+                return {"ok": False, "error": "A player staked more coins than they own."}
+            players.append({"id": inv["to_id"], "name": inv["to_name"],
+                            "level": int(p.get("xp", 0)) // 500 + 1,
+                            "stake": inv["stake"], "seat": i + 1})
+            ids.append(inv["to_id"])
+        match_id = str(uuid.uuid4())
         STATE.matches.append({
             "id": match_id, "group_id": group_id, "mode": inv_rows[0]["mode"],
             "table": 0, "player_ids": ids, "players": players,
             "status": "waiting", "created_at": now_iso()})
-    return {"ok": True, "match_id": match_id, "players": players}
+        return {"ok": True, "match_id": match_id, "players": players}
 
 
 def ws_recv_frame(rfile):
@@ -411,6 +480,36 @@ class Handler(BaseHTTPRequestHandler):
             STATE.otp_redirect_fail = bool(body.get("enabled", False))
             self._json(200, {"ok": True, "enabled": STATE.otp_redirect_fail})
             return
+        if path == "/__test__/set_created_at":
+            # Test seam (scale round, 2026-11-28): backdate one row's
+            # created_at so cleanup_stale_matchmaking can be exercised
+            # without waiting 10 min / 24 h. Body: {"table":
+            # "matches" | "matchmaking_queue" | "invites", "id": row id,
+            # "created_at": ISO timestamp}.
+            table = str(body.get("table", ""))
+            row_id = str(body.get("id", ""))
+            ts = str(body.get("created_at", ""))
+            updated = False
+            with STATE.lock:
+                if table == "matches":
+                    for row in STATE.matches:
+                        if row["id"] == row_id:
+                            row["created_at"] = ts
+                            updated = True
+                elif table == "matchmaking_queue":
+                    if row_id in STATE.queue:
+                        STATE.queue[row_id]["created_at"] = ts
+                        updated = True
+                elif table == "invites":
+                    for row in STATE.invites:
+                        if row["id"] == row_id:
+                            row["created_at"] = ts
+                            updated = True
+            if not updated:
+                self._json(404, {"msg": "row not found"})
+                return
+            self._json(200, {"ok": True})
+            return
         if path == "/auth/v1/otp":
             email = str(body.get("email", "")).strip().lower()
             if STATE.otp_redirect_fail and "redirect_to" in parsed.query:
@@ -513,6 +612,13 @@ class Handler(BaseHTTPRequestHandler):
             with STATE.lock:
                 STATE.rpc_counts["create_match_from_invites"] = STATE.rpc_counts.get("create_match_from_invites", 0) + 1
             self._json(200, create_match_from_invites_impl(str(body.get("p_group_id", ""))))
+            return
+        if path == "/rest/v1/rpc/cleanup_stale_matchmaking":
+            # No args; returns {ok, expired_matches, deleted_queue_rows,
+            # expired_invites} (mirror of 2026-11-28-matchmaking-cleanup.sql).
+            with STATE.lock:
+                STATE.rpc_counts["cleanup_stale_matchmaking"] = STATE.rpc_counts.get("cleanup_stale_matchmaking", 0) + 1
+            self._json(200, cleanup_stale_matchmaking_impl())
             return
         if path == "/rest/v1/invites":
             row = dict(body)
@@ -639,11 +745,23 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
 
+class Server(ThreadingHTTPServer):
+    # Scale round (worker 3's probe): the default listen backlog
+    # (ThreadingHTTPServer.request_queue_size = 5) drops connections
+    # at ~250 simultaneous clients. 1024 lets the scale drivers'
+    # 600-way bursts through (600 simultaneous SYNs still reset a
+    # few connections at 128 — the accept loop cannot drain that
+    # fast); the mock is test-only, so a generous backlog costs
+    # nothing. Kernel somaxconn on this VM is 4096, so 1024 is
+    # honoured.
+    request_queue_size = 1024
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=18080)
     args = ap.parse_args()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = Server(("127.0.0.1", args.port), Handler)
     print("MOCK_SUPABASE_READY %d" % args.port, flush=True)
     server.serve_forever()
 
